@@ -1,0 +1,28 @@
+-- Create table for Sewing Thread Reports
+CREATE TABLE IF NOT EXISTS sewing_thread_reports (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    sample_description VARCHAR(255) NOT NULL,
+    sample_received_from VARCHAR(255) NOT NULL,
+    sample_collected_from VARCHAR(255) NOT NULL,
+    reference VARCHAR(255) NOT NULL,
+    received_date DATETIME NOT NULL,
+    test_start_date DATE NOT NULL,
+    test_end_date DATE NOT NULL,
+    others_information TEXT,
+    test_temperature DECIMAL(10,2) NOT NULL,
+    rh_percent DECIMAL(5,2) NOT NULL,
+    denier_result DECIMAL(10,2),
+    denier_remarks TEXT,
+    tenacity_result DECIMAL(10,2),
+    tenacity_remarks TEXT,
+    std_deviation_result DECIMAL(10,2),
+    std_deviation_remarks TEXT,
+    cv_percent_result DECIMAL(10,2),
+    cv_percent_remarks TEXT,
+    elongation_result DECIMAL(10,2),
+    elongation_remarks TEXT,
+    reporter_id INT,
+    reporter_name VARCHAR(255),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
