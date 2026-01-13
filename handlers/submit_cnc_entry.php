@@ -76,7 +76,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
         
         if ($stmt->execute()) {
             $stmt->close();
-            header("Location: ../forms/cnc_entry.php?success=cnc_entry_saved_plain");
+            header("Location: ../forms/cnc_entry.php?success=cnc_entry_saved_plain&entry_id=" . urlencode($cnc_id));
             exit();
         } else {
             $error_msg = "Insert failed: " . $stmt->error;

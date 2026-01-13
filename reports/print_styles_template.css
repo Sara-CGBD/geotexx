@@ -1,0 +1,112 @@
+/* Standard Print Styles for All Reports
+ * This template ensures all report content fits within the printable page area
+ */
+
+@media print {
+    * { box-sizing: border-box; }
+    
+    /* Reset body and container */
+    body { 
+        background: white !important; 
+        padding: 10px !important; 
+        margin: 0 !important;
+        font-size: 10px !important;
+    }
+    
+    .container { 
+        box-shadow: none !important; 
+        padding: 10px !important;
+        margin: 0 !important;
+        max-width: 100% !important;
+    }
+    
+    /* Hide non-essential elements */
+    .filters, .export-btn, .stats-grid, .back-link, .tabs, .print-btn, 
+    .filter-btn, .reset-btn, button, .no-print { 
+        display: none !important; 
+    }
+    
+    /* Show tab content */
+    .tab-content { display: block !important; }
+    
+    /* Typography adjustments */
+    h1 { font-size: 16px !important; margin: 5px 0 !important; }
+    h2 { font-size: 14px !important; margin: 8px 0 !important; }
+    .subtitle { font-size: 10px !important; margin: 5px 0 10px !important; }
+    .section-title { 
+        font-size: 12px !important; 
+        margin: 10px 0 5px !important; 
+        padding-bottom: 5px !important; 
+    }
+    
+    /* Sections */
+    .section { 
+        margin-bottom: 15px !important;
+        page-break-inside: avoid;
+    }
+    
+    /* Tables */
+    table { 
+        font-size: 8px !important; 
+        width: 100% !important;
+        page-break-inside: auto;
+        border-collapse: collapse !important;
+    }
+    
+    th, td { 
+        padding: 4px 3px !important; 
+        font-size: 8px !important;
+        line-height: 1.2 !important;
+    }
+    
+    th { 
+        font-size: 9px !important; 
+        font-weight: 600 !important;
+    }
+    
+    /* Table wrappers */
+    .table-wrapper { 
+        overflow: visible !important; 
+        page-break-inside: auto;
+    }
+    
+    /* Charts */
+    .chart-card { 
+        page-break-inside: avoid;
+        margin-bottom: 10px !important;
+        padding: 10px !important;
+    }
+    
+    .chart-container { 
+        height: 250px !important; 
+    }
+    
+    .chart-title { 
+        font-size: 11px !important; 
+        margin-bottom: 10px !important; 
+    }
+    
+    .charts-grid { 
+        grid-template-columns: 1fr !important;
+        gap: 10px !important;
+        margin-bottom: 15px !important;
+    }
+    
+    /* Stats cards */
+    .stat-card { 
+        page-break-inside: avoid;
+        margin-bottom: 10px !important;
+    }
+    
+    /* Page setup */
+    @page {
+        size: A4 landscape;
+        margin: 0.5cm;
+    }
+    
+    /* Prevent page breaks in critical sections */
+    .no-break {
+        page-break-inside: avoid;
+    }
+}
+

@@ -78,18 +78,28 @@ $hasLcRef = $colExists($conn, 'length_calibrations', 'reference_number');
 $hasLcRoll = $colExists($conn, 'length_calibrations', 'roll_no');
 $hasLcLine = $colExists($conn, 'length_calibrations', 'line_number');
 $hasLcStatus = $colExists($conn, 'length_calibrations', 'status');
-$lcStatusFilter = $hasLcStatus ? "AND lc.status IN ('approved','pending')" : "";
+// Exclude all submitted entries (any status except rejected, as rejected entries can be resubmitted)
+$lcStatusFilter = $hasLcStatus ? "AND lc.status NOT IN ('rejected')" : "";
 $lcLineFilter = $hasLcLine ? "AND lc.line_number COLLATE {$collation} = CONCAT('Line ', f.line_no) COLLATE {$collation}" : "";
 $lcExistsClause = "";
-if ($hasLcRef && $hasLcRoll) {
-    $lcExistsClause = "
-    AND NOT EXISTS (
-        SELECT 1 FROM length_calibrations lc 
-        WHERE lc.reference_number COLLATE {$collation} = f.reference_number COLLATE {$collation}
-        AND lc.roll_no = f.roll_no 
-        {$lcLineFilter}
-        {$lcStatusFilter}
-    )";
+if ($hasLcRoll) {
+    // Exclude if roll_no already exists in length_calibrations (regardless of reference_number or line_number)
+    // This ensures a roll number can only be submitted once
+    if ($hasLcStatus) {
+        $lcExistsClause = "
+        AND NOT EXISTS (
+            SELECT 1 FROM length_calibrations lc 
+            WHERE lc.roll_no = f.roll_no
+            AND lc.status NOT IN ('rejected')
+        )";
+    } else {
+        // If status column doesn't exist, exclude all entries for this roll_no
+        $lcExistsClause = "
+        AND NOT EXISTS (
+            SELECT 1 FROM length_calibrations lc 
+            WHERE lc.roll_no = f.roll_no
+        )";
+    }
 }
 
 // Fetch roll numbers from fiber_to_roll_entry - exclude only if approved or pending test exists for this specific ref+roll+line

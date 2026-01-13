@@ -40,7 +40,7 @@ $menuItems = [
             ['text' => 'Fiber Received Entry', 'link' => 'forms/fiber_entry.php', 'icon' => 'fas fa-boxes'],
             ['text' => 'Fiber to Roll Entry', 'link' => 'forms/fiber_to_roll_entry.php', 'icon' => 'fas fa-exchange-alt'],
             ['text' => 'Roll Entry', 'link' => 'forms/roll_entry.php', 'icon' => 'fas fa-dolly-flatbed'],
-            ['text' => 'Roll Transfer Entry', 'link' => 'forms/roll_transfer_entry.php', 'icon' => 'fas fa-truck-moving'],
+            ['text' => 'Roll Internal Transfer Entry', 'link' => 'forms/roll_transfer_entry.php', 'icon' => 'fas fa-truck-moving'],
             ['text' => 'Fiber to Roll Conversion Report', 'link' => 'reports/fiber_to_roll_conversion.php', 'icon' => 'fas fa-chart-line'],
             ['text' => 'Roll Production Summary', 'link' => 'reports/roll_production_summary.php', 'icon' => 'fas fa-chart-bar'],
             ['text' => 'Roll Production Hourly', 'link' => 'reports/roll_production_hourly.php', 'icon' => 'fas fa-clock'],

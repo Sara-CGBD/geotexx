@@ -8,7 +8,7 @@ if (!isset($_SESSION['user_id']) || !isset($_SESSION['username'])) {
 }
 
 $user_role = strtolower(trim($_SESSION['role'] ?? ''));
-$allowed_roles = ['admin', 'production_user', 'management', 'agm ops'];
+$allowed_roles = ['admin', 'production_user', 'production', 'prod_test', 'management', 'agm ops', 'sewing_test'];
 if (!in_array($user_role, $allowed_roles)) {
     http_response_code(403);
     die("Access Denied");
@@ -16,6 +16,10 @@ if (!in_array($user_role, $allowed_roles)) {
 
 date_default_timezone_set('Asia/Dhaka');
 $conn = SecurityConfig::getConnection();
+
+// Determine which sewing table exists
+$sewingTableCheck = $conn->query("SHOW TABLES LIKE 'sewing_machine_entry'");
+$sewingTable = ($sewingTableCheck && $sewingTableCheck->num_rows > 0) ? 'sewing_machine_entry' : 'swing_machine_entry';
 
 $dateFrom = $_GET['date_from'] ?? date('Y-m-d', strtotime('-30 days'));
 $dateTo = $_GET['date_to'] ?? date('Y-m-d');
@@ -41,7 +45,7 @@ $sewingQuery = "SELECT
     DATE(date_time) as prod_date,
     COUNT(*) as count,
     SUM(sewing_qty) as total_qty
-FROM swing_machine_entry 
+FROM $sewingTable 
 WHERE DATE(date_time) BETWEEN ? AND ?
 GROUP BY DATE(date_time)
 ORDER BY prod_date ASC";
@@ -198,9 +202,229 @@ $grandTotal = $totalCNC + $totalSewing + $totalBranding;
         
         .export-btn { background: #27ae60; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-weight: 600; margin-bottom: 20px; margin-right: 10px; }
         
+        /* Prevent overlapping when print dialog is open */
+        body.printing {
+            overflow: hidden !important;
+        }
+        
+        body.printing .container {
+            margin: 0 auto !important;
+            max-width: 100% !important;
+        }
+        
         @media print {
-            .filters, .export-btn { display: none; }
-            body { background: white; padding: 0; }
+            /* COMPREHENSIVE RESET - Prevent ALL overlapping */
+            * {
+                box-sizing: border-box !important;
+                position: static !important;
+                float: none !important;
+                clear: both !important;
+                overflow: visible !important;
+                transform: none !important;
+                z-index: auto !important;
+                top: auto !important;
+                left: auto !important;
+                right: auto !important;
+                bottom: auto !important;
+            }
+            
+            /* Hide all navigation and UI elements */
+            nav, aside, .sidebar, header:not(.print-header), footer, .filters, .export-btn { 
+                display: none !important; 
+            }
+            
+            html, body { 
+                background: white !important; 
+                padding: 0 !important; 
+                margin: 0 !important;
+                font-size: 10px !important;
+                width: 100% !important;
+                height: auto !important;
+                overflow: visible !important;
+                position: static !important;
+            }
+            
+            .container { 
+                box-shadow: none !important; 
+                padding: 10px !important;
+                margin: 0 auto !important;
+                max-width: 100% !important;
+                width: 100% !important;
+                position: static !important;
+                overflow: visible !important;
+                border-radius: 0 !important;
+                page-break-inside: avoid;
+            }
+            
+            h1 { 
+                font-size: 16px !important; 
+                margin: 5px 0 !important; 
+                padding: 0 !important;
+                page-break-after: avoid;
+                position: static !important;
+                clear: both !important;
+            }
+            
+            .subtitle { 
+                font-size: 10px !important; 
+                margin: 2px 0 10px !important; 
+                padding: 0 !important;
+                position: static !important;
+                clear: both !important;
+            }
+            
+            .section-title { 
+                font-size: 12px !important; 
+                margin: 10px 0 5px !important; 
+                padding: 3px 0 !important; 
+                page-break-after: avoid;
+                position: static !important;
+                clear: both !important;
+            }
+            
+            .section { 
+                margin-bottom: 15px !important;
+                page-break-inside: avoid;
+                overflow: visible !important;
+                position: static !important;
+                clear: both !important;
+            }
+            
+            .chart-card {
+                page-break-inside: avoid;
+                position: static !important;
+                overflow: visible !important;
+                margin-bottom: 20px !important;
+                padding: 15px !important;
+                clear: both !important;
+                border-radius: 0 !important;
+            }
+            
+            .chart-title {
+                margin-bottom: 10px !important;
+                page-break-after: avoid;
+            }
+            
+            table { 
+                font-size: 8px !important; 
+                width: 100% !important;
+                page-break-inside: auto;
+                border-collapse: collapse !important;
+                margin-bottom: 10px !important;
+                position: static !important;
+                clear: both !important;
+                table-layout: auto !important;
+            }
+            
+            th, td { 
+                padding: 4px 3px !important; 
+                font-size: 8px !important;
+                line-height: 1.2 !important;
+                border: 1px solid #ddd !important;
+                position: static !important;
+                white-space: normal !important;
+            }
+            
+            /* Remove ALL sticky positioning for print */
+            td:first-child, th:first-child { 
+                position: static !important; 
+                background: white !important; 
+                z-index: auto !important;
+                left: auto !important;
+            }
+            
+            th:first-child { 
+                background: #34495e !important; 
+                z-index: auto !important;
+            }
+            
+            th { 
+                background: #34495e !important;
+                color: white !important;
+                font-size: 9px !important; 
+                font-weight: 600 !important;
+                position: static !important;
+                top: auto !important;
+            }
+            
+            tr:hover td:first-child, tr:hover { 
+                background: white !important;
+            }
+            
+            .chart-container { 
+                height: 250px !important; 
+                max-height: 250px !important;
+                min-height: 250px !important;
+                position: static !important;
+                overflow: visible !important;
+                page-break-inside: avoid;
+                clear: both !important;
+                width: 100% !important;
+            }
+            
+            canvas {
+                max-width: 100% !important;
+                height: auto !important;
+                position: static !important;
+            }
+            
+            .stats-grid { 
+                grid-template-columns: repeat(4, 1fr) !important;
+                gap: 8px !important;
+                margin-bottom: 15px !important;
+                position: static !important;
+                clear: both !important;
+            }
+            
+            .stat-card { 
+                padding: 10px 8px !important;
+                page-break-inside: avoid;
+                margin-bottom: 0 !important;
+                position: static !important;
+                clear: both !important;
+            }
+            
+            .stat-value { 
+                font-size: 1.4em !important; 
+                margin-bottom: 3px !important;
+            }
+            
+            .stat-label { 
+                font-size: 0.8em !important; 
+            }
+            
+            tr { 
+                page-break-inside: avoid;
+                position: static !important;
+            }
+            
+            thead { 
+                display: table-header-group !important;
+                position: static !important;
+            }
+            
+            tfoot { 
+                display: table-footer-group !important;
+                position: static !important;
+            }
+            
+            .table-wrapper {
+                overflow: visible !important;
+                position: static !important;
+                width: 100% !important;
+                clear: both !important;
+            }
+            
+            /* Ensure no element overlaps */
+            div, section, article {
+                clear: both !important;
+                position: static !important;
+            }
+            
+            @page {
+                size: A4 landscape;
+                margin: 0.5cm;
+            }
         }
     </style>
 </head>
@@ -254,7 +478,7 @@ $grandTotal = $totalCNC + $totalSewing + $totalBranding;
         </div>
     </form>
     
-    <button onclick="window.print()" class="export-btn"><i class="fas fa-print"></i> Print</button>
+    <button onclick="handlePrint()" class="export-btn"><i class="fas fa-print"></i> Print</button>
     <button onclick="exportToCSV()" class="export-btn" style="background: #e67e22;"><i class="fas fa-file-csv"></i> Export CSV</button>
     
     <?php if (count($displayData) > 0): ?>
@@ -344,10 +568,63 @@ $grandTotal = $totalCNC + $totalSewing + $totalBranding;
 </div>
 
 <script>
+// Print handler to ensure proper layout
+function handlePrint() {
+    // Add print class to body
+    document.body.classList.add('printing');
+    
+    // Force all charts to resize first
+    if (window.trendChart) {
+        window.trendChart.resize();
+    }
+    if (window.stackedChart) {
+        window.stackedChart.resize();
+    }
+    
+    // Wait for charts to render, then print
+    setTimeout(function() {
+        // Force another resize to ensure proper sizing
+        if (window.trendChart) window.trendChart.resize();
+        if (window.stackedChart) window.stackedChart.resize();
+        
+        // Trigger print
+        window.print();
+        
+        // Remove print class after printing
+        setTimeout(function() {
+            document.body.classList.remove('printing');
+            // Restore chart sizes
+            if (window.trendChart) window.trendChart.resize();
+            if (window.stackedChart) window.stackedChart.resize();
+        }, 1000);
+    }, 300);
+}
+
+// Handle beforeprint event to ensure charts are ready
+window.addEventListener('beforeprint', function() {
+    // Force chart resize for print
+    if (window.trendChart) {
+        window.trendChart.resize();
+        setTimeout(() => window.trendChart.resize(), 50);
+    }
+    if (window.stackedChart) {
+        window.stackedChart.resize();
+        setTimeout(() => window.stackedChart.resize(), 50);
+    }
+});
+
+// Handle afterprint event
+window.addEventListener('afterprint', function() {
+    // Restore chart sizes
+    if (window.trendChart) window.trendChart.resize();
+    if (window.stackedChart) window.stackedChart.resize();
+    document.body.classList.remove('printing');
+});
+
 <?php if (count($displayData) > 0): ?>
 // Trend Comparison Chart
 const trendCtx = document.getElementById('trendChart');
-new Chart(trendCtx, {
+window.trendChart = new Chart(trendCtx, {
     type: 'line',
     data: {
         labels: <?php echo json_encode($viewMode == 'weekly' ? array_column($displayData, 'week') : array_keys($displayData)); ?>,
@@ -421,7 +698,7 @@ new Chart(trendCtx, {
 
 // Stacked Area Chart
 const stackedCtx = document.getElementById('stackedChart');
-new Chart(stackedCtx, {
+window.stackedChart = new Chart(stackedCtx, {
     type: 'bar',
     data: {
         labels: <?php echo json_encode($viewMode == 'weekly' ? array_column($displayData, 'week') : array_keys($displayData)); ?>,

@@ -198,7 +198,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_entry'])) {
         }
         
         if ($executed) {
-            $message = "✅ Store received entry saved successfully! Entry Number: " . $entry_number;
+            $message = "Store received entry saved successfully! Entry Number: " . $entry_number;
         } else {
             throw new Exception("Failed to save entry: " . ($stmt ? $stmt->error : $conn->error));
         }

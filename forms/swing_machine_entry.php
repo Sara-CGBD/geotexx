@@ -1,5 +1,5 @@
 <?php
-// swing_machine_entry.php
+// sewing_machine_entry.php
 
 session_start();
 require_once 'security_config.php';
@@ -43,50 +43,52 @@ if (!$conn) die("DB connection failed");
 $defaultProject = getDefaultProject($conn);
 $projects = $defaultProject ? [$defaultProject] : [];
 
-// Fetch CNC batches for reference number dropdown
-$cncBatches = [];
-// Check if table exists first
-$table_check = $conn->query("SHOW TABLES LIKE 'cnc_entries'");
-if ($table_check && $table_check->num_rows > 0) {
-    $cnc_query = $conn->query("SELECT DISTINCT reference_number as reference, cnc_cutting_batch as batch FROM cnc_entries WHERE reference_number IS NOT NULL AND reference_number != '' ORDER BY reference_number DESC LIMIT 100");
-    if ($cnc_query) {
-        while ($cnc = $cnc_query->fetch_assoc()) {
-            $cncBatches[] = $cnc;
-        }
-    }
-}
+// CNC cutting batches will be loaded via API
 
 // Reporter from session
 $reporter_id = $_SESSION['user_id'];
 $reporter_name = $_SESSION['username'];
 
-// Generate Swing Machine ID (auto-increment based on date and sequence)
+// Generate Sewing Machine ID (auto-increment based on date and sequence)
 $current_date = date('Y-m-d');
-$next_swing_number = 1;
+$next_sewing_number = 1;
 
-// Check if swing_machine_entry table exists and has swing_id column
-$table_check = $conn->query("SHOW TABLES LIKE 'swing_machine_entry'");
-if ($table_check && $table_check->num_rows > 0) {
-    // Check if swing_id column exists
-    $column_check = $conn->query("SHOW COLUMNS FROM swing_machine_entry LIKE 'swing_id'");
+// Check if sewing_machine_entry table exists and has sewing_id column
+// Also check for old swing_machine_entry table for backward compatibility
+$table_check = $conn->query("SHOW TABLES LIKE 'sewing_machine_entry'");
+$table_name = 'sewing_machine_entry';
+$id_column = 'sewing_id';
+
+// If new table doesn't exist, check for old table name
+if (!$table_check || $table_check->num_rows == 0) {
+    $old_table_check = $conn->query("SHOW TABLES LIKE 'swing_machine_entry'");
+    if ($old_table_check && $old_table_check->num_rows > 0) {
+        $table_name = 'swing_machine_entry';
+        $id_column = 'swing_id';
+    }
+}
+
+if ($table_check && $table_check->num_rows > 0 || ($table_name == 'swing_machine_entry' && isset($old_table_check) && $old_table_check->num_rows > 0)) {
+    // Check if id column exists
+    $column_check = $conn->query("SHOW COLUMNS FROM $table_name LIKE '$id_column'");
     if ($column_check && $column_check->num_rows > 0) {
-        $last_swing = $conn->query("SELECT MAX(CAST(SUBSTRING(swing_id, -3) AS UNSIGNED)) as last_num FROM swing_machine_entry WHERE DATE(date_time) = '$current_date'");
-        if ($last_swing && $last_swing->num_rows > 0) {
-            $row = $last_swing->fetch_assoc();
+        $last_sewing = $conn->query("SELECT MAX(CAST(SUBSTRING($id_column, -3) AS UNSIGNED)) as last_num FROM $table_name WHERE DATE(date_time) = '$current_date'");
+        if ($last_sewing && $last_sewing->num_rows > 0) {
+            $row = $last_sewing->fetch_assoc();
             if ($row['last_num']) {
-                $next_swing_number = $row['last_num'] + 1;
+                $next_sewing_number = $row['last_num'] + 1;
             }
         }
     }
 }
 
-$swing_id = "SW-" . date('Ymd') . "-" . str_pad($next_swing_number, 3, '0', STR_PAD_LEFT);
+$sewing_id = "SEW-" . date('Ymd') . "-" . str_pad($next_sewing_number, 3, '0', STR_PAD_LEFT);
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Swing Machine Entry</title>
+<title>Sewing Machine Entry</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
 <style>
   body { font-family:'Inter',sans-serif; background:#f4f6f9; margin:0; padding:0; color:#2c3e50; }
@@ -115,11 +117,11 @@ $swing_id = "SW-" . date('Ymd') . "-" . str_pad($next_swing_number, 3, '0', STR_
 <body>
 <div class="container">
   
-  <h1>Swing Machine Entry</h1>
+  <h1>Sewing Machine Entry</h1>
 
   <?php if (isset($_GET['success'])): ?>
     <div class="alert alert-success" style="background: #d4edda; color: #155724; padding: 15px; border-radius: 6px; margin-bottom: 20px; border: 1px solid #c3e6cb;">
-      ✅ Swing Machine Entry saved successfully!
+      Sewing Machine Entry saved successfully! Entry ID: <strong><?php echo isset($_GET['entry_id']) ? htmlspecialchars($_GET['entry_id']) : 'N/A'; ?></strong>
     </div>
   <?php endif; ?>
 
@@ -132,13 +134,13 @@ $swing_id = "SW-" . date('Ymd') . "-" . str_pad($next_swing_number, 3, '0', STR_
   <div id="dateTimeDisplay" class="summary-info"></div>
   <div id="shiftBanner" class="summary-info"></div>
 
-  <form id="swingForm" method="post" action="../handlers/submit_swing_machine_entry.php" onsubmit="return validateForm();">
+  <form id="sewingForm" method="post" action="../handlers/submit_sewing_machine_entry.php" onsubmit="return validateForm();">
 
     <!-- Entry ID auto -->
     <div class="form-group">
-      <label>Swing Machine ID </label>
-      <input type="text" id="swingIdDisplay" value="<?php echo $swing_id; ?>" readonly class="readonly">
-      <input type="hidden" id="swing_id" name="swing_id" value="<?php echo $swing_id; ?>">
+      <label>Sewing Machine ID </label>
+      <input type="text" id="sewingIdDisplay" value="<?php echo $sewing_id; ?>" readonly class="readonly">
+      <input type="hidden" id="sewing_id" name="sewing_id" value="<?php echo $sewing_id; ?>">
     </div>
 
     <!-- Hidden datetime -->
@@ -152,25 +154,13 @@ $swing_id = "SW-" . date('Ymd') . "-" . str_pad($next_swing_number, 3, '0', STR_
       <input type="hidden" name="reporter_id" value="<?php echo $reporter_id; ?>">
     </div>
 
- 
-
-    <!-- Reference Number (dropdown from cnc_entries) -->
-    <div class="form-group">
-      <label>Reference Number:</label>
-      <select id="reference_number" name="reference_number" required onchange="updateBatchFromReference()">
-        <option value="">-- Select Reference Number --</option>
-        <?php foreach($cncBatches as $cnc): ?>
-          <option value="<?php echo htmlspecialchars($cnc['reference']); ?>" data-batch="<?php echo htmlspecialchars($cnc['batch']); ?>">
-            <?php echo htmlspecialchars($cnc['reference']); ?>
-          </option>
-        <?php endforeach; ?>
-      </select>
-    </div>
-
-    <!-- CNC Cutting Batch (auto-filled from selected reference) -->
+    <!-- CNC Cutting Batch (dropdown from cnc_entries) -->
     <div class="form-group">
       <label>CNC Cutting Batch:</label>
-      <input type="text" id="cnc_cutting_batch" name="cnc_cutting_batch" readonly class="readonly" placeholder="Select Reference Number first">
+      <select id="cnc_cutting_batch" name="cnc_cutting_batch" required onchange="updateSummary()">
+        <option value="">-- Loading CNC Cutting Batches... --</option>
+      </select>
+      <div id="batch_loading" style="display: none; margin-top: 10px;"></div>
     </div>
 
     <!-- Project -->
@@ -254,18 +244,100 @@ function updateTimeAndShift() {
 }
 setInterval(updateTimeAndShift,1000); updateTimeAndShift();
 
-function updateBatchFromReference() {
-  const refSelect = document.getElementById('reference_number');
-  const selectedOption = refSelect.options[refSelect.selectedIndex];
-  const cuttingBatch = selectedOption.getAttribute('data-batch');
+// Load CNC cutting batches from API
+function loadCNCCuttingBatches() {
+  const batchSelect = document.getElementById('cnc_cutting_batch');
+  const loadingText = document.getElementById('batch_loading');
   
-  if (cuttingBatch) {
-    document.getElementById('cnc_cutting_batch').value = cuttingBatch;
-  } else {
-    document.getElementById('cnc_cutting_batch').value = '';
-  }
+  if (!batchSelect) return;
   
-  updateSummary();
+  fetch('api/get_cnc_cutting_batches.php')
+    .then(response => response.json())
+    .then(data => {
+      if (loadingText) {
+        loadingText.innerHTML = '';
+        loadingText.style.display = 'none';
+      }
+      
+      if (!data.success) {
+        batchSelect.innerHTML = '<option value="">-- Failed to load batches --</option>';
+        if (loadingText) {
+          loadingText.innerHTML = `
+            <div style="display: flex; align-items: center; gap: 10px; padding: 12px 16px; background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%); border: 1px solid #fca5a5; border-radius: 10px; color: #991b1b; font-size: 0.9rem; box-shadow: 0 2px 8px rgba(239, 68, 68, 0.1);">
+              <i class="fas fa-exclamation-circle" style="font-size: 1.1rem; color: #dc2626;"></i>
+              <span style="font-weight: 500;">Error loading batches. Please try again.</span>
+            </div>
+          `;
+          loadingText.style.display = 'block';
+        }
+        return;
+      }
+      
+      const batches = data.batches || [];
+      batchSelect.innerHTML = '<option value="">-- Select CNC Cutting Batch --</option>';
+      
+      if (batches.length === 0) {
+        batchSelect.innerHTML = '<option value="">-- No batches available --</option>';
+        if (loadingText) {
+          loadingText.innerHTML = `
+            <div style="display: flex; align-items: center; gap: 10px; padding: 12px 16px; background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%); border: 1px solid #fbbf24; border-radius: 10px; color: #92400e; font-size: 0.9rem; box-shadow: 0 2px 8px rgba(245, 158, 11, 0.1);">
+              <i class="fas fa-info-circle" style="font-size: 1.1rem; color: #d97706;"></i>
+              <div style="flex: 1;">
+                <div style="font-weight: 600; margin-bottom: 4px;">No CNC cutting batches found</div>
+                <div style="font-size: 0.85rem; opacity: 0.9;">Please create CNC entries first to proceed with sewing machine entry.</div>
+              </div>
+            </div>
+          `;
+          loadingText.style.display = 'block';
+        }
+        return;
+      }
+      
+      batches.forEach(batch => {
+        const option = document.createElement('option');
+        option.value = batch.batch;
+        
+        // Build display text with batch number and references
+        let displayText = batch.batch;
+        
+        // Add references if available
+        if (batch.references && batch.references.length > 0) {
+          const refCount = batch.references.length;
+          
+          // For small batches (<= 5 refs), show all references
+          if (refCount <= 5) {
+            displayText += ` - Ref: ${batch.references.join(', ')}`;
+          } 
+          // For medium batches (6-15 refs), show first 2 and count
+          else if (refCount <= 15) {
+            const refsToShow = batch.references.slice(0, 2).join(', ');
+            displayText += ` - Ref: ${refsToShow} +${refCount - 2} more`;
+          }
+          // For large batches (>15 refs), just show count
+          else {
+            displayText += ` - ${refCount} references`;
+          }
+        }
+        
+        option.textContent = displayText;
+        option.setAttribute('data-entry-count', batch.entry_count);
+        option.setAttribute('data-first-entry', batch.first_entry_date);
+        option.setAttribute('data-last-entry', batch.last_entry_date);
+        if (batch.references && batch.references.length > 0) {
+          option.setAttribute('data-references', batch.references.join(','));
+        }
+        batchSelect.appendChild(option);
+      });
+    })
+    .catch(err => {
+      console.error('Error loading CNC cutting batches:', err);
+      batchSelect.innerHTML = '<option value="">-- Error loading batches --</option>';
+      if (loadingText) {
+        loadingText.textContent = 'Error loading batches: ' + err.message;
+        loadingText.style.color = '#e74c3c';
+        loadingText.style.display = 'block';
+      }
+    });
 }
 
 function selectBtn(btn, groupId){
@@ -283,10 +355,9 @@ function selectBtn(btn, groupId){
 function updateSummary() {
   const dateTime = document.getElementById("dateTime").value;
   const shift = document.getElementById("shiftBanner").innerText.replace("Shift: ", "");
-  const swingId = document.getElementById("swing_id").value;
+  const sewingId = document.getElementById("sewing_id").value;
   
   // Get selected values
-  const refNumber = document.getElementById("reference_number").value;
   const cncBatch = document.getElementById("cnc_cutting_batch").value;
   
   const selectedProject = document.querySelector('#projectGroup .btn.selected');
@@ -299,9 +370,8 @@ function updateSummary() {
   const ncpPiece = document.getElementById("ncp_piece").value;
   
   // Only show summary if at least some basic info is available
-  if (dateTime && shift && swingId) {
-    let summary = `${dateTime} | Shift: ${shift} | Swing ID: ${swingId}`;
-    if (refNumber) summary += ` | Reference: ${refNumber}`;
+  if (dateTime && shift && sewingId) {
+    let summary = `${dateTime} | Shift: ${shift} | Sewing ID: ${sewingId}`;
     if (cncBatch) summary += ` | CNC Batch: ${cncBatch}`;
     if (projectName) summary += ` | Project: ${projectName}`;
     if (lineNo) summary += ` | Line: ${lineNo}`;
@@ -318,7 +388,7 @@ function updateSummary() {
 
 function clearForm(){
   // Clear all form fields
-  document.getElementById("swingForm").reset();
+  document.getElementById("sewingForm").reset();
   
   // Clear button selections
   document.querySelectorAll('#projectGroup .btn').forEach(b=>b.classList.remove('selected'));
@@ -333,7 +403,7 @@ function clearForm(){
   document.getElementById("summaryBox").innerText = "";
   document.getElementById("summary").value = "";
   
-  // Reload the page to get a new Swing Machine ID
+  // Reload the page to get a new Sewing Machine ID
   window.location.reload();
 }
 
@@ -355,10 +425,14 @@ function validateForm(){
 
 // Add event listeners for form fields to update summary
 document.addEventListener('DOMContentLoaded', function() {
+  // Load CNC cutting batches on page load
+  loadCNCCuttingBatches();
+  
   document.getElementById('project_id').addEventListener('change', updateSummary);
   document.getElementById('line_no').addEventListener('input', updateSummary);
   document.getElementById('sewing_qty').addEventListener('input', updateSummary);
   document.getElementById('ncp_piece').addEventListener('input', updateSummary);
+  document.getElementById('cnc_cutting_batch').addEventListener('change', updateSummary);
   
   // Update summary on page load
   updateSummary();

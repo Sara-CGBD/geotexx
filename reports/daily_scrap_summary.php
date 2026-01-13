@@ -8,7 +8,11 @@ if (!isset($_SESSION['user_id']) || !isset($_SESSION['username'])) {
 }
 
 $user_role = strtolower(trim($_SESSION['role'] ?? ''));
-$allowed_roles = ['admin', 'production_user', 'management', 'agm ops'];
+// Normalize prod_test to production_user
+if ($user_role === 'prod_test') {
+    $user_role = 'production_user';
+}
+$allowed_roles = ['admin', 'production_user', 'production', 'prod_user', 'prod_test', 'management', 'agm ops'];
 if (!in_array($user_role, $allowed_roles)) {
     http_response_code(403);
     die("<div style='font-family: Arial; max-width: 600px; margin: 100px auto; padding: 30px; border: 2px solid #e74c3c; border-radius: 10px; background: #ffe8e8;'>

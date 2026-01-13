@@ -158,7 +158,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_entry'])) {
         $stmt->bind_param("sssssddsi", $entry_number, $date_time, $shift, $manufacturer_name, $material_type, $amount_kg, $amount_kg, $reported_by, $reporter_id);
         
         if ($stmt->execute()) {
-            $message = "✅ Store received entry saved successfully! Entry Number: " . $entry_number;
+            $message = "Store received entry saved successfully! Entry Number: " . $entry_number;
         } else {
             throw new Exception("Failed to save entry: " . $stmt->error);
         }
@@ -202,7 +202,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_entry'])) {
 
   <?php if ($message): ?>
     <div style="background:#d4edda;color:#155724;padding:12px;border-radius:6px;border:1px solid #c3e6cb;margin-bottom:15px;">
-      ✅ <?php echo htmlspecialchars($message); ?>
+      <?php echo htmlspecialchars($message); ?>
     </div>
   <?php endif; ?>
   

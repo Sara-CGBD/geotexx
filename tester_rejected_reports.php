@@ -263,8 +263,73 @@ if ($result) {
     }
 }
 
-// Sort by updated_at descending
-usort($rejectedReports, function($a, $b) {
+// Separate QC test orders from other reports for bulk grouping
+$qc_test_orders = [];
+$other_reports = [];
+
+foreach ($rejectedReports as $report) {
+    if ($report['type'] === 'qc_test_order') {
+        $qc_test_orders[] = $report;
+    } else {
+        $other_reports[] = $report;
+    }
+}
+
+// Group QC test orders by bulk reference range
+$bulk_reference_groups = [];
+$single_qc_reports = [];
+
+foreach ($qc_test_orders as $report) {
+    $test_data = json_decode($report['test_data'] ?? '{}', true);
+    
+    // Check if this is a bulk reference submission
+    if (isset($test_data['is_bulk_reference']) && $test_data['is_bulk_reference'] && 
+        isset($test_data['bulk_from_reference']) && isset($test_data['bulk_to_reference'])) {
+        $from_ref = $test_data['bulk_from_reference'];
+        $to_ref = $test_data['bulk_to_reference'];
+        $bulk_key = $from_ref . '|' . $to_ref;
+        
+        if (!isset($bulk_reference_groups[$bulk_key])) {
+            $bulk_reference_groups[$bulk_key] = [
+                'from' => $from_ref,
+                'to' => $to_ref,
+                'count' => $test_data['bulk_reference_count'] ?? 0,
+                'reports' => []
+            ];
+        }
+        $bulk_reference_groups[$bulk_key]['reports'][] = $report;
+    } else {
+        // Single report or no bulk data
+        $single_qc_reports[] = $report;
+    }
+}
+
+// Group bulk reports by test name within each bulk reference group
+$grouped_bulk_reports = [];
+foreach ($bulk_reference_groups as $bulk_key => $bulk_group) {
+    $test_groups = [];
+    foreach ($bulk_group['reports'] as $report) {
+        $test_key = $report['test_name'];
+        if (!isset($test_groups[$test_key])) {
+            $test_groups[$test_key] = [];
+        }
+        $test_groups[$test_key][] = $report;
+    }
+    $grouped_bulk_reports[$bulk_key] = [
+        'from' => $bulk_group['from'],
+        'to' => $bulk_group['to'],
+        'count' => $bulk_group['count'],
+        'test_groups' => $test_groups
+    ];
+}
+
+// Sort other reports by updated_at descending
+usort($other_reports, function($a, $b) {
+    return strtotime($b['updated_at']) - strtotime($a['updated_at']);
+});
+
+// Sort single QC reports by updated_at descending
+usort($single_qc_reports, function($a, $b) {
     return strtotime($b['updated_at']) - strtotime($a['updated_at']);
 });
 
@@ -396,6 +461,7 @@ $totalRejected = count($rejectedReports);
     .badge-fabric_pre { background: #e3f2fd; color: #1976d2; }
     .badge-fabric_after { background: #e8f5e9; color: #388e3c; }
     .badge-qc_entry { background: #fce4ec; color: #c2185b; }
+    .badge-qc_test_order { background: #fff3e0; color: #e65100; }
     .badge-tenacity_yarn { background: #e1bee7; color: #6a1b9a; }
     .badge-tenacity_fiber { background: #ffccbc; color: #bf360c; }
     .badge-cut_length_fiber { background: #b2dfdb; color: #004d40; }
@@ -457,6 +523,79 @@ $totalRejected = count($rejectedReports);
         <a href="index.php" class="back-btn"><i class="fas fa-arrow-left"></i> Back to Dashboard</a>
         
         <?php if ($totalRejected > 0): ?>
+        
+        <?php 
+        // Display bulk reference groups first
+        $counter = 1;
+        foreach ($grouped_bulk_reports as $bulk_key => $bulk_group): 
+        ?>
+        <div style="margin-bottom: 30px; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+            <div style="background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%); color: white; padding: 15px 20px; font-weight: 600; font-size: 16px;">
+                <i class="fas fa-tags"></i> Reference Range: <?php echo htmlspecialchars($bulk_group['from']); ?> to <?php echo htmlspecialchars($bulk_group['to']); ?>
+                <span style="float: right; font-size: 14px; opacity: 0.9;"><?php echo count(array_merge(...array_values($bulk_group['test_groups']))); ?> report(s) | <?php echo $bulk_group['count']; ?> reference(s)</span>
+            </div>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Test Type</th>
+                            <th>Reference Range</th>
+                            <th>Rejected By</th>
+                            <th>Rejection Reason</th>
+                            <th>Last Updated</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($bulk_group['test_groups'] as $test_name => $test_reports): 
+                            $first_report = $test_reports[0];
+                            $earliest_date = min(array_map(function($r) { return strtotime($r['updated_at']); }, $test_reports));
+                            $latest_date = max(array_map(function($r) { return strtotime($r['updated_at']); }, $test_reports));
+                            
+                            // Get view link for first report (all should have same type)
+                            $view_link = 'forms/qc_test_order.php?edit=' . $first_report['id'];
+                        ?>
+                        <tr>
+                            <td><?php echo $counter++; ?></td>
+                            <td>
+                                <span class="test-badge badge-qc_test_order">
+                                    <?php echo htmlspecialchars($test_name); ?>
+                                </span>
+                                <br><span style="font-size: 11px; color: #6c757d;"><?php echo count($test_reports); ?> report(s)</span>
+                            </td>
+                            <td>
+                                <?php echo htmlspecialchars($bulk_group['from']); ?> to <?php echo htmlspecialchars($bulk_group['to']); ?>
+                                <br><span style="font-size: 11px; color: #6c757d;">(<?php echo $bulk_group['count']; ?> references)</span>
+                            </td>
+                            <td><?php echo htmlspecialchars($first_report['rejected_by'] ?? 'N/A'); ?></td>
+                            <td><?php echo htmlspecialchars(substr($first_report['remarks'] ?? 'No reason', 0, 100)); ?></td>
+                            <td>
+                                <?php 
+                                if ($earliest_date == $latest_date) {
+                                    echo date('M d, Y H:i', $earliest_date);
+                                } else {
+                                    echo date('M d, Y H:i', $earliest_date) . '<br><span style="font-size: 11px; color: #6c757d;">to ' . date('M d, Y H:i', $latest_date) . '</span>';
+                                }
+                                ?>
+                            </td>
+                            <td>
+                                <a href="<?php echo $view_link; ?>" class="action-btn btn-resubmit">
+                                    <i class="fas fa-edit"></i> Resubmit All (<?php echo count($test_reports); ?>)
+                                </a>
+                            </td>
+                        </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <?php endforeach; ?>
+        
+        <?php 
+        // Display single QC reports and other reports
+        if (!empty($single_qc_reports) || !empty($other_reports)): 
+        ?>
         <div class="table-wrapper">
             <table>
                 <thead>
@@ -473,8 +612,33 @@ $totalRejected = count($rejectedReports);
                 </thead>
                 <tbody>
                     <?php 
-                    $counter = 1;
-                    foreach ($rejectedReports as $report): 
+                    // Display single QC reports
+                    foreach ($single_qc_reports as $report):
+                        $view_link = 'forms/qc_test_order.php?edit=' . $report['id'];
+                    ?>
+                    <tr>
+                        <td><?php echo $counter++; ?></td>
+                        <td>
+                            <span class="test-badge badge-<?php echo $report['type']; ?>">
+                                <?php echo htmlspecialchars($report['test_name']); ?>
+                            </span>
+                        </td>
+                        <td><strong><?php echo htmlspecialchars($report['report_number']); ?></strong></td>
+                        <td><?php echo date('M d, Y', strtotime($report['test_date'])); ?></td>
+                        <td><?php echo htmlspecialchars($report['rejected_by'] ?? 'N/A'); ?></td>
+                        <td><?php echo htmlspecialchars(substr($report['remarks'] ?? 'No reason', 0, 100)); ?></td>
+                        <td><?php echo date('M d, Y H:i', strtotime($report['updated_at'])); ?></td>
+                        <td>
+                            <a href="<?php echo $view_link; ?>" class="action-btn btn-resubmit">
+                                <i class="fas fa-edit"></i> Resubmit
+                            </a>
+                        </td>
+                    </tr>
+                    <?php endforeach; ?>
+                    
+                    <?php 
+                    // Display other reports (non-QC test orders)
+                    foreach ($other_reports as $report): 
                         $view_link = '';
                         switch($report['type']) {
                             case 'fabric_pre':
@@ -543,6 +707,8 @@ $totalRejected = count($rejectedReports);
                 </tbody>
             </table>
         </div>
+        <?php endif; ?>
+        
         <?php else: ?>
         <div class="empty-state">
             <i class="fas fa-check-circle"></i>

@@ -46,12 +46,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     $report_type = $_POST['report_type'];
     $report_number = $_POST['report_number'];
     $comments = $_POST['comments'] ?? '';
+    $related_report_numbers = isset($_POST['related_report_numbers']) ? trim($_POST['related_report_numbers']) : '';
     
     // Handle rejection reasons checkboxes
     if ($action === 'reject' && isset($_POST['qc_rejection_reasons']) && is_array($_POST['qc_rejection_reasons'])) {
         $rejection_reasons = array_map('trim', $_POST['qc_rejection_reasons']);
         $reasons_text = implode(', ', $rejection_reasons);
         $comments = "Rejection Reasons: " . $reasons_text . ($comments ? "\n\nAdditional Comments: " . $comments : '');
+    }
+    
+    // Parse related report numbers if provided
+    $all_report_numbers = [$report_number];
+    if (!empty($related_report_numbers)) {
+        $related = array_filter(array_map('trim', explode(',', $related_report_numbers)));
+        $all_report_numbers = array_merge($all_report_numbers, $related);
     }
     
     $table_map = [
@@ -62,20 +70,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     
     if ($table) {
         $checker_name = $_SESSION['full_name'] ?? $_SESSION['username'];
+        $success_count = 0;
+        $failed_reports = [];
+        
+        // Process all reports in the bulk group
+        foreach ($all_report_numbers as $current_report_number) {
         if ($action === 'approve') {
             $stmt = $conn->prepare("UPDATE $table SET status = 'pending_approval', checked_by = ?, checker_remarks = NULL, updated_at = NOW() WHERE report_number = ?");
-            $stmt->bind_param("ss", $checker_name, $report_number);
+                $stmt->bind_param("ss", $checker_name, $current_report_number);
         } elseif ($action === 'reject') {
             $stmt = $conn->prepare("UPDATE $table SET status = 'rejected_by_checker', checked_by = ?, checker_remarks = ?, updated_at = NOW() WHERE report_number = ?");
-            $stmt->bind_param("sss", $checker_name, $comments, $report_number);
+                $stmt->bind_param("sss", $checker_name, $comments, $current_report_number);
         }
         
         if ($stmt->execute()) {
-            $message = ucfirst($action) . "d report: " . $report_number;
+                $success_count++;
+            } else {
+                $failed_reports[] = $current_report_number;
+            }
+            $stmt->close();
+        }
+        
+        if ($success_count > 0) {
+            $message = count($all_report_numbers) > 1 
+                ? ucfirst($action) . "d {$success_count} report(s): " . implode(', ', array_slice($all_report_numbers, 0, 3)) . (count($all_report_numbers) > 3 ? '...' : '')
+                : ucfirst($action) . "d report: " . $report_number;
+            
+            if (!empty($failed_reports)) {
+                $message .= " (Failed: " . implode(', ', $failed_reports) . ")";
+            }
+            
             header("Location: " . $_SERVER['PHP_SELF'] . "?success=" . urlencode($message));
             exit();
         } else {
-            $error = "Failed to $action report: " . $conn->error;
+            $error = "Failed to $action report(s): " . implode(', ', $failed_reports);
         }
     }
 }

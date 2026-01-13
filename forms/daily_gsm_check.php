@@ -78,18 +78,28 @@ $hasDgcRef = $colExists($conn, 'daily_gsm_checks', 'reference_number');
 $hasDgcRoll = $colExists($conn, 'daily_gsm_checks', 'roll_no');
 $hasDgcLine = $colExists($conn, 'daily_gsm_checks', 'line_number');
 $hasDgcStatus = $colExists($conn, 'daily_gsm_checks', 'status');
-$dgcStatusFilter = $hasDgcStatus ? "AND d.status IN ('approved','pending')" : "";
+// Exclude all submitted entries (any status except rejected, as rejected entries can be resubmitted)
+$dgcStatusFilter = $hasDgcStatus ? "AND d.status NOT IN ('rejected')" : "";
 $dgcLineFilter = $hasDgcLine ? "AND d.line_number COLLATE {$collation} = CONCAT('Line ', f.line_no) COLLATE {$collation}" : "";
 $dgcExistsClause = "";
-if ($hasDgcRef && $hasDgcRoll) {
-    $dgcExistsClause = "
-    AND NOT EXISTS (
-        SELECT 1 FROM daily_gsm_checks d 
-        WHERE d.reference_number COLLATE {$collation} = f.reference_number COLLATE {$collation}
-        AND d.roll_no = f.roll_no
-        {$dgcLineFilter}
-        {$dgcStatusFilter}
-    )";
+if ($hasDgcRoll) {
+    // Exclude if roll_no already exists in daily_gsm_checks (regardless of reference_number or line_number)
+    // This ensures a roll number can only be submitted once
+    if ($hasDgcStatus) {
+        $dgcExistsClause = "
+        AND NOT EXISTS (
+            SELECT 1 FROM daily_gsm_checks d 
+            WHERE d.roll_no = f.roll_no
+            AND d.status NOT IN ('rejected')
+        )";
+    } else {
+        // If status column doesn't exist, exclude all entries for this roll_no
+        $dgcExistsClause = "
+        AND NOT EXISTS (
+            SELECT 1 FROM daily_gsm_checks d 
+            WHERE d.roll_no = f.roll_no
+        )";
+    }
 }
 
 // Fetch roll numbers from fiber_to_roll_entry - exclude only if approved or pending test exists for this specific ref+roll+line

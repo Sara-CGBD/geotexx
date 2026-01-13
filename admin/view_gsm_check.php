@@ -12,6 +12,9 @@ if (empty($entry_id)) {
     die('Invalid entry ID');
 }
 
+// Check if opened from approval dashboard
+$isApprovalDashboard = isset($_GET['approval_dashboard']) && $_GET['approval_dashboard'] == '1';
+
 date_default_timezone_set('Asia/Dhaka');
 $conn = SecurityConfig::getConnection();
 
@@ -63,8 +66,30 @@ if (!$firstRow) {
         .btn { padding: 10px 20px; border: none; border-radius: 8px; cursor: pointer; font-weight: 600; text-decoration: none; display: inline-block; margin-top: 20px; }
         .btn-back { background: #6c757d; color: white; }
         .btn-back:hover { background: #5a6268; }
+        .btn-approve { background: #27ae60; color: white; margin-left: 10px; }
+        .btn-approve:hover { background: #229954; }
+        .btn-reject { background: #e74c3c; color: white; margin-left: 10px; }
+        .btn-reject:hover { background: #c0392b; }
         .rejection-box { background: #f8d7da; border: 1px solid #f5c6cb; padding: 15px; border-radius: 8px; margin-top: 20px; }
         .rejection-box h3 { color: #721c24; margin-bottom: 10px; }
+        .action-buttons { margin-top: 20px; display: flex; gap: 10px; }
+        /* Modal Styles */
+        .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5); }
+        .modal-content { background-color: white; margin: 5% auto; padding: 0; border-radius: 12px; width: 90%; max-width: 600px; box-shadow: 0 4px 20px rgba(0,0,0,0.3); }
+        .modal-header { background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%); color: white; padding: 20px; border-radius: 12px 12px 0 0; }
+        .modal-header h2 { margin: 0; font-size: 20px; }
+        .modal-body { padding: 20px; }
+        .modal-footer { padding: 20px; border-top: 1px solid #ecf0f1; display: flex; justify-content: flex-end; gap: 10px; }
+        .checkbox-group { display: flex; flex-direction: column; gap: 10px; }
+        .checkbox-group label { display: flex; align-items: center; cursor: pointer; padding: 10px; border: 1px solid #ddd; border-radius: 6px; }
+        .checkbox-group label:hover { background: #f8f9fa; }
+        .checkbox-group input[type="checkbox"] { margin-right: 10px; width: 18px; height: 18px; cursor: pointer; }
+        .other-reason { display: none; width: 100%; margin-top: 10px; padding: 10px; border: 1px solid #ddd; border-radius: 6px; font-family: inherit; }
+        .other-reason.show { display: block; }
+        .btn-modal-cancel { padding: 10px 20px; background: #6c757d; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; }
+        .btn-modal-cancel:hover { background: #5a6268; }
+        .btn-modal-submit { padding: 10px 20px; background: #e74c3c; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; }
+        .btn-modal-submit:hover { background: #c0392b; }
     </style>
 </head>
 <body>
@@ -154,23 +179,251 @@ if (!$firstRow) {
             </tbody>
         </table>
 
-        <button onclick="closeWindow()" class="btn btn-back">
-            <i class="fas fa-times"></i> Close
-        </button>
+        <div class="action-buttons">
+            <button onclick="closeWindow()" class="btn btn-back">
+                <i class="fas fa-times"></i> Close Window
+            </button>
+            <?php if ($isApprovalDashboard && $firstRow['status'] === 'pending'): ?>
+            <button onclick="approveGSM('<?php echo htmlspecialchars($entry_id); ?>')" class="btn btn-approve">
+                <i class="fas fa-check"></i> Approve
+            </button>
+            <button onclick="rejectGSM('<?php echo htmlspecialchars($entry_id); ?>')" class="btn btn-reject">
+                <i class="fas fa-times"></i> Reject
+            </button>
+            <?php endif; ?>
+        </div>
     </div>
+
+    <!-- Rejection Modal -->
+    <?php if ($isApprovalDashboard && $firstRow['status'] === 'pending'): ?>
+    <div id="gsmRejectModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2><i class="fas fa-times-circle"></i> Reject GSM Check</h2>
+                <p style="margin-top: 10px; color: rgba(255,255,255,0.9);">Entry ID: <strong id="gsm_reject_entry_id"></strong></p>
+            </div>
+            <div class="modal-body">
+                <label style="font-weight: 600; margin-bottom: 10px; display: block;">Select Rejection Reasons:</label>
+                <div class="checkbox-group">
+                    <label>
+                        <input type="checkbox" name="gsm_rejection_reasons[]" value="GSM values out of tolerance range">
+                        GSM values out of tolerance range
+                    </label>
+                    <label>
+                        <input type="checkbox" name="gsm_rejection_reasons[]" value="Weight measurements incorrect">
+                        Weight measurements incorrect
+                    </label>
+                    <label>
+                        <input type="checkbox" name="gsm_rejection_reasons[]" value="Missing or incomplete data">
+                        Missing or incomplete data
+                    </label>
+                    <label>
+                        <input type="checkbox" name="gsm_rejection_reasons[]" value="Average GSM calculation error">
+                        Average GSM calculation error
+                    </label>
+                    <label>
+                        <input type="checkbox" name="gsm_rejection_reasons[]" value="Incorrect roll number">
+                        Incorrect roll number
+                    </label>
+                    <label>
+                        <input type="checkbox" id="gsm_other_checkbox" name="gsm_rejection_reasons[]" value="Other" onchange="toggleOtherReason('gsm')">
+                        Other (please specify)
+                    </label>
+                    <textarea id="gsm_other_reason" class="other-reason" placeholder="Enter other reason..."></textarea>
+                </div>
+                <div style="margin-top:15px;">
+                    <label style="font-weight:600; display:block; margin-bottom:8px;">Additional Comments (Optional):</label>
+                    <textarea name="gsm_remarks" id="gsm_remarks" rows="3" placeholder="Add any additional details..." style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; font-family:inherit;"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn-modal-cancel" onclick="closeGSMRejectModal()">Cancel</button>
+                <button type="button" class="btn-modal-submit" onclick="submitGSMRejection()">
+                    <i class="fas fa-times"></i> Reject Entry
+                </button>
+            </div>
+        </div>
+    </div>
+    <?php endif; ?>
 
 <script>
 function closeWindow() {
     if (window.opener) {
         window.close();
     } else {
-        // Redirect to GSM and Length Calibration Approval Dashboard
-        window.location.href = 'qc_approval_dashboard.php';
+        // Check if opened from approval dashboard
+        const urlParams = new URLSearchParams(window.location.search);
+        const isApprovalDashboard = urlParams.get('approval_dashboard') === '1';
+        if (isApprovalDashboard) {
+            window.location.href = 'qc_approval_dashboard.php';
+        } else {
+            window.history.back();
+        }
     }
 }
+
+<?php if ($isApprovalDashboard && $firstRow['status'] === 'pending'): ?>
+function approveGSM(entryId) {
+    if (confirm('Approve GSM Check: ' + entryId + '?')) {
+        // Create form in current window and submit to handler
+        const form = document.createElement('form');
+        form.method = 'POST';
+        form.action = '../handlers/approve_qc.php';
+        form.style.display = 'none';
+        
+        const typeInput = document.createElement('input');
+        typeInput.type = 'hidden';
+        typeInput.name = 'type';
+        typeInput.value = 'gsm';
+        form.appendChild(typeInput);
+        
+        const entryInput = document.createElement('input');
+        entryInput.type = 'hidden';
+        entryInput.name = 'entry_id';
+        entryInput.value = entryId;
+        form.appendChild(entryInput);
+        
+        const actionInput = document.createElement('input');
+        actionInput.type = 'hidden';
+        actionInput.name = 'action';
+        actionInput.value = 'approve';
+        form.appendChild(actionInput);
+        
+        // Create JSON payload
+        const jsonData = JSON.stringify({
+            type: 'gsm',
+            entry_id: entryId,
+            action: 'approve'
+        });
+        
+        fetch('../handlers/approve_qc.php', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: jsonData
+        })
+        .then(res => res.json())
+        .then(data => {
+            if (data.success) {
+                alert('GSM Check approved successfully!');
+                // Refresh parent window after a short delay
+                if (window.opener && !window.opener.closed) {
+                    setTimeout(function() {
+                        window.opener.location.reload();
+                        window.close();
+                    }, 500);
+                } else {
+                    window.location.href = 'qc_approval_dashboard.php';
+                }
+            } else {
+                alert('Error: ' + data.message);
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('An error occurred during approval. Please try again.');
+        });
+    }
+}
+
+function rejectGSM(entryId) {
+    document.getElementById('gsm_reject_entry_id').textContent = entryId;
+    document.getElementById('gsmRejectModal').style.display = 'block';
+    
+    // Clear previous selections
+    document.querySelectorAll('#gsmRejectModal input[type="checkbox"]').forEach(cb => cb.checked = false);
+    document.getElementById('gsm_other_reason').value = '';
+    document.getElementById('gsm_other_reason').style.display = 'none';
+    document.getElementById('gsm_remarks').value = '';
+}
+
+function closeGSMRejectModal() {
+    document.getElementById('gsmRejectModal').style.display = 'none';
+}
+
+function toggleOtherReason(type) {
+    const checkbox = document.getElementById('gsm_other_checkbox');
+    const textarea = document.getElementById('gsm_other_reason');
+    if (checkbox.checked) {
+        textarea.classList.add('show');
+    } else {
+        textarea.classList.remove('show');
+        textarea.value = '';
+    }
+}
+
+function submitGSMRejection() {
+    const checkboxes = document.querySelectorAll('#gsmRejectModal input[name="gsm_rejection_reasons[]"]:checked');
+    const reasons = [];
+    
+    checkboxes.forEach(cb => {
+        if (cb.value === 'Other') {
+            const otherReason = document.getElementById('gsm_other_reason').value.trim();
+            if (otherReason) {
+                reasons.push('Other: ' + otherReason);
+            }
+        } else {
+            reasons.push(cb.value);
+        }
+    });
+    
+    if (reasons.length === 0) {
+        alert('Please select at least one rejection reason');
+        return;
+    }
+    
+    const reason = reasons.join('; ');
+    const remarks = document.getElementById('gsm_remarks').value.trim();
+    const finalReason = remarks ? reason + '\n\nAdditional Comments: ' + remarks : reason;
+    
+    const entryId = document.getElementById('gsm_reject_entry_id').textContent;
+    
+    fetch('../handlers/approve_qc.php', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ 
+            type: 'gsm', 
+            entry_id: entryId, 
+            action: 'reject', 
+            reason: finalReason 
+        })
+    })
+    .then(res => res.json())
+    .then(data => {
+        if (data.success) {
+            alert('GSM Check rejected.');
+            // Refresh parent window after a short delay
+            if (window.opener && !window.opener.closed) {
+                setTimeout(function() {
+                    window.opener.location.reload();
+                    window.close();
+                }, 500);
+            } else {
+                window.location.href = 'qc_approval_dashboard.php';
+            }
+        } else {
+            alert('Error: ' + data.message);
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        alert('An error occurred during rejection. Please try again.');
+    });
+}
+
+// Close modal on outside click
+document.getElementById('gsmRejectModal')?.addEventListener('click', function(e) {
+    if (e.target === this) {
+        closeGSMRejectModal();
+    }
+});
+<?php endif; ?>
+
 document.addEventListener('keydown', function(event) {
     if (event.key === 'Escape') {
         closeWindow();
+        <?php if ($isApprovalDashboard && $firstRow['status'] === 'pending'): ?>
+        closeGSMRejectModal();
+        <?php endif; ?>
     }
 });
 </script>

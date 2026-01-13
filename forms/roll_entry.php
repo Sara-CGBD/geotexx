@@ -89,20 +89,27 @@ if ($lcCollation && $lcCollation !== $collation) {
 // Build EXISTS clauses only if required columns exist to avoid missing-column errors
 $gsmExistsClause = '';
 $lcExistsClause = '';
+$rqcExistsClause = '';
 
 $hasGsmRef = $colExists($conn, 'daily_gsm_checks', 'reference_number');
 $hasGsmRoll = $colExists($conn, 'daily_gsm_checks', 'roll_no');
 $hasGsmLine = $colExists($conn, 'daily_gsm_checks', 'line_number');
 $hasGsmStatus = $colExists($conn, 'daily_gsm_checks', 'status');
-if ($hasGsmRef && $hasGsmRoll && $hasGsmStatus) {
-    $gsmLineCond = $hasGsmLine ? "AND dgc.line_number COLLATE {$collation} = CONCAT('Line ', ftr.line_no) COLLATE {$collation}" : "";
+if ($hasGsmRoll && $hasGsmStatus) {
+    // Match primarily by roll_no (required) and status = approved
+    // Optionally match by reference_number if available, otherwise just roll_no is enough
+    // This handles cases where reference_number might be NULL or line_number might not match
+    $gsmRefMatch = '';
+    if ($hasGsmRef) {
+        $gsmRefMatch = "AND (dgc.reference_number COLLATE {$collation} = ftr.reference_number COLLATE {$collation} OR dgc.reference_number IS NULL)";
+    }
+    
     $gsmExistsClause = "
     AND EXISTS (
         SELECT 1 FROM daily_gsm_checks dgc 
-        WHERE dgc.reference_number COLLATE {$collation} = ftr.reference_number COLLATE {$collation} 
-        AND dgc.roll_no = ftr.roll_no 
-        {$gsmLineCond}
-        AND dgc.status = 'approved'
+        WHERE dgc.roll_no = ftr.roll_no 
+        {$gsmRefMatch}
+        AND LOWER(TRIM(dgc.status)) = 'approved'
     )";
 }
 
@@ -110,16 +117,60 @@ $hasLcRef = $colExists($conn, 'length_calibrations', 'reference_number');
 $hasLcRoll = $colExists($conn, 'length_calibrations', 'roll_no');
 $hasLcLine = $colExists($conn, 'length_calibrations', 'line_number');
 $hasLcStatus = $colExists($conn, 'length_calibrations', 'status');
-if ($hasLcRef && $hasLcRoll && $hasLcStatus) {
-    $lcLineCond = $hasLcLine ? "AND lc.line_number COLLATE {$collation} = CONCAT('Line ', ftr.line_no) COLLATE {$collation}" : "";
+if ($hasLcRoll && $hasLcStatus) {
+    // Match primarily by roll_no (required) and status = approved
+    // Optionally match by reference_number if available, otherwise just roll_no is enough
+    // This handles cases where reference_number is NULL (as shown in debug output)
+    $lcRefMatch = '';
+    if ($hasLcRef) {
+        $lcRefMatch = "AND (lc.reference_number COLLATE {$collation} = ftr.reference_number COLLATE {$collation} OR lc.reference_number IS NULL)";
+    }
+    
     $lcExistsClause = "
     AND EXISTS (
         SELECT 1 FROM length_calibrations lc 
-        WHERE lc.reference_number COLLATE {$collation} = ftr.reference_number COLLATE {$collation} 
-        AND lc.roll_no = ftr.roll_no 
-        {$lcLineCond}
-        AND lc.status = 'approved'
+        WHERE lc.roll_no = ftr.roll_no 
+        {$lcRefMatch}
+        AND LOWER(TRIM(lc.status)) = 'approved'
     )";
+}
+
+// Check for approved Roll QC Reports
+$hasRqcRef = $colExists($conn, 'roll_qc_reports', 'reference_number');
+$hasRqcApproved = $colExists($conn, 'roll_qc_reports', 'approved');
+$hasRqcOverallStatus = $colExists($conn, 'roll_qc_reports', 'overall_status');
+
+// Build Roll QC Report check clause
+$rqcExistsClause = '';
+if ($hasRqcRef) {
+    if ($hasRqcApproved && $hasRqcOverallStatus) {
+        // If both approved column and overall_status exist, check for approved = 1 OR overall_status IN ('approved', 'Done')
+        $rqcExistsClause = "
+        AND EXISTS (
+            SELECT 1 FROM roll_qc_reports rqc 
+            WHERE rqc.reference_number COLLATE {$collation} = ftr.reference_number COLLATE {$collation}
+            AND (rqc.approved = 1 OR rqc.overall_status IN ('approved', 'Done'))
+        )";
+    } elseif ($hasRqcApproved) {
+        // If only approved column exists, check for approved = 1
+        $rqcExistsClause = "
+        AND EXISTS (
+            SELECT 1 FROM roll_qc_reports rqc 
+            WHERE rqc.reference_number COLLATE {$collation} = ftr.reference_number COLLATE {$collation}
+            AND rqc.approved = 1
+        )";
+    } elseif ($hasRqcOverallStatus) {
+        // If only overall_status exists, check for 'approved' or 'Done' status
+        $rqcExistsClause = "
+        AND EXISTS (
+            SELECT 1 FROM roll_qc_reports rqc 
+            WHERE rqc.reference_number COLLATE {$collation} = ftr.reference_number COLLATE {$collation}
+            AND rqc.overall_status IN ('approved', 'Done')
+        )";
+    } else {
+        // If neither column exists, don't add the check (backward compatibility)
+        // This allows the query to work even if roll_qc_reports table doesn't have approval columns yet
+    }
 }
 
 $defaultProject = getDefaultProject($conn);
@@ -128,6 +179,7 @@ $projects = $defaultProject ? [$defaultProject] : [];
 // Performance: Defer reference loading - will load asynchronously after page render
 // Fetch reference numbers from fiber_to_roll_entry with material type and available weight
 // ONLY if BOTH Daily GSM Check AND Length Calibration tests are APPROVED
+// AND Roll QC Report is APPROVED
 $referenceNumbers = [];
 $refRes = $conn->query("
     SELECT 
@@ -147,6 +199,7 @@ $refRes = $conn->query("
     WHERE ftr.reference_number IS NOT NULL
     {$gsmExistsClause}
     {$lcExistsClause}
+    {$rqcExistsClause}
     GROUP BY ftr.id, ftr.reference_number, ftr.material_type, ftr.roll_no, ftr.line_no, ftr.total_weight
     HAVING available_weight > 0
     ORDER BY ftr.created_at DESC

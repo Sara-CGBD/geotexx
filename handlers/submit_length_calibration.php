@@ -21,9 +21,31 @@ try {
     // Check if user is Admin/AGM - auto-approve their submissions
     $userRole = strtolower(trim($_SESSION['role'] ?? 'user'));
     $isAdminOrAGM = in_array($userRole, ['admin', 'agm', 'agm ops', 'agm operations', 'management']);
-    $autoApproveStatus = $isAdminOrAGM ? 'approved' : 'pending';
-    $approvedBy = $isAdminOrAGM ? $_SESSION['username'] : null;
-    $approvedAt = $isAdminOrAGM ? date('Y-m-d H:i:s') : null;
+    
+    // Check if any AGM has enabled auto-approval for Length Calibration (check regardless of user role)
+    $autoApproveEnabled = false;
+    $autoApproverId = null;
+    $autoApproverName = null;
+    
+    // Check if any AGM user has auto-approval enabled
+    $settingsCheck = $conn->query("
+        SELECT s.user_id, u.username 
+        FROM agm_auto_approval_settings s
+        INNER JOIN new_user u ON s.user_id = u.id
+        WHERE s.test_type = 'length_calibration' AND s.auto_approve_enabled = 1
+        LIMIT 1
+    ");
+    if ($settingsCheck && $settingsCheck->num_rows > 0) {
+        $settingRow = $settingsCheck->fetch_assoc();
+        $autoApproveEnabled = true;
+        $autoApproverId = $settingRow['user_id'];
+        $autoApproverName = $settingRow['username'];
+    }
+    
+    $autoApproveStatus = ($isAdminOrAGM || $autoApproveEnabled) ? 'approved' : 'pending';
+    $approvedBy = ($isAdminOrAGM || $autoApproveEnabled) ? ($isAdminOrAGM ? $_SESSION['username'] : $autoApproverName) : null;
+    $approvedAt = ($isAdminOrAGM || $autoApproveEnabled) ? date('Y-m-d H:i:s') : null;
+    $autoApproved = ($isAdminOrAGM || $autoApproveEnabled) ? 1 : 0;
     
     // Generate Entry ID (LC-YYYYMMDD-XXX) with 8 AM daily reset
     $dhaka_tz = new DateTimeZone('Asia/Dhaka');
@@ -129,12 +151,15 @@ try {
             
             $refNumber = $referenceNumbers[$i] ?? '';
             
+            // Ensure auto_approved column exists
+            @$conn->query("ALTER TABLE length_calibrations ADD COLUMN IF NOT EXISTS auto_approved TINYINT(1) DEFAULT 0 AFTER approved_at");
+            
             $stmt = $conn->prepare("INSERT INTO length_calibrations 
                 (entry_id, reference_number, date_time, shift, line_number, roll_no, reference_length, set_in_machine, 
-                 actual_length, difference, calibration_length, inspector, user_id, status, approved_by, approved_at) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                 actual_length, difference, calibration_length, inspector, user_id, status, approved_by, approved_at, auto_approved) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
             
-            $stmt->bind_param("ssssssdddddsisss",
+            $stmt->bind_param("ssssssdddddsisssi",
                 $entry_id,
                 $refNumber,
                 $dateTime,
@@ -150,7 +175,8 @@ try {
                 $userId,
                 $autoApproveStatus,
                 $approvedBy,
-                $approvedAt
+                $approvedAt,
+                $autoApproved
             );
             
             if ($stmt->execute()) {
@@ -162,7 +188,7 @@ try {
     
     $conn->close();
     
-    $successMsg = $isAdminOrAGM
+    $successMsg = ($isAdminOrAGM || $autoApproveEnabled)
         ? "Length Calibration submitted! Entry ID: $entry_id | $successCount row(s) recorded. Status: Auto-Approved"
         : "Length Calibration submitted! Entry ID: $entry_id | $successCount row(s) recorded. Status: Pending AGM/Admin Approval";
     

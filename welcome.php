@@ -59,6 +59,24 @@ $roleConfig = [
         'icon' => 'fas fa-chart-line',
         'access' => 'All reports and analytics (view only)'
     ],
+    'store_user' => [
+        'title' => 'Raw Material Store',
+        'badge' => 'Store User',
+        'icon' => 'fas fa-warehouse',
+        'access' => 'Raw Material Store module (Store Received Entry and Inventory Report)'
+    ],
+    'delivery_user' => [
+        'title' => 'Delivery & Transfer',
+        'badge' => 'Delivery User',
+        'icon' => 'fas fa-truck',
+        'access' => 'Roll Transfer (Roll Internal Transfer Entry and Log Report) and Finished Goods Delivery (FG Delivery Entry and Report)'
+    ],
+    'sewing_test' => [
+        'title' => 'Bag Production',
+        'badge' => 'sewing_test',
+        'icon' => 'fas fa-cogs',
+        'access' => 'Bag Production module (Roll Received Entry, CNC Machine Entry, Sewing Machine Entry, Branding Entry, and related reports)'
+    ],
     'user' => [
         'title' => 'User',
         'badge' => 'General User',
@@ -177,7 +195,9 @@ $config = $roleConfig[$role] ?? $roleConfig['user'];
             <div class="instruction">
                 <i class="fas fa-arrow-left"></i>
                 <p><strong>Select a menu item from the sidebar to begin</strong></p>
+                <?php if ($role !== 'delivery_user'): ?>
                 <p style="margin-top: 15px; font-size: 0.95em; color: #7f8c8d;">You have access to: <?php echo htmlspecialchars($config['access']); ?></p>
+                <?php endif; ?>
             </div>
         </div>
     </div>

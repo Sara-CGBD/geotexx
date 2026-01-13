@@ -821,6 +821,7 @@ $unit_options = ['dTex'];
 <meta charset="UTF-8">
 <title>Fineness of Fiber Report (ISO 1973)</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
 <style>
   body { font-family:'Inter',sans-serif; background:#f4f6f9; margin:0; padding:30px 20px; color:#2c3e50; }
   .container { max-width:1200px; margin:auto; background:#fff; border-radius:12px; padding:30px; box-shadow:0 4px 20px rgba(0,0,0,0.08);} 
@@ -956,7 +957,151 @@ $unit_options = ['dTex'];
   <p>No test results available.</p>
   <?php endif; ?>
 
-  <button onclick="closeWindow()" class="btn btn-back" style="background:#6c757d; color:#fff; padding:8px 16px; border:none; border-radius:6px; cursor:pointer; text-decoration:none; display:inline-block; margin-top:20px;">Close Window</button>
+  <div style="margin-top:20px; display:flex; flex-direction:column; gap:10px; align-items:center;">
+    <button onclick="closeWindow()" class="btn btn-back" style="background:#6c757d; color:#fff; padding:8px 16px; border:none; border-radius:6px; cursor:pointer; text-decoration:none; display:inline-block;">Close Window</button>
+    
+    <?php 
+    $isApprovalDashboard = isset($_GET['approval_dashboard']) && $_GET['approval_dashboard'] == '1';
+    $reportNumber = isset($_GET['report_number']) ? $_GET['report_number'] : ($viewData['report_number'] ?? '');
+    if ($isApprovalDashboard && isset($viewData) && $viewData['status'] === 'pending'): 
+    ?>
+    <div style="display:flex; gap:10px; margin-top:10px;">
+      <button onclick="approveReport('<?php echo htmlspecialchars($reportNumber); ?>')" style="background:#27ae60; color:#fff; padding:10px 20px; border:none; border-radius:6px; cursor:pointer; font-size:14px; font-weight:bold;">
+        <i class="fas fa-check"></i> Approve
+      </button>
+      <button onclick="rejectReport('<?php echo htmlspecialchars($reportNumber); ?>')" style="background:#e74c3c; color:#fff; padding:10px 20px; border:none; border-radius:6px; cursor:pointer; font-size:14px; font-weight:bold;">
+        <i class="fas fa-times"></i> Reject
+      </button>
+    </div>
+    <?php endif; ?>
+  </div>
+
+  <?php if ($isApprovalDashboard && isset($viewData) && $viewData['status'] === 'pending'): ?>
+  <!-- Fineness of Fiber Test Rejection Modal -->
+  <div id="finenessFiberRejectModal" class="modal" style="display:none; position:fixed; z-index:1000; left:0; top:0; width:100%; height:100%; background:rgba(0,0,0,0.5); overflow-y:auto;">
+      <div class="modal-content" style="background:#fff; margin:2% auto; padding:20px; border-radius:12px; width:90%; max-width:500px; max-height:90vh; display:flex; flex-direction:column; box-shadow:0 4px 20px rgba(0,0,0,0.3);">
+          <span class="close" onclick="closeFinenessFiberRejectModal()" style="float:right; font-size:24px; font-weight:bold; cursor:pointer; color:#aaa; line-height:1;">&times;</span>
+          <div class="modal-header" style="font-size:18px; font-weight:600; margin-bottom:12px; color:#e74c3c; flex-shrink:0;">
+              <i class="fas fa-exclamation-triangle"></i> Reject Fineness of Fiber Test
+          </div>
+          
+          <form method="POST" id="finenessFiberRejectForm" onsubmit="return submitFinenessFiberRejection(event)">
+              <input type="hidden" name="fineness_fiber_report_number" id="fineness_fiber_report_number_input">
+              <input type="hidden" name="fineness_fiber_action" value="rejected">
+              
+              <div class="modal-body" style="flex:1; overflow-y:auto; padding-right:5px;">
+                  <div class="checkbox-group" style="margin:10px 0; max-height:200px; overflow-y:auto; padding:5px; border:1px solid #e0e0e0; border-radius:6px;">
+                      <strong style="display:block; margin-bottom:8px; font-size:13px;">Rejection Reasons:</strong>
+                      <div class="checkbox-item" style="display:flex; align-items:center; gap:8px; padding:6px; border:1px solid #ddd; border-radius:4px; margin-bottom:4px; background:#f8f9fa;">
+                          <input type="checkbox" name="fineness_fiber_rejection_reasons[]" value="Sample contamination" id="fineness_fiber_reason1" style="transform:scale(1.1); cursor:pointer;">
+                          <label for="fineness_fiber_reason1" style="cursor:pointer; flex:1; font-size:12px;">Sample contamination</label>
+                      </div>
+                      <div class="checkbox-item" style="display:flex; align-items:center; gap:8px; padding:6px; border:1px solid #ddd; border-radius:4px; margin-bottom:4px; background:#f8f9fa;">
+                          <input type="checkbox" name="fineness_fiber_rejection_reasons[]" value="Incorrect test procedure (ISO 1973)" id="fineness_fiber_reason2" style="transform:scale(1.1); cursor:pointer;">
+                          <label for="fineness_fiber_reason2" style="cursor:pointer; flex:1; font-size:12px;">Incorrect test procedure (ISO 1973)</label>
+                      </div>
+                      <div class="checkbox-item" style="display:flex; align-items:center; gap:8px; padding:6px; border:1px solid #ddd; border-radius:4px; margin-bottom:4px; background:#f8f9fa;">
+                          <input type="checkbox" name="fineness_fiber_rejection_reasons[]" value="Out of specification results" id="fineness_fiber_reason3" style="transform:scale(1.1); cursor:pointer;">
+                          <label for="fineness_fiber_reason3" style="cursor:pointer; flex:1; font-size:12px;">Out of specification results</label>
+                      </div>
+                      <div class="checkbox-item" style="display:flex; align-items:center; gap:8px; padding:6px; border:1px solid #ddd; border-radius:4px; margin-bottom:4px; background:#f8f9fa;">
+                          <input type="checkbox" name="fineness_fiber_rejection_reasons[]" value="Incomplete test data" id="fineness_fiber_reason4" style="transform:scale(1.1); cursor:pointer;">
+                          <label for="fineness_fiber_reason4" style="cursor:pointer; flex:1; font-size:12px;">Incomplete test data</label>
+                      </div>
+                      <div class="checkbox-item" style="display:flex; align-items:center; gap:8px; padding:6px; border:1px solid #ddd; border-radius:4px; margin-bottom:4px; background:#f8f9fa;">
+                          <input type="checkbox" name="fineness_fiber_rejection_reasons[]" value="Equipment calibration issue" id="fineness_fiber_reason5" style="transform:scale(1.1); cursor:pointer;">
+                          <label for="fineness_fiber_reason5" style="cursor:pointer; flex:1; font-size:12px;">Equipment calibration issue</label>
+                      </div>
+                      <div class="checkbox-item" style="display:flex; align-items:center; gap:8px; padding:6px; border:1px solid #ddd; border-radius:4px; margin-bottom:4px; background:#f8f9fa;">
+                          <input type="checkbox" name="fineness_fiber_rejection_reasons[]" value="Documentation error" id="fineness_fiber_reason6" style="transform:scale(1.1); cursor:pointer;">
+                          <label for="fineness_fiber_reason6" style="cursor:pointer; flex:1; font-size:12px;">Documentation error</label>
+                      </div>
+                      <div class="checkbox-item" style="display:flex; align-items:center; gap:8px; padding:6px; border:1px solid #ddd; border-radius:4px; margin-bottom:4px; background:#f8f9fa;">
+                          <input type="checkbox" name="fineness_fiber_rejection_reasons[]" value="Fiber quality issue" id="fineness_fiber_reason7" style="transform:scale(1.1); cursor:pointer;">
+                          <label for="fineness_fiber_reason7" style="cursor:pointer; flex:1; font-size:12px;">Fiber quality issue</label>
+                      </div>
+                  </div>
+                  
+                  <textarea name="fineness_fiber_remarks" class="remarks-box" placeholder="Additional comments (optional)" style="width:100%; padding:10px; border:1px solid #ddd; border-radius:6px; margin-top:10px; min-height:80px;"></textarea>
+              </div>
+              
+              <div class="modal-footer" style="flex-shrink:0; margin-top:15px; padding-top:15px; border-top:1px solid #ddd; text-align:right;">
+                  <button type="button" onclick="closeFinenessFiberRejectModal()" style="padding:8px 18px; background:#6c757d; color:#fff; border:none; border-radius:6px; cursor:pointer; margin-right:8px; font-size:13px;">
+                      Cancel
+                  </button>
+                  <button type="submit" style="padding:8px 18px; background:#e74c3c; color:#fff; border:none; border-radius:6px; cursor:pointer; font-weight:600; font-size:13px;">
+                      <i class="fas fa-ban"></i> Reject Report
+                  </button>
+              </div>
+          </form>
+      </div>
+  </div>
+
+  <script>
+  function submitFinenessFiberRejection(e) {
+      e.preventDefault();
+      const checkboxes = document.querySelectorAll('input[name="fineness_fiber_rejection_reasons[]"]:checked');
+      if (checkboxes.length === 0) {
+          alert('Please select at least one rejection reason.');
+          return false;
+      }
+      
+      const form = e.target;
+      const formData = new FormData(form);
+      
+      // Create form in current window and submit to dashboard
+      const submitForm = document.createElement('form');
+      submitForm.method = 'POST';
+      submitForm.action = '../admin/raw_material_test_approval_dashboard.php';
+      submitForm.style.display = 'none';
+      
+      // Add action and report number
+      const actionInput = document.createElement('input');
+      actionInput.type = 'hidden';
+      actionInput.name = 'fineness_fiber_action';
+      actionInput.value = 'rejected';
+      submitForm.appendChild(actionInput);
+      
+      const reportInput = document.createElement('input');
+      reportInput.type = 'hidden';
+      reportInput.name = 'fineness_fiber_report_number';
+      reportInput.value = document.getElementById('fineness_fiber_report_number_input').value;
+      submitForm.appendChild(reportInput);
+      
+      // Add rejection reasons
+      checkboxes.forEach(function(checkbox) {
+          const reasonInput = document.createElement('input');
+          reasonInput.type = 'hidden';
+          reasonInput.name = 'fineness_fiber_rejection_reasons[]';
+          reasonInput.value = checkbox.value;
+          submitForm.appendChild(reasonInput);
+      });
+      
+      // Add remarks if any
+      const remarksField = form.querySelector('textarea[name="fineness_fiber_remarks"]');
+      if (remarksField && remarksField.value.trim()) {
+          const remarksInput = document.createElement('input');
+          remarksInput.type = 'hidden';
+          remarksInput.name = 'fineness_fiber_remarks';
+          remarksInput.value = remarksField.value.trim();
+          submitForm.appendChild(remarksInput);
+      }
+      
+      document.body.appendChild(submitForm);
+      submitForm.submit();
+      
+      // Refresh parent window after a short delay
+      if (window.opener && !window.opener.closed) {
+          setTimeout(function() {
+              window.opener.location.reload();
+              window.close();
+          }, 500);
+      }
+      
+      return false;
+  }
+  </script>
+  <?php endif; ?>
 
   <script>
   function closeWindow() {
@@ -966,8 +1111,11 @@ $unit_options = ['dTex'];
           // Check for return parameter
           const urlParams = new URLSearchParams(window.location.search);
           const returnPage = urlParams.get('return');
+          const isApprovalDashboard = urlParams.get('approval_dashboard') === '1';
           
-          if (returnPage === 'approved_material_inventory') {
+          if (isApprovalDashboard) {
+              window.location.href = '../admin/raw_material_test_approval_dashboard.php';
+          } else if (returnPage === 'approved_material_inventory') {
               window.location.href = '../reports/approved_material_inventory.php';
           } else if (window.history.length > 1) {
               window.history.back();
@@ -976,6 +1124,54 @@ $unit_options = ['dTex'];
           }
       }
   }
+
+  <?php if ($isApprovalDashboard && isset($viewData) && $viewData['status'] === 'pending'): ?>
+  function approveReport(reportNumber) {
+      if (confirm('Approve Fineness of Fiber Report ' + reportNumber + '?')) {
+          // Create form in current window and submit to dashboard
+          const form = document.createElement('form');
+          form.method = 'POST';
+          form.action = '../admin/raw_material_test_approval_dashboard.php';
+          form.style.display = 'none';
+          
+          const actionInput = document.createElement('input');
+          actionInput.type = 'hidden';
+          actionInput.name = 'fineness_fiber_action';
+          actionInput.value = 'approved';
+          form.appendChild(actionInput);
+          
+          const reportInput = document.createElement('input');
+          reportInput.type = 'hidden';
+          reportInput.name = 'fineness_fiber_report_number';
+          reportInput.value = reportNumber;
+          form.appendChild(reportInput);
+          
+          document.body.appendChild(form);
+          
+          // Submit form and then refresh parent window
+          form.submit();
+          
+          // Refresh parent window after a short delay
+          if (window.opener && !window.opener.closed) {
+              setTimeout(function() {
+                  window.opener.location.reload();
+                  window.close();
+              }, 500);
+          }
+      }
+  }
+
+  function rejectReport(reportNumber) {
+      document.getElementById('fineness_fiber_report_number_input').value = reportNumber;
+      document.getElementById('finenessFiberRejectModal').style.display = 'block';
+  }
+
+  function closeFinenessFiberRejectModal() {
+      document.getElementById('finenessFiberRejectModal').style.display = 'none';
+      document.getElementById('finenessFiberRejectForm').reset();
+  }
+  <?php endif; ?>
+
   document.addEventListener('keydown', function(event) {
       if (event.key === 'Escape') {
           closeWindow();

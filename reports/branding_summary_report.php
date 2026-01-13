@@ -8,7 +8,7 @@ if (!isset($_SESSION['user_id']) || !isset($_SESSION['username'])) {
 }
 
 $user_role = strtolower(trim($_SESSION['role'] ?? ''));
-$allowed_roles = ['admin', 'production_user', 'management', 'agm ops'];
+$allowed_roles = ['admin', 'production_user', 'production', 'prod_test', 'management', 'agm ops', 'sewing_test'];
 if (!in_array($user_role, $allowed_roles)) {
     http_response_code(403);
     die("Access Denied");
@@ -157,14 +157,13 @@ $hourlyData = $hourlyResult ? $hourlyResult->fetch_all(MYSQLI_ASSOC) : [];
         #detailed-tab table th:nth-child(1), #detailed-tab table td:nth-child(1) { width: 50px; } /* # */
         #detailed-tab table th:nth-child(2), #detailed-tab table td:nth-child(2) { min-width: 120px; } /* Branding ID */
         #detailed-tab table th:nth-child(3), #detailed-tab table td:nth-child(3) { min-width: 150px; } /* Date & Time */
-        #detailed-tab table th:nth-child(4), #detailed-tab table td:nth-child(4) { min-width: 150px; } /* Reference Number */
-        #detailed-tab table th:nth-child(5), #detailed-tab table td:nth-child(5) { min-width: 140px; } /* CNC Cutting Batch */
-        #detailed-tab table th:nth-child(6), #detailed-tab table td:nth-child(6) { min-width: 120px; } /* Project */
-        #detailed-tab table th:nth-child(7), #detailed-tab table td:nth-child(7) { min-width: 100px; } /* Print Machine */
-        #detailed-tab table th:nth-child(8), #detailed-tab table td:nth-child(8) { min-width: 120px; } /* Bag Size */
-        #detailed-tab table th:nth-child(9), #detailed-tab table td:nth-child(9) { min-width: 100px; } /* Print Qty */
-        #detailed-tab table th:nth-child(10), #detailed-tab table td:nth-child(10) { min-width: 120px; } /* Shift Incharge */
-        #detailed-tab table th:nth-child(11), #detailed-tab table td:nth-child(11) { min-width: 120px; } /* Reporter */
+        #detailed-tab table th:nth-child(4), #detailed-tab table td:nth-child(4) { min-width: 140px; } /* CNC Cutting Batch */
+        #detailed-tab table th:nth-child(5), #detailed-tab table td:nth-child(5) { min-width: 120px; } /* Project */
+        #detailed-tab table th:nth-child(6), #detailed-tab table td:nth-child(6) { min-width: 100px; } /* Print Machine */
+        #detailed-tab table th:nth-child(7), #detailed-tab table td:nth-child(7) { min-width: 120px; } /* Bag Size */
+        #detailed-tab table th:nth-child(8), #detailed-tab table td:nth-child(8) { min-width: 100px; } /* Print Qty */
+        #detailed-tab table th:nth-child(9), #detailed-tab table td:nth-child(9) { min-width: 120px; } /* Shift Incharge */
+        #detailed-tab table th:nth-child(10), #detailed-tab table td:nth-child(10) { min-width: 120px; } /* Reporter */
         
         .export-btn { background: #27ae60; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-weight: 600; margin-bottom: 20px; margin-right: 10px; }
         .export-btn:hover { background: #229954; }
@@ -181,9 +180,84 @@ $hourlyData = $hourlyResult ? $hourlyResult->fetch_all(MYSQLI_ASSOC) : [];
         .badge-night { background: #e8eaf6; color: #3f51b5; }
         
         @media print {
-            .filters, .export-btn, .tabs { display: none; }
-            body { background: white; padding: 0; }
+            * { box-sizing: border-box; }
+            body { 
+                background: white; 
+                padding: 10px !important; 
+                margin: 0 !important;
+                font-size: 10px !important;
+            }
+            .container { 
+                box-shadow: none; 
+                padding: 10px !important;
+                margin: 0 !important;
+                max-width: 100% !important;
+            }
+            .filters, .export-btn, .tabs { display: none !important; }
             .tab-content { display: block !important; }
+            h1 { 
+                font-size: 14px !important; 
+                margin: 3px 0 !important; 
+                padding: 0 !important;
+                page-break-after: avoid;
+            }
+            .subtitle { 
+                font-size: 9px !important; 
+                margin: 2px 0 8px !important; 
+                padding: 0 !important;
+            }
+            .section-title { 
+                font-size: 11px !important; 
+                margin: 8px 0 3px !important; 
+                padding: 3px 0 !important; 
+                page-break-after: avoid;
+            }
+            .section { 
+                margin-bottom: 10px !important;
+                page-break-inside: avoid;
+                overflow: visible !important;
+            }
+            table { 
+                font-size: 7px !important; 
+                width: 100% !important;
+                page-break-inside: auto;
+                border-collapse: collapse !important;
+                margin-bottom: 8px !important;
+            }
+            th, td { 
+                padding: 3px 2px !important; 
+                font-size: 7px !important;
+                line-height: 1.1 !important;
+                border: 1px solid #ddd !important;
+            }
+            th { 
+                font-size: 8px !important; 
+                font-weight: 600 !important;
+            }
+            .stats-grid { 
+                grid-template-columns: repeat(3, 1fr) !important;
+                gap: 5px !important;
+                margin-bottom: 10px !important;
+            }
+            .stat-card { 
+                padding: 8px 5px !important;
+                page-break-inside: avoid;
+                margin-bottom: 0 !important;
+            }
+            .stat-value { 
+                font-size: 1.2em !important; 
+                margin-bottom: 2px !important;
+            }
+            .stat-label { 
+                font-size: 0.75em !important; 
+            }
+            tr { page-break-inside: avoid; }
+            thead { display: table-header-group !important; }
+            tfoot { display: table-footer-group !important; }
+            @page {
+                size: A4 landscape;
+                margin: 0.3cm;
+            }
         }
     </style>
 </head>
@@ -272,7 +346,6 @@ $hourlyData = $hourlyResult ? $hourlyResult->fetch_all(MYSQLI_ASSOC) : [];
                 <th>#</th>
                 <th>Branding ID</th>
                 <th>Date & Time</th>
-                <th>Reference Number</th>
                 <th>CNC Cutting Batch</th>
                 <th>Project</th>
                 <th>Print Machine</th>
@@ -291,7 +364,6 @@ $hourlyData = $hourlyResult ? $hourlyResult->fetch_all(MYSQLI_ASSOC) : [];
                     <td><?php echo $counter++; ?></td>
                     <td><strong><?php echo htmlspecialchars($entry['branding_id'] ?? 'N/A'); ?></strong></td>
                     <td><?php echo $entry['date_time'] ? date('M d, Y g:i A', strtotime($entry['date_time'])) : 'N/A'; ?></td>
-                    <td><?php echo htmlspecialchars($entry['reference_number'] ?? 'N/A'); ?></td>
                     <td><?php echo htmlspecialchars($entry['cnc_cutting_batch'] ?? 'N/A'); ?></td>
                     <td><?php echo htmlspecialchars($entry['project_name'] ?? 'N/A'); ?></td>
                     <td><?php echo htmlspecialchars($entry['print_machine'] ?? 'N/A'); ?></td>

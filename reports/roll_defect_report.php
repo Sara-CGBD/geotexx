@@ -134,7 +134,7 @@ foreach ($reports as $report) {
 
     // Cache lowercase status once
     $status = strtolower($report['overall_status'] ?? '');
-    if ($status === 'done') {
+    if ($status === 'done' || $status === 'approved') {
         $completedReports++;
     } else {
         $pendingReports++;
@@ -260,6 +260,7 @@ foreach ($reports as $report) {
                     <select id="overall_status" name="overall_status">
                         <option value="">All Statuses</option>
                         <option value="Done" <?php echo $overallStatus === 'Done' ? 'selected' : ''; ?>>Done</option>
+                        <option value="Approved" <?php echo $overallStatus === 'Approved' ? 'selected' : ''; ?>>Approved</option>
                         <option value="Pending" <?php echo $overallStatus === 'Pending' ? 'selected' : ''; ?>>Pending</option>
                     </select>
                 </div>
@@ -337,7 +338,7 @@ foreach ($reports as $report) {
                         <?php foreach ($statusStats as $status => $stats): 
                             // Optimized: Cache lowercase check
                             $statusLower = strtolower($status);
-                            $badgeClass = $statusLower === 'done' ? 'overall-done' : 'overall-pending';
+                            $badgeClass = ($statusLower === 'done' || $statusLower === 'approved') ? 'overall-done' : 'overall-pending';
                         ?>
                             <tr>
                                 <td>
@@ -389,14 +390,14 @@ foreach ($reports as $report) {
                             if ($lengthStatus !== 'done') {
                                 $issues[] = 'Length Calibration Pending';
                             }
-                            if (empty($issues) && $overallStatus === 'done') {
+                            if (empty($issues) && ($overallStatus === 'done' || $overallStatus === 'approved')) {
                                 $issues[] = 'All checks completed';
                             }
                             
                             // Cache formatted values
                             $gsmBadgeClass = $gsmStatus === 'done' ? 'done' : 'pending';
                             $lengthBadgeClass = $lengthStatus === 'done' ? 'done' : 'pending';
-                            $overallBadgeClass = $overallStatus === 'done' ? 'overall-done' : 'overall-pending';
+                            $overallBadgeClass = ($overallStatus === 'done' || $overallStatus === 'approved') ? 'overall-done' : 'overall-pending';
                             $createdAtFormatted = date('M d, Y g:i A', strtotime($report['created_at']));
                             $issuesText = implode(', ', $issues);
                         ?>

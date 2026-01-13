@@ -17,6 +17,9 @@ class AccessControl {
     const ROLE_CHECKER = 'checker';
     const ROLE_FINANCE_USER = 'finance_user';
     const ROLE_PLANNING_USER = 'planning_user';
+    const ROLE_STORE_USER = 'store_user';
+    const ROLE_DELIVERY_USER = 'delivery_user';
+    const ROLE_SEWING_TEST = 'sewing_test';
     
     // Define all modules
     const MODULE_QC = 'quality_control';
@@ -57,6 +60,7 @@ class AccessControl {
             self::ROLE_PRODUCTION_USER => self::PERMISSION_ENTRY,
             self::ROLE_AGM_OPS => self::PERMISSION_VIEW,
             self::ROLE_PLANNING_USER => self::PERMISSION_VIEW,
+            self::ROLE_DELIVERY_USER => self::PERMISSION_ENTRY,
         ],
         self::MODULE_PRODUCTION => [
             self::ROLE_ADMIN => self::PERMISSION_FULL,
@@ -64,6 +68,7 @@ class AccessControl {
             self::ROLE_PRODUCTION_USER => self::PERMISSION_ENTRY,
             self::ROLE_AGM_OPS => self::PERMISSION_VIEW,
             self::ROLE_PLANNING_USER => self::PERMISSION_VIEW,
+            self::ROLE_SEWING_TEST => self::PERMISSION_ENTRY,
         ],
         self::MODULE_SCRAP => [
             self::ROLE_ADMIN => self::PERMISSION_FULL,
@@ -78,6 +83,7 @@ class AccessControl {
             self::ROLE_AGM_OPS => self::PERMISSION_VIEW,
             self::ROLE_FINANCE_USER => self::PERMISSION_VIEW,
             self::ROLE_PLANNING_USER => self::PERMISSION_VIEW,
+            self::ROLE_DELIVERY_USER => self::PERMISSION_ENTRY,
         ],
         self::MODULE_RECYCLE => [
             self::ROLE_ADMIN => self::PERMISSION_FULL,

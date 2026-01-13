@@ -1,6 +1,4 @@
 ﻿<?php
-
-
 session_start();
 require_once 'security_config.php';
 require_once '../config/project_helper.php';
@@ -39,32 +37,116 @@ date_default_timezone_set('Asia/Dhaka');
 // Connect DB
 $conn = SecurityConfig::getConnection();
 
+// Ensure trip column exists in roll_received table
+$checkTripCol = $conn->query("SHOW COLUMNS FROM roll_received LIKE 'trip'");
+if (!$checkTripCol || $checkTripCol->num_rows == 0) {
+    $conn->query("ALTER TABLE roll_received ADD COLUMN trip INT DEFAULT NULL");
+}
+
 // Fetch default project only
 $projects = getDefaultProjectList($conn);
 
-// Fetch all reference numbers from transferred rolls
-$allReferenceNumbers = [];
-$refQuery = "SELECT DISTINCT reference_number FROM roll_transfer WHERE reference_number IS NOT NULL ORDER BY created_at DESC";
-$refResult = $conn->query($refQuery);
-if ($refResult) {
-    while ($row = $refResult->fetch_assoc()) {
-        $allReferenceNumbers[] = $row['reference_number'];
+// Fetch distinct trips from roll_transfer for dropdown
+$trips = [];
+$hasTripCol = $conn->query("SHOW COLUMNS FROM roll_transfer LIKE 'trip'");
+if ($hasTripCol && $hasTripCol->num_rows > 0) {
+    $tripQuery = "SELECT DISTINCT trip, MAX(date_time) as last_date 
+                  FROM roll_transfer 
+                  WHERE trip IS NOT NULL 
+                  GROUP BY trip 
+                  ORDER BY trip DESC";
+    $tripResult = $conn->query($tripQuery);
+    if ($tripResult) {
+        while ($row = $tripResult->fetch_assoc()) {
+            $trips[] = [
+                'trip' => (int)$row['trip'],
+                'last_date' => $row['last_date']
+            ];
+        }
     }
 }
 
-// Include routed roll references (bag production) from qc_test_orders
-$routedQuery = "SELECT DISTINCT sample_reference_id AS reference_number 
-                FROM qc_test_orders 
-                WHERE roll_destination = 'bag_production' 
-                  AND sample_reference_id IS NOT NULL 
-                  AND sample_reference_id != ''";
-$routedResult = $conn->query($routedQuery);
-if ($routedResult) {
-    while ($row = $routedResult->fetch_assoc()) {
-        if (!in_array($row['reference_number'], $allReferenceNumbers, true)) {
-            $allReferenceNumbers[] = $row['reference_number'];
+// Fetch reference numbers with their trip, excluding those already received for the same trip
+$refsByTrip = [];
+// Check if trip column exists in roll_received
+$hasReceivedTrip = false;
+$checkReceivedTrip = $conn->query("SHOW COLUMNS FROM roll_received LIKE 'trip'");
+if ($checkReceivedTrip && $checkReceivedTrip->num_rows > 0) {
+    $hasReceivedTrip = true;
+}
+
+// Check if is_deleted column exists in roll_received
+$hasReceivedIsDeleted = false;
+$checkReceivedIsDeleted = $conn->query("SHOW COLUMNS FROM roll_received LIKE 'is_deleted'");
+if ($checkReceivedIsDeleted && $checkReceivedIsDeleted->num_rows > 0) {
+    $hasReceivedIsDeleted = true;
+}
+
+// Check if is_deleted column exists in roll_transfer  
+$hasTransferIsDeleted = false;
+$checkTransferIsDeleted = $conn->query("SHOW COLUMNS FROM roll_transfer LIKE 'is_deleted'");
+if ($checkTransferIsDeleted && $checkTransferIsDeleted->num_rows > 0) {
+    $hasTransferIsDeleted = true;
+}
+
+$transferDeletedCondition = $hasTransferIsDeleted ? "AND (rt.is_deleted = 0 OR rt.is_deleted IS NULL)" : "";
+$receivedDeletedCondition = $hasReceivedIsDeleted ? "AND (rr.is_deleted = 0 OR rr.is_deleted IS NULL)" : "";
+
+// Build query based on whether trip column exists
+if ($hasReceivedTrip) {
+    // If trip column exists, exclude references received for the same trip only
+    $refTripQuery = "SELECT DISTINCT rt.reference_number, rt.trip 
+                     FROM roll_transfer rt
+                     WHERE rt.reference_number IS NOT NULL 
+                       AND rt.reference_number != ''
+                       AND rt.trip IS NOT NULL
+                       {$transferDeletedCondition}
+                       AND NOT EXISTS (
+                         SELECT 1 FROM roll_received rr 
+                         WHERE rr.reference_number = rt.reference_number
+                         AND rr.trip IS NOT NULL
+                         AND rr.trip = rt.trip
+                         {$receivedDeletedCondition}
+                       )
+                     ORDER BY rt.trip DESC, rt.date_time DESC";
+} else {
+    // If trip column doesn't exist, exclude all received references (backward compatibility)
+    $refTripQuery = "SELECT DISTINCT rt.reference_number, rt.trip 
+                     FROM roll_transfer rt
+                     WHERE rt.reference_number IS NOT NULL 
+                       AND rt.reference_number != ''
+                       AND rt.trip IS NOT NULL
+                       {$transferDeletedCondition}
+                       AND NOT EXISTS (
+                         SELECT 1 FROM roll_received rr 
+                         WHERE rr.reference_number = rt.reference_number
+                         {$receivedDeletedCondition}
+                       )
+                     ORDER BY rt.trip DESC, rt.date_time DESC";
+}
+$refTripResult = $conn->query($refTripQuery);
+if (!$refTripResult) {
+    error_log("Query failed in roll_received_entry.php: " . $conn->error);
+    error_log("Query: " . $refTripQuery);
+} else {
+    $totalRows = 0;
+    while ($row = $refTripResult->fetch_assoc()) {
+        $totalRows++;
+        $ref = trim($row['reference_number']);
+        $trip = (int)$row['trip'];
+        
+        // Initialize trip array if not exists
+        if (!isset($refsByTrip[$trip])) {
+            $refsByTrip[$trip] = [];
+        }
+        
+        // Add reference if not already present
+        if (!in_array($ref, $refsByTrip[$trip], true)) {
+            $refsByTrip[$trip][] = $ref;
         }
     }
+    // Debug: log how many references were found
+    error_log("roll_received_entry.php: Found $totalRows reference rows, grouped into " . count($refsByTrip) . " trips");
 }
 
 // Fetch project-reference combinations that have already been received
@@ -127,6 +209,27 @@ $reporter_name = $_SESSION['username'];
     color: white;
     border-color: #007bff;
   }
+  .alert {
+    padding: 12px;
+    border-radius: 6px;
+    margin-bottom: 20px;
+  }
+  .alert-success {
+    background: #d4edda;
+    color: #155724;
+    border: 1px solid #c3e6cb;
+  }
+  .alert-danger {
+    background: #f8d7da;
+    color: #721c24;
+    border: 1px solid #f5c6cb;
+  }
+  small.help-text {
+    color: #666;
+    display: block;
+    margin-top: 5px;
+    font-size: 13px;
+  }
 </style>
 </head>
 <body>
@@ -135,13 +238,13 @@ $reporter_name = $_SESSION['username'];
   <h1>Roll Received Entry</h1>
 
   <?php if (isset($_GET['success'])): ?>
-    <div class="alert alert-success" style="background: #d4edda; color: #155724; padding: 10px; border: 1px solid #c3e6cb; border-radius: 4px; margin: 10px 0;">
+    <div class="alert alert-success">
       <?php echo htmlspecialchars($_GET['success']); ?>
     </div>
   <?php endif; ?>
 
   <?php if (isset($_GET['error'])): ?>
-    <div class="alert alert-danger" style="background: #f8d7da; color: #721c24; padding: 10px; border: 1px solid #f5c6cb; border-radius: 4px; margin: 10px 0;">
+    <div class="alert alert-danger">
       <?php echo htmlspecialchars($_GET['error']); ?>
     </div>
   <?php endif; ?>
@@ -175,18 +278,41 @@ $reporter_name = $_SESSION['username'];
       <input type="hidden" id="project_id" name="project_id" value="<?php echo isset($projects[0]['id']) ? (int)$projects[0]['id'] : ''; ?>">
     </div>
 
-    <!-- Reference Number (filtered by project) -->
+    <!-- Trip -->
     <div class="form-group">
-      <label>Reference Number: </label>
-      <select id="reference_number" name="reference_number" required>
-        <option value="">-- Select a project first --</option>
+      <label>Trip:</label>
+      <select id="trip" name="trip" required onchange="handleTripChange()">
+        <option value="">-- Select Trip --</option>
+        <?php foreach($trips as $t): 
+          $tripDate = '';
+          if (!empty($t['last_date'])) {
+            try {
+              $dateObj = new DateTime($t['last_date']);
+              $tripDate = ' (' . $dateObj->format('Y-m-d') . ')';
+            } catch (Exception $e) {
+              $tripDate = '';
+            }
+          }
+        ?>
+        <option value="<?php echo $t['trip']; ?>">Trip <?php echo $t['trip']; ?><?php echo $tripDate; ?></option>
+        <?php endforeach; ?>
       </select>
-      <small style="color: #666; display: block; margin-top: 5px;">Select a project to see available reference numbers</small>
+      <small class="help-text">Select a trip to see reference numbers transferred in that trip</small>
     </div>
 
-    <!-- Summary Section (CNC-style) -->
+    <!-- Reference Number (filtered by project and trip) -->
     <div class="form-group">
-      <div id="summaryBox" class="summary-info"></div>
+      <label>Reference Number:</label>
+      <select id="reference_number" name="reference_number" required onchange="handleReferenceChange()">
+        <option value="">-- Select a trip first --</option>
+      </select>
+      <input type="hidden" id="bundle_refs" name="bundle_refs" value="">
+      <small class="help-text" id="refHelp">Select a trip to see available reference numbers</small>
+    </div>
+
+    <!-- Summary Section -->
+    <div class="form-group">
+      <div id="summaryBox" class="summary-info">Please fill all fields to see summary</div>
       <input type="hidden" id="summary" name="summary">
     </div>
 
@@ -198,12 +324,19 @@ $reporter_name = $_SESSION['username'];
 </div>
 
 <script>
-// PHP data for JavaScript
-const allReferenceNumbers = <?php echo json_encode($allReferenceNumbers); ?>;
+// PHP data for JavaScript - pass as simple object
+const refsByTrip = <?php echo json_encode($refsByTrip); ?>;
 const receivedCombinations = <?php echo json_encode($receivedCombinations); ?>;
 
-console.log('All references:', allReferenceNumbers);
-console.log('Received combinations:', receivedCombinations);
+// Debug: Log the structure
+console.log('=== REFS BY TRIP DEBUG ===');
+console.log('refsByTrip:', refsByTrip);
+console.log('Type:', typeof refsByTrip);
+console.log('Keys:', Object.keys(refsByTrip));
+console.log('refsByTrip[1]:', refsByTrip[1]);
+console.log('refsByTrip["1"]:', refsByTrip["1"]);
+console.log('refsByTrip[2]:', refsByTrip[2]);
+console.log('refsByTrip["2"]:', refsByTrip["2"]);
 
 function updateTimeAndShift() {
   const now = new Date();
@@ -220,9 +353,9 @@ function updateTimeAndShift() {
   document.getElementById("reporting_time").value = `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss}`;
   const h = dhaka.getHours();
   document.getElementById("shiftBanner").innerText = "Shift: " + ((h>=8&&h<20)?"Day":"Night");
-  updateSummary();
 }
-setInterval(updateTimeAndShift,1000); updateTimeAndShift();
+setInterval(updateTimeAndShift,1000); 
+updateTimeAndShift();
 
 function selectBtn(btn, groupId){
   document.querySelectorAll(`#${groupId} .btn`).forEach(b=>b.classList.remove('selected'));
@@ -231,219 +364,204 @@ function selectBtn(btn, groupId){
     const projectId = btn.dataset.id;
     document.getElementById("project_id").value = projectId;
     
-    // Update reference number dropdown based on selected project
-    updateReferenceDropdown(projectId);
+    // Update reference number dropdown based on selected project and trip
+    const selectedTrip = document.getElementById('trip').value;
+    if (selectedTrip) {
+      handleTripChange();
+    }
   }
   updateSummary();
 }
 
-function updateReferenceDropdown(projectId) {
+function handleTripChange() {
+  const tripSelect = document.getElementById('trip');
+  const projectId = document.getElementById('project_id').value;
+  const selectedTrip = tripSelect.value;
+  
   const refSelect = document.getElementById('reference_number');
+  const refHelp = document.getElementById('refHelp');
+  
+  // Clear dropdown
   refSelect.innerHTML = '<option value="">-- Select Reference Number --</option>';
   
-  // Filter references that haven't been received for this project
-  allReferenceNumbers.forEach(ref => {
-    const key = projectId + '_' + ref;
-    const alreadyReceived = receivedCombinations.hasOwnProperty(key);
-    
-    if (!alreadyReceived) {
-      const option = document.createElement('option');
-      option.value = ref;
-      option.textContent = ref;
-      refSelect.appendChild(option);
+  if (!selectedTrip || selectedTrip === '') {
+    refSelect.innerHTML = '<option value="">-- Select a trip first --</option>';
+    refHelp.textContent = 'Select a trip to see available reference numbers';
+    updateSummary();
+    return;
+  }
+  
+  if (!projectId) {
+    refSelect.innerHTML = '<option value="">-- Select a project first --</option>';
+    refHelp.textContent = 'Select a project first';
+    updateSummary();
+    return;
+  }
+  
+  // Get references for the selected trip
+  // JSON encoding converts PHP integer keys to string keys in JavaScript objects
+  const tripKeyNum = parseInt(selectedTrip);
+  const tripKeyStr = String(selectedTrip);
+  let tripRefs = [];
+  
+  // Try string key first (JSON converts integer keys to strings), then numeric
+  if (refsByTrip) {
+  tripRefs = refsByTrip[tripKeyStr] || refsByTrip[tripKeyNum] || [];
+  }
+  
+  if (tripRefs.length === 0) {
+    refSelect.innerHTML = '<option value="">-- No references found for this trip --</option>';
+    refHelp.textContent = 'No reference numbers transferred in this trip';
+    updateSummary();
+    return;
+  }
+  
+  // Group references into bundles and individual refs
+  const bundleMap = new Map();
+  const individualRefs = [];
+  
+  tripRefs.forEach(ref => {
+    const match = ref.match(/^(.+)-(\d+)$/);
+    if (match) {
+      const base = match[1];
+      if (!bundleMap.has(base)) {
+        bundleMap.set(base, []);
+      }
+      bundleMap.get(base).push(ref);
+    } else {
+      individualRefs.push(ref);
     }
   });
   
-  // Reset selection
-  refSelect.value = '';
-  updateSummary();
+  const displayRefs = [];
+  const allActualRefs = [];
   
-  console.log('Updated reference dropdown for project:', projectId);
+  // Process bundles - add with range in brackets like "REF-1-4 (Bundle)"
+  bundleMap.forEach((refs, base) => {
+    if (refs.length >= 2) {
+      // Sort by roll number
+      refs.sort((a, b) => {
+        const numA = parseInt(a.match(/-(\d+)$/)[1]);
+        const numB = parseInt(b.match(/-(\d+)$/)[1]);
+        return numA - numB;
+      });
+      
+      // Get first and last roll numbers
+      const firstNum = refs[0].match(/-(\d+)$/)[1];
+      const lastNum = refs[refs.length - 1].match(/-(\d+)$/)[1];
+      
+      // Create bundle display format: "REF-1-4 (Bundle)"
+      const bundleDisplay = firstNum === lastNum 
+        ? base + '-' + firstNum + ' (Bundle)'
+        : base + '-' + firstNum + '-' + lastNum + ' (Bundle)';
+      
+      displayRefs.push(bundleDisplay);
+      allActualRefs.push(...refs);
+    } else {
+      // Single ref that matched pattern but isn't a bundle
+      individualRefs.push(refs[0]);
+    }
+  });
+  
+  // Add individual references
+  individualRefs.forEach(ref => {
+    displayRefs.push(ref);
+    allActualRefs.push(ref);
+  });
+  
+  // Sort display refs (bundles first, then individual refs)
+  displayRefs.sort((a, b) => {
+    const aIsBundle = a.includes('(Bundle)');
+    const bIsBundle = b.includes('(Bundle)');
+    if (aIsBundle && !bIsBundle) return -1;
+    if (!aIsBundle && bIsBundle) return 1;
+    return a.localeCompare(b);
+  });
+    
+  // Create a single option with all references separated by commas
+  const displayString = displayRefs.join(', ');
+  const actualRefsString = allActualRefs.join(', ');
+  
+      const option = document.createElement('option');
+  option.value = actualRefsString; // Store actual refs in value for submission
+  option.setAttribute('data-display', displayString); // Store display string
+        option.setAttribute('data-is-bundle', 'false');
+  option.textContent = displayString; // Show display string
+  refSelect.appendChild(option);
+  
+  refHelp.textContent = tripRefs.length + ' reference' + (tripRefs.length > 1 ? 's' : '') + ' from this trip';
+  
+  updateSummary();
+}
+
+function handleReferenceChange() {
+  const refSelect = document.getElementById('reference_number');
+  const bundleRefsInput = document.getElementById('bundle_refs');
+  const selectedOption = refSelect.options[refSelect.selectedIndex];
+  
+  if (selectedOption && selectedOption.getAttribute('data-is-bundle') === 'true') {
+    const bundleRefs = selectedOption.getAttribute('data-bundle-refs');
+    bundleRefsInput.value = bundleRefs || '';
+  } else {
+    bundleRefsInput.value = '';
+  }
+  updateSummary();
 }
 
 function updateSummary() {
-  const dateTime = document.getElementById('reporting_time')?.value || '';
-  const shiftBanner = document.getElementById('shiftBanner')?.innerText || '';
-  const receiverName = document.getElementById('receiver_name')?.value || '';
-  const projectName = document.querySelector('#projectGroup .btn.selected')?.innerText || '';
-  const referenceNumber = document.getElementById('reference_number')?.value || '';
-  
-  console.log('updateSummary called:', { dateTime, shiftBanner, receiverName, projectName, referenceNumber });
-  
-  if (dateTime && receiverName && projectName && referenceNumber) {
-    let summary = `${dateTime} | ${shiftBanner} | Receiver: ${receiverName} | Project: ${projectName} | Reference: ${referenceNumber}`;
-    const summaryBox = document.getElementById('summaryBox');
-    if (summaryBox) {
-      summaryBox.innerText = summary;
-      summaryBox.style.display = 'block';
-    }
-    const summaryInput = document.getElementById('summary');
-    if (summaryInput) {
-      summaryInput.value = summary;
-    }
-    console.log('Summary set:', summary);
-  } else {
-    const summaryBox = document.getElementById('summaryBox');
-    if (summaryBox) {
-      summaryBox.innerText = 'Please fill all fields to see summary';
-      summaryBox.style.display = 'block';
-    }
-    const summaryInput = document.getElementById('summary');
-    if (summaryInput) {
-      summaryInput.value = '';
-    }
-  }
-}
-
-function oldUpdateBatchNumberDisplay() {
-  const gsm = document.getElementById('gsm')?.value || '';
-  const lineNo = document.getElementById('line_no')?.value || '';
-  const fiberType = document.getElementById('fiber_type')?.value || '';
-  const rollNumber = document.getElementById('roll_number')?.value || '';
-  
-  if (gsm && lineNo && fiberType && rollNumber) {
-    const now = new Date();
-    const utc = now.getTime() + now.getTimezoneOffset()*60000;
-    const dhaka = new Date(utc + 6*3600000);
-    
-    // Determine ShiftDate based on time
-    const hour = dhaka.getHours();
-    let shiftDate = new Date(dhaka);
-    
-    if (hour < 8) {
-      // Night shift belongs to previous day
-      shiftDate.setDate(shiftDate.getDate() - 1);
-    }
-    
-    // Format date as YYMonDD
-    const year = String(shiftDate.getFullYear()).slice(-2);
-    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    const month = monthNames[shiftDate.getMonth()];
-    const day = String(shiftDate.getDate()).padStart(2, '0');
-    const dateStr = year + month + day;
-    
-    // Generate batch number preview with selected roll number
-    const batchPreview = gsm + 'L' + lineNo + fiberType + dateStr + rollNumber;
-    document.getElementById("batchNumberDisplay").value = batchPreview;
-  } else {
-    document.getElementById("batchNumberDisplay").value = "Auto-generated on submit";
-  }
-  updateSummary();
-}
-
-function validateForm(){
-  if(!document.getElementById("project_id").value){
-    alert("Select a project."); return false;
-  }
-  if(!document.getElementById("roll_number").value){
-    alert("Select a roll number."); return false;
-  }
-  
-  // Generate batch number before submission
-  updateBatchNumberDisplay();
-  const batchNumber = document.getElementById("batchNumberDisplay").value;
-  if (batchNumber === "Auto-generated on submit") {
-    alert("Please fill all required fields to generate batch number."); return false;
-  }
-  
-  // Set the hidden batch number field
-  document.getElementById("batchNumber").value = batchNumber;
-  
-  return true;
-}
-
-// Old summary updater - replaced
-function oldUpdateSummaryBackup(){
   const dateTime = document.getElementById('reporting_time').value;
-  const shiftText = document.getElementById('shiftBanner').innerText.replace('Shift: ','').trim();
-
-  // Project name from selected button
-  const selectedProjectBtn = document.querySelector('#projectGroup .btn.selected');
-  const projectName = selectedProjectBtn ? selectedProjectBtn.textContent.trim() : '';
-
+  const shiftBanner = document.getElementById('shiftBanner').innerText;
   const receiverName = document.getElementById('receiver_name').value;
-  const bagRollType = document.getElementById('bag_roll_type').value;
-  const rollSize = document.getElementById('roll_size').value;
-  const rollQty = document.getElementById('roll_quantity').value;
-  const gsm = document.getElementById('gsm').value;
-  const lineNo = document.getElementById('line_no').value;
-  const fiberType = document.getElementById('fiber_type').value;
-  const rollNumber = document.getElementById('roll_number').value;
-  const batchPreview = document.getElementById('batchNumberDisplay').value;
-
-  if (dateTime && shiftText) {
-    let summary = `${dateTime} | Shift: ${shiftText}`;
-    if (receiverName) summary += ` | Receiver: ${receiverName}`;
-    if (projectName) summary += ` | Project: ${projectName}`;
-    if (rollNumber) summary += ` | Roll No: ${rollNumber}`;
-    if (gsm) summary += ` | GSM: ${gsm}`;
-    if (lineNo) summary += ` | Line: ${lineNo}`;
-    if (fiberType) summary += ` | Fiber: ${fiberType}`;
-    if (bagRollType) summary += ` | Bag Roll: ${bagRollType}`;
-    if (rollSize) summary += ` | Size: ${rollSize}`;
-    if (rollQty) summary += ` | Qty: ${rollQty}`;
-    if (batchPreview && batchPreview !== 'Auto-generated on submit') summary += ` | Batch: ${batchPreview}`;
-
+  const projectName = document.querySelector('#projectGroup .btn.selected')?.innerText || '';
+  const trip = document.getElementById('trip').value;
+  const referenceNumber = document.getElementById('reference_number').value;
+  
+  if (dateTime && receiverName && projectName && trip && referenceNumber) {
+    let summary = `${dateTime} | ${shiftBanner} | Receiver: ${receiverName} | Project: ${projectName} | Trip: ${trip} | Reference: ${referenceNumber}`;
     document.getElementById('summaryBox').innerText = summary;
     document.getElementById('summary').value = summary;
   } else {
-    document.getElementById('summaryBox').innerText = '';
+    document.getElementById('summaryBox').innerText = 'Please fill all fields to see summary';
     document.getElementById('summary').value = '';
   }
 }
 
+function validateForm(){
+  if(!document.getElementById("project_id").value){
+    alert("Select a project."); 
+    return false;
+  }
+  if(!document.getElementById("trip").value){
+    alert("Select a trip."); 
+    return false;
+  }
+  if(!document.getElementById("reference_number").value){
+    alert("Select a reference number."); 
+    return false;
+  }
+  return true;
+}
+
 function clearForm(){
-  // Clear all form fields
   document.getElementById("receivedForm").reset();
   
-  // Clear button selections
   const projectButtons = document.querySelectorAll('#projectGroup .btn');
   projectButtons.forEach(b=>b.classList.remove('selected'));
   if (projectButtons.length > 0) {
     projectButtons[0].classList.add('selected');
     const defaultProjectId = projectButtons[0].dataset.id || '';
     document.getElementById("project_id").value = defaultProjectId;
-    updateReferenceDropdown(defaultProjectId);
   } else {
-    document.getElementById("project_id").value="";
+    document.getElementById("project_id").value = "";
   }
   
-  // Reset batch number display
-  document.getElementById("batchNumberDisplay").value = "Auto-generated on submit";
-  document.getElementById("batchNumber").value = "";
-  // Clear summary
-  document.getElementById('summaryBox').innerText = '';
+  const refSelect = document.getElementById('reference_number');
+  refSelect.innerHTML = '<option value="">-- Select a trip first --</option>';
+  document.getElementById('refHelp').textContent = 'Select a trip to see available reference numbers';
+  document.getElementById("bundle_refs").value = "";
+  document.getElementById('summaryBox').innerText = 'Please fill all fields to see summary';
   document.getElementById('summary').value = '';
 }
-
-// Add event listeners for summary updates
-const receiverNameInput = document.getElementById('receiver_name');
-const referenceNumberSelect = document.getElementById('reference_number');
-
-if (receiverNameInput) {
-  receiverNameInput.addEventListener('input', updateSummary);
-}
-if (referenceNumberSelect) {
-  referenceNumberSelect.addEventListener('change', updateSummary);
-}
-
-// Initial summary
-updateSummary();
-
-// Initialize references for default project on load
-document.addEventListener('DOMContentLoaded', () => {
-  const defaultProjectBtn = document.querySelector('#projectGroup .btn.selected');
-  if (defaultProjectBtn) {
-    const projectId = defaultProjectBtn.dataset.id || '';
-    document.getElementById("project_id").value = projectId;
-    updateReferenceDropdown(projectId);
-  }
-});
-
-console.log('Roll Received Entry form initialized');
 </script>
 </body>
 </html>
-
-
-

@@ -17,6 +17,10 @@ if (!in_array($user_role, $allowed_roles)) {
 date_default_timezone_set('Asia/Dhaka');
 $conn = SecurityConfig::getConnection();
 
+// Determine which sewing table exists
+$sewingTableCheck = $conn->query("SHOW TABLES LIKE 'sewing_machine_entry'");
+$sewingTable = ($sewingTableCheck && $sewingTableCheck->num_rows > 0) ? 'sewing_machine_entry' : 'swing_machine_entry';
+
 $dateFrom = $_GET['date_from'] ?? date('Y-m-d', strtotime('-30 days'));
 $dateTo = $_GET['date_to'] ?? date('Y-m-d');
 
@@ -81,7 +85,7 @@ foreach ($stages as $stage) {
 
             $stockQuery = "SELECT 
                             (SELECT COUNT(*) FROM cnc_entries WHERE DATE(date_time) BETWEEN ? AND ?) +
-                            (SELECT COUNT(*) FROM swing_machine_entry WHERE DATE(date_time) BETWEEN ? AND ?) +
+                            (SELECT COUNT(*) FROM $sewingTable WHERE DATE(date_time) BETWEEN ? AND ?) +
                             (SELECT COUNT(*) FROM branding_entries WHERE $brandingFilter DATE(date_time) BETWEEN ? AND ?) as count";
             $stmt = $conn->prepare($stockQuery);
             $stmt->bind_param('ssssss', $dateFrom, $dateTo, $dateFrom, $dateTo, $dateFrom, $dateTo);

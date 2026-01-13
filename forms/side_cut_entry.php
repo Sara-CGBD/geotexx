@@ -148,13 +148,14 @@ if ($checkStmt) {
 }
 
 $reporter_id = $_SESSION['user_id'];
-$reporter_name = $_SESSION['username'];
+// Get reporter name - try full_name first, then username
+$reporter_name = $_SESSION['full_name'] ?? $_SESSION['username'] ?? 'Unknown';
 ?>
 <!DOCTYPE html>
 <html lang="en">  
 <head>
 <meta charset="UTF-8">
-<title>Side Cut Scrap Entry</title>
+<title>Side Cut Entry</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
 <style>
   body { font-family:'Inter',sans-serif; background:#f4f6f9; margin:0; padding:0; color:#2c3e50; }
@@ -183,10 +184,11 @@ $reporter_name = $_SESSION['username'];
 <body>
 <div class="container">
   
-  <h1>Side Cut Scrap Entry (End of Shift)</h1>
+  <h1>Side Cut Entry (End of Shift)</h1>
 
   <?php if (isset($_GET['success'])): ?>
-    <div class="Side CutScrap Entry saved successfully!
+    <div class="alert-success">
+      <?php echo htmlspecialchars($_GET['success']); ?>
     </div>
   <?php endif; ?>
 
@@ -275,7 +277,7 @@ $reporter_name = $_SESSION['username'];
 
     <!-- Quantity (kg) -->
     <div class="form-group">
-      <label>Side Cut Scrap Quantity (kg): </label>
+      <label>Side Cut Quantity (kg): </label>
       <input type="number" id="quantity_kg" name="quantity_kg" min="0.01" step="0.01" required>
     </div>
 

@@ -38,61 +38,64 @@ date_default_timezone_set('Asia/Dhaka');
 // DB connection
 $conn = SecurityConfig::getConnection();
 
-// Fetch Scrap entries with remaining quantities after recycling (from scrap table)
-// Only show lab testing scrap if send_to_recycle = 1 (or if it's not a lab testing entry)
-$scraps = [];
+// Fetch Side Cut Scrap entries for recycling - separate by category
 $hasScrapType = $conn->query("SHOW COLUMNS FROM scrap_recycle LIKE 'scrap_type'");
-$srTypeCondition = ($hasScrapType && $hasScrapType->num_rows > 0) ? "sr.scrap_type = 'scrap'" : "1=1";
-$srTypeCase = ($hasScrapType && $hasScrapType->num_rows > 0) ? "CASE WHEN sr.scrap_type = 'scrap' THEN sr.recycled_qty ELSE 0 END" : "sr.recycled_qty";
-
-$hasSendToRecycle = $conn->query("SHOW COLUMNS FROM scrap LIKE 'send_to_recycle'");
-$sendToRecycleCond = ($hasSendToRecycle && $hasSendToRecycle->num_rows > 0)
-    ? "AND (s.scrap_product != 'Lab Testing' OR s.scrap_product IS NULL OR COALESCE(s.send_to_recycle, 1) = 1)"
-    : "";
-$res = $conn->query("SELECT 
-    s.id,
-    s.scrap_id as entry_id,
-    s.date_time as date,
-    s.shift,
-    s.scrap_category as category,
-    s.qty as quantity,
-    'scrap' as scrap_type,
-    COALESCE(SUM({$srTypeCase}), 0) as total_recycled,
-    (s.qty - COALESCE(SUM({$srTypeCase}), 0)) as remaining_qty
-FROM scrap s
-LEFT JOIN scrap_recycle sr ON s.id = sr.scrap_id AND {$srTypeCondition}
-WHERE s.is_deleted = 0 
-  {$sendToRecycleCond}
-GROUP BY s.id, s.scrap_id, s.date_time, s.shift, s.scrap_category, s.qty
-HAVING remaining_qty > 0
-ORDER BY s.id DESC");
-if ($res) {
-    while ($row = $res->fetch_assoc()) {
-        $scraps[] = $row;
-    }
-}
-
-// Fetch Side Cut Scrap entries with remaining quantities after recycling
 $srSideCond = ($hasScrapType && $hasScrapType->num_rows > 0) ? "sr.scrap_type = 'side_cut'" : "1=1";
 $srSideCase = ($hasScrapType && $hasScrapType->num_rows > 0) ? "CASE WHEN sr.scrap_type = 'side_cut' THEN sr.recycled_qty ELSE 0 END" : "sr.recycled_qty";
-$sideCutRes = $conn->query("SELECT 
+
+// Fetch Sheet Production side cuts (with reference_number)
+$sheetProductionScraps = [];
+$sheetRes = $conn->query("SELECT 
     scs.id,
     scs.entry_id,
     scs.entry_date as date,
     scs.shift,
     scs.category,
+    scs.reference_number,
+    scs.cutting_batch_no,
     scs.quantity_kg as quantity,
     'side_cut' as scrap_type,
     COALESCE(SUM({$srSideCase}), 0) as total_recycled,
     (scs.quantity_kg - COALESCE(SUM({$srSideCase}), 0)) as remaining_qty
 FROM side_cut_scrap scs
 LEFT JOIN scrap_recycle sr ON scs.id = sr.scrap_id AND {$srSideCond}
-GROUP BY scs.id, scs.entry_id, scs.entry_date, scs.shift, scs.category, scs.quantity_kg
+WHERE scs.category = 'Sheet Production'
+  AND scs.reference_number IS NOT NULL 
+  AND scs.reference_number != ''
+GROUP BY scs.id, scs.entry_id, scs.entry_date, scs.shift, scs.category, scs.reference_number, scs.cutting_batch_no, scs.quantity_kg
 HAVING remaining_qty > 0
 ORDER BY scs.id DESC");
-if ($sideCutRes) {
-    while ($row = $sideCutRes->fetch_assoc()) {
-        $scraps[] = $row;
+if ($sheetRes) {
+    while ($row = $sheetRes->fetch_assoc()) {
+        $sheetProductionScraps[] = $row;
+    }
+}
+
+// Fetch Swing Production side cuts (with cutting_batch_no)
+$swingProductionScraps = [];
+$swingRes = $conn->query("SELECT 
+    scs.id,
+    scs.entry_id,
+    scs.entry_date as date,
+    scs.shift,
+    scs.category,
+    scs.reference_number,
+    scs.cutting_batch_no,
+    scs.quantity_kg as quantity,
+    'side_cut' as scrap_type,
+    COALESCE(SUM({$srSideCase}), 0) as total_recycled,
+    (scs.quantity_kg - COALESCE(SUM({$srSideCase}), 0)) as remaining_qty
+FROM side_cut_scrap scs
+LEFT JOIN scrap_recycle sr ON scs.id = sr.scrap_id AND {$srSideCond}
+WHERE scs.category = 'Swing Production'
+  AND scs.cutting_batch_no IS NOT NULL 
+  AND scs.cutting_batch_no != ''
+GROUP BY scs.id, scs.entry_id, scs.entry_date, scs.shift, scs.category, scs.reference_number, scs.cutting_batch_no, scs.quantity_kg
+HAVING remaining_qty > 0
+ORDER BY scs.id DESC");
+if ($swingRes) {
+    while ($row = $swingRes->fetch_assoc()) {
+        $swingProductionScraps[] = $row;
     }
 }
 
@@ -236,33 +239,73 @@ function generateRecycleId() {
       <input type="hidden" id="recycle_id" name="recycle_id" value="<?php echo generateRecycleId(); ?>">
     </div>
 
-    <!-- Scrap ID -->
+    <!-- Production Category Selection -->
     <div class="form-group">
+      <label>Production Category: </label>
+      <div class="btn-group" id="categoryGroup">
+        <button type="button" class="btn" data-value="Sheet Production" onclick="selectCategory(this)">Sheet Production</button>
+        <button type="button" class="btn" data-value="Swing Production" onclick="selectCategory(this)">Swing Production</button>
+      </div>
+      <input type="hidden" id="category" name="category" value="">
+    </div>
+
+    <!-- Scrap ID - Sheet Production (Reference Number) -->
+    <div class="form-group" id="sheetProductionSection" style="display:none;">
       <label>Scrap ID: </label>
-      <select id="scrap_id" name="scrap_id" required onchange="updateRemainingQty()">
-        <option value="">-- Select Scrap --</option>
-        <?php foreach($scraps as $s): ?>
+      <select id="scrap_id_sheet" onchange="updateScrapId()">
+        <option value="">-- Select Reference Number --</option>
+        <?php foreach($sheetProductionScraps as $s): ?>
           <?php 
             $id = $s['id'] ?? '';
-            $scrapType = $s['scrap_type'] ?? 'scrap';
+            $scrapType = $s['scrap_type'] ?? 'side_cut';
             $entryId = $s['entry_id'] ?? '';
             $category = $s['category'] ?? '';
+            $referenceNumber = $s['reference_number'] ?? '';
             $original_qty = $s['quantity'] ?? 0;
             $total_recycled = $s['total_recycled'] ?? 0;
             $remaining_qty = $s['remaining_qty'] ?? $original_qty;
-            $typeLabel = ($scrapType === 'side_cut') ? 'Side Cut' : 'Scrap';
           ?>
           <option value="<?php echo htmlspecialchars($id); ?>" 
                   data-scrap-type="<?php echo htmlspecialchars($scrapType); ?>"
                   data-original="<?php echo $original_qty; ?>"
                   data-recycled="<?php echo $total_recycled; ?>"
-                  data-remaining="<?php echo $remaining_qty; ?>">
-            <?php echo $typeLabel; ?>#<?php echo htmlspecialchars($id); ?> (<?php echo htmlspecialchars($entryId); ?>) - <?php echo htmlspecialchars($category); ?> | Available: <?php echo number_format($remaining_qty, 2); ?> kg
+                  data-remaining="<?php echo $remaining_qty; ?>"
+                  data-reference="<?php echo htmlspecialchars($referenceNumber); ?>">
+            <?php echo htmlspecialchars($referenceNumber); ?> - Entry: <?php echo htmlspecialchars($entryId); ?> | Available: <?php echo number_format($remaining_qty, 2); ?> kg
           </option>
         <?php endforeach; ?>
       </select>
-      <input type="hidden" id="scrap_type" name="scrap_type" value="scrap">
     </div>
+
+    <!-- Scrap ID - Swing Production (CNC Cutting Batch) -->
+    <div class="form-group" id="swingProductionSection" style="display:none;">
+      <label>Scrap ID: </label>
+      <select id="scrap_id_swing" onchange="updateScrapId()">
+        <option value="">-- Select CNC Cutting Batch --</option>
+        <?php foreach($swingProductionScraps as $s): ?>
+          <?php 
+            $id = $s['id'] ?? '';
+            $scrapType = $s['scrap_type'] ?? 'side_cut';
+            $entryId = $s['entry_id'] ?? '';
+            $category = $s['category'] ?? '';
+            $cuttingBatchNo = $s['cutting_batch_no'] ?? '';
+            $original_qty = $s['quantity'] ?? 0;
+            $total_recycled = $s['total_recycled'] ?? 0;
+            $remaining_qty = $s['remaining_qty'] ?? $original_qty;
+          ?>
+          <option value="<?php echo htmlspecialchars($id); ?>" 
+                  data-scrap-type="<?php echo htmlspecialchars($scrapType); ?>"
+                  data-original="<?php echo $original_qty; ?>"
+                  data-recycled="<?php echo $total_recycled; ?>"
+                  data-remaining="<?php echo $remaining_qty; ?>"
+                  data-batch="<?php echo htmlspecialchars($cuttingBatchNo); ?>">
+            <?php echo htmlspecialchars($cuttingBatchNo); ?> - Entry: <?php echo htmlspecialchars($entryId); ?> | Available: <?php echo number_format($remaining_qty, 2); ?> kg
+          </option>
+        <?php endforeach; ?>
+      </select>
+    </div>
+    <input type="hidden" id="scrap_id" name="scrap_id" value="">
+    <input type="hidden" id="scrap_type" name="scrap_type" value="side_cut">
     
     <!-- Available Quantity Display -->
     <div class="form-group">
@@ -283,7 +326,7 @@ function generateRecycleId() {
     <!-- Machine ID -->
     <div class="form-group">
       <label>Machine ID:</label>
-      <div class="btn-group">
+      <div class="btn-group" id="machineIdGroup">
         <button type="button" class="btn" onclick="setMachineId('1')">1</button>
         <button type="button" class="btn" onclick="setMachineId('2')">2</button>
         <button type="button" class="btn" onclick="setMachineId('3')">3</button>
@@ -313,9 +356,58 @@ function generateRecycleId() {
 </div>
 
 <script>
+function selectCategory(btn) {
+  // Remove selected class from all buttons
+  const buttons = document.querySelectorAll('#categoryGroup .btn');
+  buttons.forEach(b => b.classList.remove('selected'));
+  
+  // Add selected class to clicked button
+  btn.classList.add('selected');
+  
+  const category = btn.dataset.value;
+  document.getElementById('category').value = category;
+  
+  // Show/hide appropriate section
+  if (category === 'Sheet Production') {
+    document.getElementById('sheetProductionSection').style.display = 'block';
+    document.getElementById('swingProductionSection').style.display = 'none';
+    document.getElementById('scrap_id_swing').value = '';
+  } else if (category === 'Swing Production') {
+    document.getElementById('swingProductionSection').style.display = 'block';
+    document.getElementById('sheetProductionSection').style.display = 'none';
+    document.getElementById('scrap_id_sheet').value = '';
+  }
+  
+  // Clear scrap_id and available quantity
+  document.getElementById('scrap_id').value = '';
+  document.getElementById('available_qty').value = '';
+  document.getElementById('recycled_qty').value = '1';
+  updateSummary();
+}
+
+function updateScrapId() {
+  const category = document.getElementById('category').value;
+  const scrapSelect = category === 'Sheet Production' 
+    ? document.getElementById("scrap_id_sheet")
+    : document.getElementById("scrap_id_swing");
+  
+  // Update the hidden scrap_id input
+  document.getElementById('scrap_id').value = scrapSelect.value;
+  
+  // Update remaining quantity
+  updateRemainingQty();
+}
+
 function validateForm(){
-  if(!document.getElementById("scrap_id").value){
-    alert("Please select a scrap entry."); return false;
+  const category = document.getElementById("category").value;
+  if (!category) {
+    alert("Please select a Production Category."); return false;
+  }
+  
+  const scrapId = document.getElementById("scrap_id").value;
+  
+  if(!scrapId || scrapId === ''){
+    alert("Please select a Scrap ID."); return false;
   }
   if(!document.getElementById("machine_id").value){
     alert("Please select a Machine ID."); return false;
@@ -337,7 +429,11 @@ function validateForm(){
 }
 
 function updateRemainingQty() {
-  const scrapSelect = document.getElementById("scrap_id");
+  const category = document.getElementById("category").value;
+  const scrapSelect = category === 'Sheet Production' 
+    ? document.getElementById("scrap_id_sheet")
+    : document.getElementById("scrap_id_swing");
+  
   const selectedOption = scrapSelect.options[scrapSelect.selectedIndex];
   const availableQtyField = document.getElementById("available_qty");
   const recycledQtyField = document.getElementById("recycled_qty");
@@ -345,7 +441,7 @@ function updateRemainingQty() {
   
   if (selectedOption && selectedOption.value) {
     const remainingQty = parseFloat(selectedOption.getAttribute("data-remaining")) || 0;
-    const scrapType = selectedOption.getAttribute("data-scrap-type") || 'scrap';
+    const scrapType = selectedOption.getAttribute("data-scrap-type") || 'side_cut';
     
     availableQtyField.value = remainingQty.toFixed(2);
     recycledQtyField.max = remainingQty;
@@ -355,7 +451,7 @@ function updateRemainingQty() {
     availableQtyField.value = "";
     recycledQtyField.max = "";
     recycledQtyField.value = "1";
-    scrapTypeField.value = "scrap";
+    scrapTypeField.value = "side_cut";
   }
   updateSummary();
 }
@@ -390,9 +486,12 @@ function incrementQty(){
 function setMachineId(machineId){
   document.getElementById("machine_id").value = machineId;
   
-  // Remove selected class from all buttons
-  const buttons = document.querySelectorAll('.btn-group .btn');
-  buttons.forEach(btn => btn.classList.remove('selected'));
+  // Remove selected class from only machine ID buttons (not category buttons)
+  const machineIdGroup = document.getElementById("machineIdGroup");
+  if (machineIdGroup) {
+    const machineButtons = machineIdGroup.querySelectorAll('.btn');
+    machineButtons.forEach(btn => btn.classList.remove('selected'));
+  }
   
   // Add selected class to clicked button
   event.target.classList.add('selected');
@@ -403,8 +502,12 @@ function setMachineId(machineId){
 function updateSummary(){
   const dateTime = document.getElementById('dateTime').value;
   const recycleId = document.getElementById('recycle_id_display').value;
-  const scrapSelect = document.getElementById("scrap_id");
-  const scrapText = scrapSelect.options[scrapSelect.selectedIndex].text;
+  const category = document.getElementById('category').value;
+  const scrapSelect = category === 'Sheet Production' 
+    ? document.getElementById("scrap_id_sheet")
+    : document.getElementById("scrap_id_swing");
+  const scrapText = scrapSelect && scrapSelect.selectedIndex >= 0 ? scrapSelect.options[scrapSelect.selectedIndex].text : '';
+  const scrapId = scrapSelect ? scrapSelect.value : '';
   const qtyInput = document.getElementById("recycled_qty");
   const machineIdInput = document.getElementById("machine_id");
   const remarksInput = document.getElementById("remarks");
@@ -413,8 +516,9 @@ function updateSummary(){
   if (dateTime) {
     let s = `${dateTime}`;
     if (recycleId) s += ` | Recycle ID: ${recycleId}`;
-    if (scrapText && scrapSelect.value) s += ` | Scrap: ${scrapText}`;
-    if (qtyInput.value) s += ` | Qty: ${qtyInput.value}`;
+    if (category) s += ` | Category: ${category}`;
+    if (scrapText && scrapId) s += ` | Scrap: ${scrapText}`;
+    if (qtyInput.value) s += ` | Qty: ${qtyInput.value} kg`;
     if (machineIdInput.value) s += ` | Machine: ${machineIdInput.value}`;
     if (remarksText) s += ` | Remarks: ${remarksText}`;
     document.getElementById('summaryBox').innerText = s;
@@ -454,7 +558,8 @@ document.addEventListener('DOMContentLoaded', function(){
   setInterval(updateTimeAndShift, 1000);
   
   // Add event listeners for dynamic updates
-  document.getElementById("scrap_id").addEventListener("change", updateSummary);
+  document.getElementById("scrap_id_sheet").addEventListener("change", updateSummary);
+  document.getElementById("scrap_id_swing").addEventListener("change", updateSummary);
   document.getElementById("recycled_qty").addEventListener("input", updateSummary);
   document.getElementById("remarks").addEventListener("input", updateSummary);
 });

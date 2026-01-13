@@ -46,6 +46,11 @@ if ($userRole === 'agm operations' || $userRole === 'agm_ops' || $userRole === '
     $userRole = 'agm ops';
 }
 
+// Normalize prod_test to production_user
+if ($userRole === 'prod_test') {
+    $userRole = 'production_user';
+}
+
 $menuItems = [
         // ========== ADMIN - Full Access to All Modules ==========
         'admin' => [
@@ -74,6 +79,7 @@ $menuItems = [
                 ['text' => '8. Test Approval Dashboard', 'link' => 'admin/raw_material_test_approval_dashboard.php', 'icon' => 'fas fa-clipboard-check'],
                 ['text' => '9. Approved Material Inventory', 'link' => 'reports/approved_material_inventory.php', 'icon' => 'fas fa-check-square'],
                 ['text' => '10. Inventory Report', 'link' => 'reports/inventory_report.php', 'icon' => 'fas fa-warehouse'],
+                ['text' => '11. Material Issue Entry', 'link' => 'forms/material_issue_entry.php', 'icon' => 'fas fa-box-open'],
             ]],
             ['type' => 'group', 'text' => 'Quality Control(QC)', 'icon' => 'fas fa-clipboard-check', 'children' => [
                 ['text' => 'QC Test Approval Dashboard', 'link' => 'admin/qc_test_approval_dashboard.php', 'icon' => 'fas fa-check-double'],
@@ -97,7 +103,7 @@ $menuItems = [
                 ['text' => 'Fiber to Roll Entry', 'link' => 'forms/fiber_to_roll_entry.php', 'icon' => 'fas fa-exchange-alt'],
                 ['text' => 'Roll QC Report', 'link' => 'forms/roll_qc_report.php', 'icon' => 'fas fa-clipboard-check'],
                 ['text' => 'Roll Entry', 'link' => 'forms/roll_entry.php', 'icon' => 'fas fa-dolly-flatbed'],
-                ['text' => 'Roll Transfer Entry', 'link' => 'forms/roll_transfer_entry.php', 'icon' => 'fas fa-truck-moving'],
+                ['text' => 'Roll Internal Transfer Entry', 'link' => 'forms/roll_transfer_entry.php', 'icon' => 'fas fa-truck-moving'],
                 ['text' => 'Roll Production Summary', 'link' => 'reports/roll_production_summary.php', 'icon' => 'fas fa-chart-bar'],
                 ['text' => 'Fiber to Roll Conversion', 'link' => 'reports/fiber_to_roll_conversion.php', 'icon' => 'fas fa-sync-alt'],
                 ['text' => 'Roll Transfer Log', 'link' => 'reports/roll_transfer_log.php', 'icon' => 'fas fa-truck-moving'],
@@ -117,7 +123,7 @@ $menuItems = [
             ['type' => 'group', 'text' => 'Scrap/Waste', 'icon' => 'fas fa-recycle', 'children' => [
                 ['text' => 'Scrap Entry', 'link' => 'forms/scrap_entry.php', 'icon' => 'fas fa-trash'],
                 ['text' => 'View Scrap Entries (Current Shift)', 'link' => 'forms/scrap_entries_list.php', 'icon' => 'fas fa-list'],
-                ['text' => 'Side Cut Scrap Entry', 'link' => 'forms/side_cut_entry.php', 'icon' => 'fas fa-cut'],
+                ['text' => 'Side Cut Entry', 'link' => 'forms/side_cut_entry.php', 'icon' => 'fas fa-cut'],
                 ['text' => 'Daily Scrap Summary', 'link' => 'reports/daily_scrap_summary.php', 'icon' => 'fas fa-calendar-day'],
                 ['text' => 'Reference-wise Scrap Report', 'link' => 'reports/reference_scrap_report.php', 'icon' => 'fas fa-link'],
                 ['text' => 'CNC Batch-wise Scrap Report', 'link' => 'reports/batch_scrap_report.php', 'icon' => 'fas fa-cut'],
@@ -161,22 +167,12 @@ $menuItems = [
     
         // ========== PRODUCTION USER - Roll Production, Production, Scrap, Recycle ==========
         'production_user' => [
-            ['type' => 'group', 'text' => 'Raw Material Store', 'icon' => 'fas fa-warehouse', 'children' => [
-                ['text' => 'Store Received Entry', 'link' => 'forms/store_received_entry.php', 'icon' => 'fas fa-truck-loading'],
-                ['text' => 'Inventory Report', 'link' => 'reports/inventory_report.php', 'icon' => 'fas fa-warehouse'],
-            ]],
             ['type' => 'group', 'text' => 'Sheet Production', 'icon' => 'fas fa-industry', 'children' => [
                 ['text' => 'Fiber Received Entry', 'link' => 'forms/fiber_entry.php', 'icon' => 'fas fa-boxes'],
                 ['text' => 'Fiber to Roll Entry', 'link' => 'forms/fiber_to_roll_entry.php', 'icon' => 'fas fa-exchange-alt'],
-                ['text' => 'Roll QC Report', 'link' => 'forms/roll_qc_report.php', 'icon' => 'fas fa-clipboard-check'],
                 ['text' => 'Roll Entry', 'link' => 'forms/roll_entry.php', 'icon' => 'fas fa-dolly-flatbed'],
-                ['text' => 'Roll Transfer Entry', 'link' => 'forms/roll_transfer_entry.php', 'icon' => 'fas fa-truck-moving'],
-            ]],
-            ['type' => 'group', 'text' => 'Bag Production', 'icon' => 'fas fa-cogs', 'children' => [
-                ['text' => 'Roll Received Entry', 'link' => 'forms/roll_received_entry.php', 'icon' => 'fas fa-clipboard-check'],
-                ['text' => 'CNC Machine Entry', 'link' => 'forms/cnc_entry.php', 'icon' => 'fas fa-cut'],
-                ['text' => 'Sewing Machine Entry', 'link' => 'forms/swing_machine_entry.php', 'icon' => 'fas fa-scissors'],
-                ['text' => 'Branding Entry', 'link' => 'forms/branding_entry.php', 'icon' => 'fas fa-stamp'],
+                ['text' => 'Roll Production Summary', 'link' => 'reports/roll_production_summary.php', 'icon' => 'fas fa-chart-bar'],
+                ['text' => 'Fiber to Roll Conversion', 'link' => 'reports/fiber_to_roll_conversion.php', 'icon' => 'fas fa-sync-alt'],
             ]],
             ['type' => 'group', 'text' => 'Quality Control(QC)', 'icon' => 'fas fa-clipboard-check', 'children' => [
                 ['text' => 'Daily GSM Check (Floor)', 'link' => 'forms/daily_gsm_check.php', 'icon' => 'fas fa-weight'],
@@ -184,14 +180,14 @@ $menuItems = [
             ]],
             ['type' => 'group', 'text' => 'Scrap/Waste', 'icon' => 'fas fa-trash', 'children' => [
                 ['text' => 'Scrap Entry', 'link' => 'forms/scrap_entry.php', 'icon' => 'fas fa-trash'],
-                ['text' => 'Side Cut Scrap Entry', 'link' => 'forms/side_cut_entry.php', 'icon' => 'fas fa-cut'],
+                ['text' => 'Side Cut Entry', 'link' => 'forms/side_cut_entry.php', 'icon' => 'fas fa-cut'],
+                ['text' => 'Daily Scrap Summary', 'link' => 'reports/daily_scrap_summary.php', 'icon' => 'fas fa-calendar-day'],
             ]],
             ['type' => 'group', 'text' => 'Recycle', 'icon' => 'fas fa-recycle', 'children' => [
                 ['text' => 'Recycle Entry', 'link' => 'forms/scrap_recycle_entry.php', 'icon' => 'fas fa-recycle'],
             ]],
             ['type' => 'group', 'text' => 'Finished Goods(FG)', 'icon' => 'fas fa-box', 'children' => [
                 ['text' => 'FG Entry', 'link' => 'forms/fg_entry.php', 'icon' => 'fas fa-plus-square'],
-                ['text' => 'FG Delivery', 'link' => 'forms/fg_delivery_entry.php', 'icon' => 'fas fa-truck'],
             ]],
         ],
 
@@ -199,6 +195,43 @@ $menuItems = [
         'qc_inspector' => [
             ['type' => 'group', 'text' => 'Quality Control(QC)', 'icon' => 'fas fa-clipboard-check', 'children' => [
                 ['text' => 'QC Entry', 'link' => 'forms/qc_entry.php', 'icon' => 'fas fa-clipboard-check'],
+            ]],
+        ],
+
+        // ========== SEWING TEST - Bag Production Module Only ==========
+        'sewing_test' => [
+            ['type' => 'link', 'text' => 'Dashboard Overview', 'link' => 'admin/sewing_machine_dashboard.php', 'icon' => 'fas fa-th-large'],
+            ['type' => 'group', 'text' => 'Bag Production', 'icon' => 'fas fa-cogs', 'children' => [
+                ['text' => 'Roll Received Entry', 'link' => 'forms/roll_received_entry.php', 'icon' => 'fas fa-clipboard-check'],
+                ['text' => 'CNC Machine Entry', 'link' => 'forms/cnc_entry.php', 'icon' => 'fas fa-cut'],
+                ['text' => 'Sewing Machine Entry', 'link' => 'forms/swing_machine_entry.php', 'icon' => 'fas fa-scissors'],
+                ['text' => 'Branding Entry', 'link' => 'forms/branding_entry.php', 'icon' => 'fas fa-stamp'],
+                ['text' => 'Production Summary Report', 'link' => 'reports/production_summary.php', 'icon' => 'fas fa-chart-line'],
+                ['text' => 'Production Comparison Report', 'link' => 'reports/production_comparison_report.php', 'icon' => 'fas fa-chart-area'],
+                ['text' => 'CNC Cutting Summary', 'link' => 'reports/cnc_cutting_summary.php', 'icon' => 'fas fa-cut'],
+                ['text' => 'Sewing Output Report', 'link' => 'reports/sewing_output_report.php', 'icon' => 'fas fa-scissors'],
+                ['text' => 'Branding Summary Report', 'link' => 'reports/branding_summary_report.php', 'icon' => 'fas fa-stamp'],
+            ]],
+        ],
+
+        // ========== STORE USER - Raw Material Store Only ==========
+        'store_user' => [
+            ['type' => 'group', 'text' => 'Raw Material Store', 'icon' => 'fas fa-warehouse', 'children' => [
+                ['text' => 'Store Received Entry', 'link' => 'forms/store_received_entry.php', 'icon' => 'fas fa-truck-loading'],
+                ['text' => 'Material Issue Entry', 'link' => 'forms/material_issue_entry.php', 'icon' => 'fas fa-box-open'],
+                ['text' => 'Inventory Report', 'link' => 'reports/inventory_report.php', 'icon' => 'fas fa-warehouse'],
+            ]],
+        ],
+
+        // ========== DELIVERY USER - Roll Transfer & Finished Goods Delivery ==========
+        'delivery_user' => [
+            ['type' => 'group', 'text' => 'Roll Transfer', 'icon' => 'fas fa-truck-moving', 'children' => [
+                ['text' => 'Roll Internal Transfer Entry', 'link' => 'forms/roll_transfer_entry.php', 'icon' => 'fas fa-truck-moving'],
+                ['text' => 'Roll Transfer Log Report', 'link' => 'reports/roll_transfer_log.php', 'icon' => 'fas fa-file-alt'],
+            ]],
+            ['type' => 'group', 'text' => 'Finished Goods Delivery', 'icon' => 'fas fa-truck', 'children' => [
+                ['text' => 'FG Delivery Entry', 'link' => 'forms/fg_delivery_entry.php', 'icon' => 'fas fa-truck'],
+                ['text' => 'FG Delivery Report', 'link' => 'reports/fg_delivery_report.php', 'icon' => 'fas fa-file-alt'],
             ]],
         ],
 

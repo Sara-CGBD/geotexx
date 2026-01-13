@@ -29,6 +29,10 @@ if ($conn->connect_error) {
     exit();
 }
 
+// Determine which sewing table exists
+$sewingTableCheck = $conn->query("SHOW TABLES LIKE 'sewing_machine_entry'");
+$sewingTable = ($sewingTableCheck && $sewingTableCheck->num_rows > 0) ? 'sewing_machine_entry' : 'swing_machine_entry';
+
 // Get filters
 $start_date = $_GET['start_date'] ?? date('Y-m-01');
 $end_date = $_GET['end_date'] ?? date('Y-m-d');
@@ -101,7 +105,7 @@ if (!$production_type_filter || $production_type_filter == 'Sewing') {
         COALESCE(SUM(s.sewing_qty), 0) * ? as utility_cost,
         COALESCE(SUM(s.sewing_qty), 0) * ? as overhead_cost,
         COALESCE(SUM(s.sewing_qty), 0) * (? + ? + ?) as total_cost
-    FROM swing_machine_entry s
+    FROM $sewingTable s
     LEFT JOIN projects p ON s.project_id = p.id
     WHERE $sewing_where
     GROUP BY DATE(s.date_time), s.shift, p.project_name";

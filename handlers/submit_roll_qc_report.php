@@ -46,9 +46,17 @@ try {
     // Convert numeric line_no to "Line X" format for querying
     $lineNumber = is_numeric($lineNo) ? "Line " . $lineNo : $lineNo;
     
+    // Check if user is AGM/Admin for auto-approval
+    $userRole = strtolower(trim($_SESSION['role'] ?? ''));
+    $isAGM = in_array($userRole, ['admin', 'agm', 'agm ops', 'agm operations', 'management']);
+    
     // Check QC status (daily_gsm_checks and length_calibrations use line_number column)
+    // Only count records with status = 'approved' (case-insensitive)
     $gsmDone = false;
-    $gsmStmt = $conn->prepare("SELECT COUNT(*) as count FROM daily_gsm_checks WHERE roll_no = ? AND line_number = ?");
+    $gsmStmt = $conn->prepare("SELECT COUNT(*) as count FROM daily_gsm_checks 
+                               WHERE roll_no = ? 
+                               AND line_number = ? 
+                               AND LOWER(TRIM(status)) = 'approved'");
     $gsmStmt->bind_param('ss', $rollNo, $lineNumber);
     $gsmStmt->execute();
     $gsmResult = $gsmStmt->get_result();
@@ -58,7 +66,10 @@ try {
     $gsmStmt->close();
     
     $lengthDone = false;
-    $lengthStmt = $conn->prepare("SELECT COUNT(*) as count FROM length_calibrations WHERE roll_no = ? AND line_number = ?");
+    $lengthStmt = $conn->prepare("SELECT COUNT(*) as count FROM length_calibrations 
+                                  WHERE roll_no = ? 
+                                  AND line_number = ? 
+                                  AND LOWER(TRIM(status)) = 'approved'");
     $lengthStmt->bind_param('ss', $rollNo, $lineNumber);
     $lengthStmt->execute();
     $lengthResult = $lengthStmt->get_result();
@@ -67,7 +78,20 @@ try {
     }
     $lengthStmt->close();
     
-    $overallStatus = ($gsmDone && $lengthDone) ? 'Done' : 'Pending';
+    // Determine overall status and approval fields
+    if ($isAGM) {
+        // AGM submission: Auto-approve
+        $overallStatus = 'approved';
+        $approved = 1;
+        $approvedBy = $_SESSION['full_name'] ?? $_SESSION['username'];
+        $approvedAt = date('Y-m-d H:i:s');
+    } else {
+        // Regular user submission
+        $overallStatus = ($gsmDone && $lengthDone) ? 'Done' : 'Pending';
+        $approved = 0;
+        $approvedBy = null;
+        $approvedAt = null;
+    }
     
     // Create table if not exists
     $conn->query("CREATE TABLE IF NOT EXISTS roll_qc_reports (
@@ -87,30 +111,59 @@ try {
         INDEX idx_line (line_number)
     )");
     
+    // Ensure approval columns exist
+    $conn->query("ALTER TABLE roll_qc_reports ADD COLUMN IF NOT EXISTS approved TINYINT(1) DEFAULT 0");
+    $conn->query("ALTER TABLE roll_qc_reports ADD COLUMN IF NOT EXISTS approved_by VARCHAR(100) NULL");
+    $conn->query("ALTER TABLE roll_qc_reports ADD COLUMN IF NOT EXISTS approved_at DATETIME NULL");
+    
     // Insert report
-    $stmt = $conn->prepare("INSERT INTO roll_qc_reports 
-        (reference_number, roll_no, line_number, product_amount, gsm_check_status, length_calibration_status, overall_status, inspector, user_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+    if ($isAGM) {
+        $stmt = $conn->prepare("INSERT INTO roll_qc_reports 
+            (reference_number, roll_no, line_number, product_amount, gsm_check_status, length_calibration_status, overall_status, inspector, user_id, approved, approved_by, approved_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+    } else {
+        $stmt = $conn->prepare("INSERT INTO roll_qc_reports 
+            (reference_number, roll_no, line_number, product_amount, gsm_check_status, length_calibration_status, overall_status, inspector, user_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+    }
     
     $gsmStatus = $gsmDone ? 'Done' : 'Pending';
     $lengthStatus = $lengthDone ? 'Done' : 'Pending';
     
-    $stmt->bind_param('sssdssssi', 
-        $refNumber, 
-        $rollNo, 
-        $lineNumber, 
-        $productAmount, 
-        $gsmStatus, 
-        $lengthStatus, 
-        $overallStatus, 
-        $inspector, 
-        $userId
-    );
+    if ($isAGM) {
+        $stmt->bind_param('sssdssssiiss', 
+            $refNumber, 
+            $rollNo, 
+            $lineNumber, 
+            $productAmount, 
+            $gsmStatus, 
+            $lengthStatus, 
+            $overallStatus, 
+            $inspector, 
+            $userId,
+            $approved,
+            $approvedBy,
+            $approvedAt
+        );
+    } else {
+        $stmt->bind_param('sssdssssi', 
+            $refNumber, 
+            $rollNo, 
+            $lineNumber, 
+            $productAmount, 
+            $gsmStatus, 
+            $lengthStatus, 
+            $overallStatus, 
+            $inspector, 
+            $userId
+        );
+    }
     
     if ($stmt->execute()) {
         $stmt->close();
         $conn->close();
-        header("Location: ../forms/roll_qc_report.php?success=" . urlencode("Roll QC Report submitted successfully! Status: $overallStatus"));
+        $statusMsg = $isAGM ? "Roll QC Report submitted and auto-approved successfully!" : "Roll QC Report submitted successfully! Status: $overallStatus";
+        header("Location: ../forms/roll_qc_report.php?success=" . urlencode($statusMsg));
         exit();
     } else {
         throw new Exception("Failed to insert report");

@@ -10,7 +10,7 @@ if (!isset($_SESSION['user_id']) || !isset($_SESSION['username'])) {
 
 // Role-based access control
 $user_role = strtolower(trim($_SESSION['role'] ?? ''));
-$allowed_roles = ['admin', 'production_user', 'management', 'agm ops', 'agm operations'];
+$allowed_roles = ['admin', 'production_user', 'management', 'agm ops', 'agm operations', 'delivery_user'];
 if (!in_array($user_role, $allowed_roles)) {
     http_response_code(403);
     die("<div style='font-family: Arial; max-width: 600px; margin: 100px auto; padding: 30px; border: 2px solid #e74c3c; border-radius: 10px; background: #ffe8e8;'>
@@ -75,12 +75,96 @@ if ($types) {
 }
 $stmt->execute();
 $result = $stmt->get_result();
-$transfers = $result->fetch_all(MYSQLI_ASSOC);
+$allTransfers = $result->fetch_all(MYSQLI_ASSOC);
 $stmt->close();
 
-// Calculate statistics
-$totalTransfers = count($transfers);
-$totalWeight = array_sum(array_column($transfers, 'amount_kg'));
+// Calculate statistics from original data (before grouping)
+$totalTransfers = count($allTransfers);
+$totalWeight = array_sum(array_column($allTransfers, 'amount_kg'));
+
+// Group transfers by transfer_id and base reference to identify bundles
+$groupedTransfers = [];
+$processedKeys = []; // Track processed (transfer_id, base_reference) combinations
+
+foreach ($allTransfers as $transfer) {
+    $transferId = $transfer['transfer_id'];
+    $refNum = trim($transfer['reference_number'] ?? '');
+    
+    // Check if this reference matches bundle pattern (ends with -N where N is a number)
+    if (preg_match('/^(.+)-(\d+)$/', $refNum, $matches)) {
+        $baseRef = $matches[1];
+        $processKey = $transferId . '|' . $baseRef;
+        
+        // Check if this (transfer_id, base_reference) combination was already processed
+        if (in_array($processKey, $processedKeys)) {
+            continue;
+        }
+        
+        // Find all transfers with same transfer_id and base reference pattern
+        $bundleRefs = [];
+        $bundleTransfers = [];
+        foreach ($allTransfers as $t) {
+            $tRefNum = trim($t['reference_number'] ?? '');
+            if ($t['transfer_id'] == $transferId && preg_match('/^' . preg_quote($baseRef, '/') . '-(\d+)$/', $tRefNum, $m)) {
+                $bundleRefs[] = $tRefNum;
+                $bundleTransfers[] = $t;
+            }
+        }
+        
+        // If we found 2 or more references with the same base and transfer_id, it's a bundle
+        if (count($bundleRefs) >= 2) {
+            // Sort by roll number
+            usort($bundleRefs, function($a, $b) {
+                preg_match('/-(\d+)$/', $a, $ma);
+                preg_match('/-(\d+)$/', $b, $mb);
+                return intval($ma[1] ?? 0) - intval($mb[1] ?? 0);
+            });
+            
+            // Extract roll numbers to create range display (e.g., "1.1-1.4" for 1.1-1, 1.1-2, 1.1-3, 1.1-4)
+            $firstRollNum = '';
+            $lastRollNum = '';
+            preg_match('/-(\d+)$/', $bundleRefs[0], $firstMatch);
+            preg_match('/-(\d+)$/', $bundleRefs[count($bundleRefs) - 1], $lastMatch);
+            $firstRollNum = $firstMatch[1] ?? '';
+            $lastRollNum = $lastMatch[1] ?? '';
+            
+            // Create bundle display: baseRef-firstRollNum.lastRollNum (e.g., "1.1-1.4")
+            if ($firstRollNum && $lastRollNum) {
+                $refDisplay = $baseRef . '-' . $firstRollNum . '.' . $lastRollNum;
+            } else {
+                $refDisplay = $baseRef . ' (Bundle: ' . implode(', ', $bundleRefs) . ')';
+            }
+            
+            // Create bundle entry
+            $firstTransfer = $bundleTransfers[0];
+            $totalWeight = array_sum(array_column($bundleTransfers, 'amount_kg'));
+            
+            $groupedTransfers[] = [
+                'transfer_id' => $firstTransfer['transfer_id'],
+                'trip' => $firstTransfer['trip'] ?? '1',
+                'reference_number' => $refDisplay,
+                'is_bundle' => true,
+                'bundle_refs' => $bundleRefs,
+                'date_time' => $firstTransfer['date_time'],
+                'from_location' => $firstTransfer['from_location'],
+                'to_location' => $firstTransfer['to_location'],
+                'amount_kg' => $totalWeight,
+                'driver_full_name' => $firstTransfer['driver_full_name']
+            ];
+            
+            // Mark this (transfer_id, base_reference) combination as processed
+            $processedKeys[] = $processKey;
+        } else {
+            // Single reference, not part of a bundle
+            $groupedTransfers[] = $transfer;
+        }
+    } else {
+        // Reference doesn't match bundle pattern - add as single entry
+        $groupedTransfers[] = $transfer;
+    }
+}
+
+$transfers = $groupedTransfers;
 
 // Group by route (from -> to)
 $routeStats = [];
@@ -183,8 +267,12 @@ $drivers = $driversResult ? $driversResult->fetch_all(MYSQLI_ASSOC) : [];
         .badge { padding: 4px 10px; border-radius: 4px; font-size: 0.85em; font-weight: 600; white-space: nowrap; }
         .badge-from { background: #e3f2fd; color: #1565c0; }
         .badge-to { background: #e8f5e9; color: #2e7d32; }
+        .badge-bundle { background: #fff3cd; color: #856404; font-weight: 600; }
         
         .route-arrow { color: #3498db; font-weight: bold; margin: 0 5px; }
+        
+        tr.bundle-row { background: #fffbf0 !important; }
+        tr.bundle-row:hover { background: #fff8e1 !important; }
         
         /* Export Buttons */
         .export-btn { background: #27ae60; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-weight: 600; margin-bottom: 20px; margin-right: 10px; }
@@ -210,9 +298,93 @@ $drivers = $driversResult ? $driversResult->fetch_all(MYSQLI_ASSOC) : [];
         }
         
         @media print {
-            .filters, .export-btn { display: none; }
-            body { background: white; padding: 0; }
-            .container { box-shadow: none; }
+            * { 
+                box-sizing: border-box;
+                -webkit-print-color-adjust: exact;
+                print-color-adjust: exact;
+            }
+            body { 
+                background: white !important; 
+                padding: 5px !important; 
+                margin: 0 !important;
+                font-size: 9px !important;
+                overflow: visible !important;
+            }
+            .container { 
+                box-shadow: none !important; 
+                padding: 5px !important;
+                margin: 0 !important;
+                max-width: 100% !important;
+                width: 100% !important;
+            }
+            .filters, .export-btn { display: none !important; }
+            h1 { 
+                font-size: 14px !important; 
+                margin: 3px 0 !important; 
+                padding: 0 !important;
+                page-break-after: avoid;
+            }
+            .subtitle { 
+                font-size: 9px !important; 
+                margin: 2px 0 8px !important; 
+                padding: 0 !important;
+            }
+            .section-title { 
+                font-size: 11px !important; 
+                margin: 8px 0 3px !important; 
+                padding: 3px 0 !important; 
+                page-break-after: avoid;
+            }
+            .section { 
+                margin-bottom: 10px !important;
+                page-break-inside: avoid;
+                overflow: visible !important;
+            }
+            table { 
+                font-size: 7px !important; 
+                width: 100% !important;
+                page-break-inside: auto;
+                border-collapse: collapse !important;
+                margin-bottom: 8px !important;
+            }
+            th, td { 
+                padding: 3px 2px !important; 
+                font-size: 7px !important;
+                line-height: 1.1 !important;
+                border: 1px solid #ddd !important;
+            }
+            th { 
+                font-size: 8px !important; 
+                font-weight: 600 !important;
+            }
+            .table-wrapper { 
+                overflow: visible !important; 
+                page-break-inside: auto;
+            }
+            .stats-grid { 
+                grid-template-columns: repeat(4, 1fr) !important;
+                gap: 5px !important;
+                margin-bottom: 10px !important;
+            }
+            .stat-card { 
+                padding: 8px 5px !important;
+                page-break-inside: avoid;
+                margin-bottom: 0 !important;
+            }
+            .stat-value { 
+                font-size: 1.2em !important; 
+                margin-bottom: 2px !important;
+            }
+            .stat-label { 
+                font-size: 0.75em !important; 
+            }
+            tr { page-break-inside: avoid; }
+            thead { display: table-header-group !important; }
+            tfoot { display: table-footer-group !important; }
+            @page {
+                size: A4 landscape;
+                margin: 0.3cm;
+            }
         }
     </style>
 </head>
@@ -419,6 +591,8 @@ $drivers = $driversResult ? $driversResult->fetch_all(MYSQLI_ASSOC) : [];
                         <tr>
                             <th>#</th>
                             <th>Transfer ID</th>
+                            <th>Trip</th>
+                            <th>Reference Number</th>
                             <th>Date & Time</th>
                             <th>From Location</th>
                             <th>To Location</th>
@@ -430,10 +604,21 @@ $drivers = $driversResult ? $driversResult->fetch_all(MYSQLI_ASSOC) : [];
                         <?php 
                         $counter = 1;
                         foreach ($transfers as $transfer): 
+                            $isBundle = isset($transfer['is_bundle']) && $transfer['is_bundle'];
                         ?>
-                            <tr>
+                            <tr<?php echo $isBundle ? ' class="bundle-row"' : ''; ?>>
                                 <td><?php echo $counter++; ?></td>
                                 <td><strong><?php echo htmlspecialchars($transfer['transfer_id']); ?></strong></td>
+                                <td><?php echo htmlspecialchars($transfer['trip'] ?? '1'); ?></td>
+                                <td>
+                                    <?php if ($isBundle): ?>
+                                        <span class="badge badge-bundle">
+                                            <i class="fas fa-layer-group"></i> <?php echo htmlspecialchars($transfer['reference_number'] ?? 'N/A'); ?>
+                                        </span>
+                                    <?php else: ?>
+                                        <?php echo htmlspecialchars($transfer['reference_number'] ?? 'N/A'); ?>
+                                    <?php endif; ?>
+                                </td>
                                 <td><?php echo date('M d, Y g:i A', strtotime($transfer['date_time'])); ?></td>
                                 <td>
                                     <span class="badge badge-from">

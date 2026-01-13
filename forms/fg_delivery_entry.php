@@ -342,6 +342,197 @@ if (empty($clients)) {
     border-color: #3498db;
     box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.1);
   }
+  
+  /* Modern Popup Notification Styles */
+  .qty-limit-popup-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(15, 23, 42, 0.75);
+    backdrop-filter: blur(8px);
+    z-index: 9999;
+    display: none;
+    animation: fadeInOverlay 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  
+  .qty-limit-popup-overlay.show {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  
+  @keyframes fadeInOverlay {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  
+  .qty-limit-popup {
+    position: relative;
+    background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+    border-radius: 20px;
+    padding: 0;
+    box-shadow: 0 20px 40px -12px rgba(0, 0, 0, 0.25), 
+                0 0 0 1px rgba(231, 76, 60, 0.1);
+    z-index: 10000;
+    max-width: 400px;
+    width: 90%;
+    text-align: center;
+    animation: popupSlideIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+    display: none;
+    overflow: hidden;
+  }
+  
+  .qty-limit-popup.show {
+    display: block;
+  }
+  
+  @keyframes popupSlideIn {
+    from {
+      opacity: 0;
+      transform: scale(0.9) translateY(-20px);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1) translateY(0);
+    }
+  }
+  
+  .qty-limit-popup-header {
+    background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+    padding: 20px 24px 16px;
+    position: relative;
+    overflow: hidden;
+  }
+  
+  .qty-limit-popup-icon-wrapper {
+    position: relative;
+    z-index: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 56px;
+    height: 56px;
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 50%;
+    margin-bottom: 12px;
+    backdrop-filter: blur(10px);
+  }
+  
+  .qty-limit-popup-icon {
+    font-size: 32px;
+    color: #ffffff;
+    filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.2));
+  }
+  
+  .qty-limit-popup-title {
+    font-size: 18px;
+    font-weight: 700;
+    color: #ffffff;
+    margin: 0;
+    position: relative;
+    z-index: 1;
+    text-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+  }
+  
+  .qty-limit-popup-body {
+    padding: 20px 24px 24px;
+  }
+  
+  .qty-limit-popup-message {
+    font-size: 14px;
+    color: #64748b;
+    margin-bottom: 16px;
+    line-height: 1.5;
+  }
+  
+  .qty-limit-popup-details {
+    background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+    border: 1px solid #fbbf24;
+    border-radius: 12px;
+    padding: 14px 16px;
+    margin-bottom: 20px;
+    font-size: 13px;
+    color: #78350f;
+  }
+  
+  .qty-limit-popup-details strong {
+    color: #92400e;
+    font-weight: 600;
+    display: inline-block;
+    min-width: 70px;
+  }
+  
+  .qty-limit-popup-details-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 0;
+  }
+  
+  .qty-limit-popup-details-row:last-child {
+    padding-bottom: 0;
+  }
+  
+  .qty-limit-popup-details-row:first-child {
+    padding-top: 0;
+  }
+  
+  .qty-limit-popup-button {
+    background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+    color: white;
+    border: none;
+    padding: 12px 32px;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+    width: 100%;
+  }
+  
+  .qty-limit-popup-button:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 16px rgba(239, 68, 68, 0.4);
+  }
+  
+  .qty-limit-popup-button:active {
+    transform: translateY(0);
+    box-shadow: 0 2px 8px rgba(239, 68, 68, 0.3);
+  }
+  
+  /* Close button (X) in top right */
+  .qty-limit-popup-close {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.2);
+    border: none;
+    color: #ffffff;
+    font-size: 18px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+    z-index: 10;
+    backdrop-filter: blur(10px);
+    line-height: 1;
+  }
+  
+  .qty-limit-popup-close:hover {
+    background: rgba(255, 255, 255, 0.3);
+    transform: scale(1.1);
+  }
+  
+  .qty-limit-popup-close:active {
+    transform: scale(0.95);
+  }
 </style>
 </head>
 <body>
@@ -351,13 +542,13 @@ if (empty($clients)) {
 
   <?php if (isset($_GET['success'])): ?>
     <div class="alert alert-success">
-      ✅ <?php echo htmlspecialchars($_GET['success']); ?>
+      <?php echo htmlspecialchars($_GET['success']); ?>
     </div>
   <?php endif; ?>
   
   <?php if (isset($_GET['error'])): ?>
     <div class="alert alert-error">
-      ❌ <?php echo htmlspecialchars($_GET['error']); ?>
+      <?php echo htmlspecialchars($_GET['error']); ?>
     </div>
   <?php endif; ?>
 
@@ -420,19 +611,22 @@ if (empty($clients)) {
     <div id="deliveryFieldsContainer" style="display:none;">
 
     <!-- Product -->
-    <!-- Reference Number -->
-    <div class="form-group">
+    <!-- Reference Number (Only for Rolls) -->
+    <div class="form-group" id="referenceNumberGroup">
       <label>Reference Number:</label>
-      <select id="reference_number" name="reference_number" required onchange="updateCNCBatchFromRef()">
+      <select id="reference_number" name="reference_number" onchange="updateCNCBatchFromRef()">
         <option value="">-- Select Product Type First --</option>
       </select>
       <small id="delivery_reference_hint" style="color:#6c757d; display:block; margin-top:5px;"></small>
     </div>
 
-    <!-- CNC Cutting Batch (auto-filled) - Only for bags -->
+    <!-- CNC Cutting Batch (Dropdown for Bags) -->
     <div class="form-group" id="cncBatchGroup" style="display:none;">
-      <label>CNC Cutting Batch:</label>
-      <input type="text" id="cnc_cutting_batch" name="cnc_cutting_batch" readonly style="background-color: #f0f0f0;" placeholder="Auto-filled from reference">
+      <label>CNC Cutting Batch: <span style="color:red;">*</span></label>
+      <select id="cnc_cutting_batch" name="cnc_cutting_batch" required onchange="updateFromCNCBatch()">
+        <option value="">-- Select CNC Cutting Batch --</option>
+      </select>
+      <small id="cnc_batch_hint" style="color:#6c757d; display:block; margin-top:5px;"></small>
       <input type="hidden" id="fg_entry_id" name="fg_entry_id" value="">
       <input type="hidden" id="bag_size" name="bag_size" value="">
       <input type="hidden" id="packaging_type" name="packaging_type" value="">
@@ -520,6 +714,28 @@ if (empty($clients)) {
   </form>
 </div>
 
+<!-- Quantity Limit Exceeded Popup -->
+<div id="qtyLimitPopupOverlay" class="qty-limit-popup-overlay" onclick="closeQtyLimitPopup()">
+  <div id="qtyLimitPopup" class="qty-limit-popup" onclick="event.stopPropagation()">
+    <button class="qty-limit-popup-close" onclick="closeQtyLimitPopup()" title="Close">×</button>
+    <div class="qty-limit-popup-header">
+      <div class="qty-limit-popup-icon-wrapper">
+        <div class="qty-limit-popup-icon">⚠️</div>
+      </div>
+      <div class="qty-limit-popup-title">Quantity Limit Exceeded</div>
+    </div>
+    <div class="qty-limit-popup-body">
+      <div class="qty-limit-popup-message" id="qtyLimitPopupMessage">
+        The delivery quantity exceeds the available stock.
+      </div>
+      <div class="qty-limit-popup-details" id="qtyLimitPopupDetails"></div>
+      <button class="qty-limit-popup-button" onclick="closeQtyLimitPopup()">
+        <span>Got It</span>
+      </button>
+    </div>
+  </div>
+</div>
+
 <script>
 // FG Entries data from PHP
 const fgEntriesData = <?php echo json_encode($fgEntries); ?>;
@@ -564,20 +780,25 @@ function selectDeliveryProductType(type) {
   
   // Show/hide CNC cutting batch field (only for bags)
   const cncBatchGroup = document.getElementById('cncBatchGroup');
+  const referenceNumberGroup = document.getElementById('referenceNumberGroup');
   
   if (type === 'roll') {
-    // For rolls, use kg and hide CNC batch field
+    // For rolls, use kg, show reference number, hide CNC batch dropdown
     if (availableQtyLabel) availableQtyLabel.textContent = 'Available Quantity (kg):';
     if (deliveryQtyLabel) deliveryQtyLabel.textContent = 'Delivery Quantity (kg):';
+    if (referenceNumberGroup) referenceNumberGroup.style.display = 'block';
     if (cncBatchGroup) cncBatchGroup.style.display = 'none';
     // Clear CNC batch value for rolls
     const cncBatchField = document.getElementById('cnc_cutting_batch');
     if (cncBatchField) cncBatchField.value = '';
   } else if (type === 'bag') {
-    // For bags, use pcs and show CNC batch field
+    // For bags, use pcs, hide reference number, show CNC batch dropdown
     if (availableQtyLabel) availableQtyLabel.textContent = 'Available Quantity (pcs):';
     if (deliveryQtyLabel) deliveryQtyLabel.textContent = 'Delivery Quantity (pcs):';
+    if (referenceNumberGroup) referenceNumberGroup.style.display = 'none';
     if (cncBatchGroup) cncBatchGroup.style.display = 'block';
+    // Load CNC batches from branding entries
+    loadBrandingCNCBatches();
   }
   
   // Show/hide roll entry type selection
@@ -680,49 +901,133 @@ function loadRollDeliveryReferences(entryType) {
   referenceHint.textContent = entryType === 'individual' ? 'Showing individual roll entries' : 'Showing bundle entries';
 }
 
-function loadBagDeliveryReferences() {
-  const referenceSelect = document.getElementById('reference_number');
-  const referenceHint = document.getElementById('delivery_reference_hint');
-  referenceSelect.innerHTML = '<option value="">-- Select Reference --</option>';
+function loadBrandingCNCBatches() {
+  const cncBatchSelect = document.getElementById('cnc_cutting_batch');
+  const cncBatchHint = document.getElementById('cnc_batch_hint');
   
-  // Filter FG entries for bags (including NULL product_type which are bags)
-  const bagEntries = fgEntriesData.filter(entry => {
-    return entry.product_type === 'bag' || entry.product_type === null || entry.product_type === '';
-  });
+  if (!cncBatchSelect) return;
   
-  bagEntries.forEach(entry => {
-    const option = document.createElement('option');
-    option.value = entry.reference_number;
-    option.textContent = entry.reference_number + ' (Remaining: ' + entry.remaining_quantity + ' pcs)';
-    
-    // Ensure all data attributes are strings and set properly
-    const fgId = String(entry.id || '');
-    const cncBatch = String(entry.cnc_cutting_batch || '');
-    const bagSize = String(entry.bag_size || '');
-    const projectName = String(entry.project_name || '');
-    const passedQty = String(entry.passed_qty || '0');
-    const actualWeight = String(entry.actual_weight || '0');
-    const deliveredQty = String(entry.delivered_quantity || '0');
-    const remainingQty = String(entry.remaining_quantity || '0');
-    
-    // Set all data attributes
-    option.setAttribute('data-fg-id', fgId);
-    option.setAttribute('data-cnc-batch', cncBatch);
-    option.setAttribute('data-bag-size', bagSize);
-    option.setAttribute('data-project', projectName);
-    option.setAttribute('data-passed-qty', passedQty);
-    option.setAttribute('data-actual-weight', actualWeight);
-    option.setAttribute('data-delivered-qty', deliveredQty);
-    option.setAttribute('data-remaining-qty', remainingQty);
-    
-    referenceSelect.appendChild(option);
-  });
+  cncBatchSelect.innerHTML = '<option value="">-- Loading CNC Batches --</option>';
+  cncBatchHint.textContent = 'Loading...';
   
-  if (bagEntries.length === 0) {
-    referenceSelect.innerHTML += '<option value="" disabled>No bag entries with remaining stock</option>';
+  fetch('../forms/api/get_branding_cnc_batches.php')
+    .then(response => response.json())
+    .then(data => {
+      if (!data.success) {
+        cncBatchSelect.innerHTML = '<option value="">-- Error loading batches --</option>';
+        cncBatchHint.textContent = 'Error: ' + (data.error || 'Unknown error');
+        return;
+      }
+      
+      cncBatchSelect.innerHTML = '<option value="">-- Select CNC Cutting Batch --</option>';
+      
+      if (data.batches && data.batches.length > 0) {
+        data.batches.forEach(batch => {
+          const option = document.createElement('option');
+          option.value = batch.batch;
+          option.textContent = batch.batch + ' (Remaining: ' + batch.remaining_qty + ' pcs)';
+          
+          // Store batch data as data attributes
+          option.setAttribute('data-remaining-qty', batch.remaining_qty);
+          option.setAttribute('data-total-print-qty', batch.total_print_qty);
+          option.setAttribute('data-delivered-qty', batch.delivered_qty);
+          if (batch.bag_size) {
+            option.setAttribute('data-bag-size', batch.bag_size);
+          }
+          if (batch.project_id) {
+            option.setAttribute('data-project-id', batch.project_id);
+          }
+          
+          cncBatchSelect.appendChild(option);
+        });
+        
+        cncBatchHint.textContent = 'Showing ' + data.batches.length + ' CNC cutting batches with available stock';
+      } else {
+        cncBatchSelect.innerHTML += '<option value="" disabled>No CNC cutting batches with remaining stock</option>';
+        cncBatchHint.textContent = 'No batches available';
+      }
+    })
+    .catch(error => {
+      console.error('Error loading CNC batches:', error);
+      cncBatchSelect.innerHTML = '<option value="">-- Error loading batches --</option>';
+      cncBatchHint.textContent = 'Error loading batches. Please try again.';
+    });
+}
+
+function updateFromCNCBatch() {
+  const cncBatchSelect = document.getElementById('cnc_cutting_batch');
+  if (!cncBatchSelect) return;
+  
+  const selectedIndex = cncBatchSelect.selectedIndex;
+  if (selectedIndex < 0 || selectedIndex === 0) {
+    // Reset fields if no valid option selected
+    document.getElementById('available_qty').value = '';
+    document.getElementById('delivery_qty').value = '';
+    document.getElementById('delivery_qty').removeAttribute('data-max-qty');
+    document.getElementById('bag_size').value = '';
+    updateSummary();
+    return;
   }
   
-  referenceHint.textContent = 'Showing ' + bagEntries.length + ' bag entries with available stock';
+  const selectedOption = cncBatchSelect.options[selectedIndex];
+  if (!selectedOption || !selectedOption.value) {
+    return;
+  }
+  
+  // Get remaining quantity
+  const remainingQty = parseFloat(selectedOption.getAttribute('data-remaining-qty')) || 0;
+  const bagSize = selectedOption.getAttribute('data-bag-size') || '';
+  
+  // Update bag size hidden field
+  const bagSizeField = document.getElementById('bag_size');
+  if (bagSizeField) bagSizeField.value = bagSize;
+  
+  // Display available quantity
+  const availableQtyField = document.getElementById('available_qty');
+  if (availableQtyField) {
+    const formattedQty = remainingQty % 1 === 0 ? remainingQty.toString() : remainingQty.toFixed(2);
+    availableQtyField.value = formattedQty;
+  }
+  
+  // Update delivery quantity field
+  const deliveryQtyField = document.getElementById('delivery_qty');
+  const qtyHintElem = document.getElementById('qty_hint');
+  
+  if (deliveryQtyField && qtyHintElem) {
+    deliveryQtyField.readOnly = false;
+    deliveryQtyField.removeAttribute('readonly');
+    deliveryQtyField.disabled = false;
+    deliveryQtyField.value = '';
+    deliveryQtyField.style.backgroundColor = 'white';
+    deliveryQtyField.style.fontWeight = 'normal';
+    
+    qtyHintElem.innerHTML = `Enter quantity (max: <span id="max_qty">${remainingQty}</span> pcs)`;
+    qtyHintElem.style.display = 'block';
+    
+    deliveryQtyField.setAttribute('data-max-qty', remainingQty);
+  }
+  
+  // Auto-fill unit price from BOM based on bag size
+  const unitPriceField = document.getElementById('unit_price');
+  const priceHint = document.getElementById('price_hint');
+  
+  if (unitPriceField && priceHint) {
+    if (bagSize && bomPrices[bagSize]) {
+      unitPriceField.value = bomPrices[bagSize];
+      unitPriceField.readOnly = true;
+      unitPriceField.style.backgroundColor = '#f0f0f0';
+      priceHint.textContent = 'Auto-filled from BOM';
+      priceHint.style.color = '#27ae60';
+    } else {
+      unitPriceField.value = '';
+      unitPriceField.readOnly = false;
+      unitPriceField.style.backgroundColor = 'white';
+      priceHint.textContent = 'Enter price manually (custom bag size)';
+      priceHint.style.color = '#e67e22';
+    }
+  }
+  
+  updateSummary();
 }
 
 function updateCNCBatchFromRef() {
@@ -877,6 +1182,8 @@ function updateCNCBatchFromRef() {
 }
 
 // Handle delivery unit selection
+let lastPopupQty = null; // Track last quantity that triggered popup to avoid repeated popups
+
 function validateDeliveryQty() {
   const deliveryQtyField = document.getElementById("delivery_qty");
   const maxQty = parseFloat(deliveryQtyField.getAttribute("data-max-qty")) || 0;
@@ -887,19 +1194,86 @@ function validateDeliveryQty() {
   const productType = document.getElementById('delivery_product_type').value;
   const unit = productType === 'bag' ? 'pcs' : 'kg';
   
-  if (enteredQty > maxQty) {
+  if (enteredQty > maxQty && maxQty > 0) {
     qtyHint.innerHTML = `<span style="color: #e74c3c;">⚠️ Cannot exceed ${maxQty} ${unit}!</span>`;
     deliveryQtyField.style.borderColor = "#e74c3c";
-  } else if (enteredQty > 0) {
-    qtyHint.innerHTML = `Enter quantity (max: <span id="max_qty">${maxQty}</span> ${unit})`;
-    deliveryQtyField.style.borderColor = "#27ae60";
+    
+    // Show popup notification (only once per quantity value to avoid spam)
+    if (lastPopupQty !== enteredQty) {
+      showQtyLimitPopup(enteredQty, maxQty, unit);
+      lastPopupQty = enteredQty;
+    }
   } else {
-    qtyHint.innerHTML = `Enter quantity (max: <span id="max_qty">${maxQty}</span> ${unit})`;
-    deliveryQtyField.style.borderColor = "#ccc";
+    // Reset popup tracking when quantity is valid
+    if (enteredQty <= maxQty) {
+      lastPopupQty = null;
+    }
+    
+    if (enteredQty > 0) {
+      qtyHint.innerHTML = `Enter quantity (max: <span id="max_qty">${maxQty}</span> ${unit})`;
+      deliveryQtyField.style.borderColor = "#27ae60";
+    } else {
+      qtyHint.innerHTML = `Enter quantity (max: <span id="max_qty">${maxQty}</span> ${unit})`;
+      deliveryQtyField.style.borderColor = "#ccc";
+    }
   }
   
   updateSummary();
 }
+
+function showQtyLimitPopup(enteredQty, maxQty, unit) {
+  const popup = document.getElementById('qtyLimitPopup');
+  const overlay = document.getElementById('qtyLimitPopupOverlay');
+  const message = document.getElementById('qtyLimitPopupMessage');
+  const details = document.getElementById('qtyLimitPopupDetails');
+  
+  // Shorter, more user-friendly message
+  message.textContent = `Only ${maxQty} ${unit} available. You entered ${enteredQty} ${unit}.`;
+  
+  // Simplified details structure
+  const excess = (enteredQty - maxQty).toFixed(2);
+  details.innerHTML = `
+    <div class="qty-limit-popup-details-row">
+      <strong>Available:</strong>
+      <span>${maxQty} ${unit}</span>
+    </div>
+    <div class="qty-limit-popup-details-row">
+      <strong>Excess:</strong>
+      <span style="color: #dc2626; font-weight: 700;">${excess} ${unit}</span>
+    </div>
+  `;
+  
+  overlay.classList.add('show');
+  // Small delay to ensure overlay is rendered first
+  setTimeout(() => {
+    popup.classList.add('show');
+  }, 10);
+}
+
+function closeQtyLimitPopup() {
+  const popup = document.getElementById('qtyLimitPopup');
+  const overlay = document.getElementById('qtyLimitPopupOverlay');
+  
+  popup.classList.remove('show');
+  overlay.classList.remove('show');
+  
+  // Focus back on delivery quantity field
+  const deliveryQtyField = document.getElementById('delivery_qty');
+  if (deliveryQtyField) {
+    deliveryQtyField.focus();
+    deliveryQtyField.select();
+  }
+}
+
+// Close popup on ESC key
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') {
+    const popup = document.getElementById('qtyLimitPopup');
+    if (popup && popup.classList.contains('show')) {
+      closeQtyLimitPopup();
+    }
+  }
+});
 
 function enableManualChallan() {
   const autoField = document.getElementById("challan_no");
@@ -1190,9 +1564,19 @@ document.addEventListener('DOMContentLoaded', function() {
 function validateForm(){
   updateSummary(); // Update summary before validation
   
-  if(!document.getElementById("reference_number").value){
-    alert("Please select a reference number."); 
-    return false;
+  const productType = document.getElementById("delivery_product_type").value;
+  
+  // Validate based on product type
+  if (productType === 'roll') {
+    if(!document.getElementById("reference_number").value){
+      alert("Please select a reference number."); 
+      return false;
+    }
+  } else if (productType === 'bag') {
+    if(!document.getElementById("cnc_cutting_batch").value){
+      alert("Please select a CNC cutting batch."); 
+      return false;
+    }
   }
   
   // Check client_name (from search field or hidden field)
@@ -1211,7 +1595,6 @@ function validateForm(){
   const deliveryQty = parseFloat(document.getElementById("delivery_qty").value);
   const deliveryQtyField = document.getElementById("delivery_qty");
   const maxQty = parseFloat(deliveryQtyField.getAttribute("data-max-qty")) || 0;
-  const productType = document.getElementById("delivery_product_type").value;
   const unit = productType === 'bag' ? 'pcs' : 'kg';
   
   if(!deliveryQty || deliveryQty <= 0){
@@ -1257,7 +1640,7 @@ function updateTimeAndShift() {
 function updateSummary() {
   const dateTime = document.getElementById("dateTime").value;
   const shift = document.getElementById("shift").value;
-  const productType = document.getElementById("delivery_product_type").value;
+  const productTypeVal = document.getElementById("delivery_product_type").value;
   const rollEntryType = document.getElementById("delivery_roll_entry_type").value;
   const referenceNumber = document.getElementById("reference_number").value;
   const cncCuttingBatch = document.getElementById("cnc_cutting_batch").value;
@@ -1274,22 +1657,32 @@ function updateSummary() {
   // Check if we have client info
   const hasClient = clientName && clientName.trim() !== '';
   
-  if (dateTime && shift && productType && referenceNumber && deliveryQty && hasClient && unitPrice) {
+  // Check if we have required fields based on product type
+  const hasRequiredFields = productTypeVal === 'roll' 
+    ? (dateTime && shift && productTypeVal && referenceNumber && deliveryQty && hasClient && unitPrice)
+    : (dateTime && shift && productTypeVal && cncCuttingBatch && deliveryQty && hasClient && unitPrice);
+  
+  if (hasRequiredFields) {
     const totalCost = (parseFloat(deliveryQty) * parseFloat(unitPrice)).toFixed(2);
     
     let productTypeText = '';
-    if (productType === 'roll') {
+    if (productTypeVal === 'roll') {
       productTypeText = rollEntryType === 'bundle' ? 'Roll (Bundle)' : 'Roll (Individual)';
-    } else if (productType === 'bag') {
+    } else if (productTypeVal === 'bag') {
       productTypeText = 'Bag';
     }
     
     // Get unit based on product type
-    const unit = productType === 'bag' ? 'pcs' : 'kg';
-    const unitShort = productType === 'bag' ? 'pc' : 'kg';
+    const unit = productTypeVal === 'bag' ? 'pcs' : 'kg';
+    const unitShort = productTypeVal === 'bag' ? 'pc' : 'kg';
     
-    let summaryText = `${dateTime} | Shift: ${shift} | Type: ${productTypeText} | Reference: ${referenceNumber}`;
-    if (cncCuttingBatch) summaryText += ` | CNC Batch: ${cncCuttingBatch}`;
+    let summaryText = `${dateTime} | Shift: ${shift} | Type: ${productTypeText}`;
+    if (productTypeVal === 'roll' && referenceNumber) {
+      summaryText += ` | Reference: ${referenceNumber}`;
+    }
+    if (cncCuttingBatch) {
+      summaryText += ` | CNC Batch: ${cncCuttingBatch}`;
+    }
     summaryText += ` | Delivery Qty: ${deliveryQty} ${unit} | Unit Price: ৳${parseFloat(unitPrice).toFixed(2)}/${unitShort} | Total Cost: ৳${totalCost} | Client: ${clientName}`;
     
     document.getElementById("summaryBox").textContent = summaryText;

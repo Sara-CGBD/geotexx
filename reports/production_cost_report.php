@@ -42,6 +42,10 @@ date_default_timezone_set('Asia/Dhaka');
 // Database connection
 $conn = SecurityConfig::getConnection();
 
+// Determine which sewing table exists
+$sewingTableCheck = $conn->query("SHOW TABLES LIKE 'sewing_machine_entry'");
+$sewingTable = ($sewingTableCheck && $sewingTableCheck->num_rows > 0) ? 'sewing_machine_entry' : 'swing_machine_entry';
+
 // No need to add extra columns - CNC entry uses cutting_roll_quantity only
 
 // Get filters
@@ -65,7 +69,7 @@ $overhead_cost_per_unit = $cost_settings['overhead_cost'] ?? 10; // Default ৳1
 
 // Debug: Check if we have any production data
 $debug_cnc = $conn->query("SELECT COUNT(*) as count FROM cnc_entries WHERE DATE(date_time) BETWEEN '$start_date' AND '$end_date'")->fetch_assoc();
-$debug_sewing = $conn->query("SELECT COUNT(*) as count FROM swing_machine_entry WHERE DATE(date_time) BETWEEN '$start_date' AND '$end_date'")->fetch_assoc();
+$debug_sewing = $conn->query("SELECT COUNT(*) as count FROM $sewingTable WHERE DATE(date_time) BETWEEN '$start_date' AND '$end_date'")->fetch_assoc();
 $debug_branding = $conn->query("SELECT COUNT(*) as count FROM branding_entries WHERE DATE(date_time) BETWEEN '$start_date' AND '$end_date'")->fetch_assoc();
 
 $total_production_entries = ($debug_cnc['count'] ?? 0) + ($debug_sewing['count'] ?? 0) + ($debug_branding['count'] ?? 0);
@@ -135,7 +139,7 @@ if (!$production_type_filter || $production_type_filter == 'Sewing') {
         COALESCE(SUM(s.sewing_qty), 0) * ? as utility_cost,
         COALESCE(SUM(s.sewing_qty), 0) * ? as overhead_cost,
         COALESCE(SUM(s.sewing_qty), 0) * (? + ? + ?) as total_cost
-    FROM swing_machine_entry s
+    FROM $sewingTable s
     LEFT JOIN projects p ON s.project_id = p.id
     WHERE $sewing_where
     GROUP BY DATE(s.date_time), s.shift, p.project_name";

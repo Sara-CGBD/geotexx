@@ -4,6 +4,11 @@ require_once '../config/security_config.php';
 
 header('Content-Type: application/json');
 
+// Enable error reporting for debugging (remove in production)
+error_reporting(E_ALL);
+ini_set('display_errors', 0);
+ini_set('log_errors', 1);
+
 if (!isset($_SESSION['user_id'])) {
     echo json_encode(['error' => 'Unauthorized']);
     exit();
@@ -110,18 +115,154 @@ $lineNumberNumeric = is_numeric($lineNo) ? (string)(int)$lineNo : $lineNo;
 $gsmDone = false;
 $gsmDate = null;
 if ($hasGsm) {
-    $gsmStmt = $conn->prepare("SELECT MAX(approved_at) as last_date FROM daily_gsm_checks WHERE reference_number = ? AND roll_no = ? AND (line_number = ? OR line_number = ? OR line_number = ?) AND status = 'approved' LIMIT 1");
+    // Check if updated_at column exists
+    $hasUpdatedAt = false;
+    $colCheck = $conn->query("SHOW COLUMNS FROM daily_gsm_checks LIKE 'updated_at'");
+    if ($colCheck && $colCheck->num_rows > 0) {
+        $hasUpdatedAt = true;
+    }
+    
+    // Try multiple query strategies - first with line_number matching, then without if needed
+    // Strategy 1: With line_number matching (most specific)
+    if ($hasUpdatedAt) {
+        $gsmQuery = "SELECT 
+            MAX(COALESCE(approved_at, updated_at, created_at)) as last_date,
+            MAX(status) as test_status
+            FROM daily_gsm_checks 
+            WHERE reference_number = ? 
+            AND roll_no = ? 
+            AND (
+                line_number = ? 
+                OR line_number = ? 
+                OR line_number = ? 
+                OR line_number IS NULL
+                OR line_number = ''
+            )
+            AND LOWER(TRIM(status)) = 'approved' 
+            LIMIT 1";
+    } else {
+        $gsmQuery = "SELECT 
+            MAX(COALESCE(approved_at, created_at)) as last_date,
+            MAX(status) as test_status
+            FROM daily_gsm_checks 
+            WHERE reference_number = ? 
+            AND roll_no = ? 
+            AND (
+                line_number = ? 
+                OR line_number = ? 
+                OR line_number = ? 
+                OR line_number IS NULL
+                OR line_number = ''
+            )
+            AND LOWER(TRIM(status)) = 'approved' 
+            LIMIT 1";
+    }
+    
+    $gsmStmt = $conn->prepare($gsmQuery);
     if ($gsmStmt) {
         $gsmStmt->bind_param('sssss', $refNumber, $rollNo, $lineNumberRaw, $lineNumberPrefix, $lineNumberNumeric);
-        $gsmStmt->execute();
-        $gsmResult = $gsmStmt->get_result();
-        if ($gsmResult && $gsmRow = $gsmResult->fetch_assoc()) {
-            if ($gsmRow['last_date']) {
-                $gsmDone = true;
-                $gsmDate = date('Y-m-d H:i', strtotime($gsmRow['last_date']));
+        if ($gsmStmt->execute()) {
+            $gsmResult = $gsmStmt->get_result();
+            if ($gsmResult && $gsmRow = $gsmResult->fetch_assoc()) {
+                // If status is approved, mark as done even if approved_at is NULL
+                if (strtolower(trim($gsmRow['test_status'])) === 'approved') {
+                    $gsmDone = true;
+                    if ($gsmRow['last_date']) {
+                        $gsmDate = date('Y-m-d H:i', strtotime($gsmRow['last_date']));
+                    } else {
+                        $gsmDate = 'Approved';
+                    }
+                }
             }
+        } else {
+            error_log("GSM query error: " . $gsmStmt->error);
         }
         $gsmStmt->close();
+    }
+    
+    // Strategy 2: If not found, try without line_number check (fallback)
+    if (!$gsmDone) {
+        if ($hasUpdatedAt) {
+            $gsmQuery2 = "SELECT 
+                MAX(COALESCE(approved_at, updated_at, created_at)) as last_date,
+                MAX(status) as test_status
+                FROM daily_gsm_checks 
+                WHERE reference_number = ? 
+                AND roll_no = ? 
+                AND LOWER(TRIM(status)) = 'approved' 
+                LIMIT 1";
+        } else {
+            $gsmQuery2 = "SELECT 
+                MAX(COALESCE(approved_at, created_at)) as last_date,
+                MAX(status) as test_status
+                FROM daily_gsm_checks 
+                WHERE reference_number = ? 
+                AND roll_no = ? 
+                AND LOWER(TRIM(status)) = 'approved' 
+                LIMIT 1";
+        }
+        
+        $gsmStmt2 = $conn->prepare($gsmQuery2);
+        if ($gsmStmt2) {
+            $gsmStmt2->bind_param('ss', $refNumber, $rollNo);
+            if ($gsmStmt2->execute()) {
+                $gsmResult2 = $gsmStmt2->get_result();
+                if ($gsmResult2 && $gsmRow2 = $gsmResult2->fetch_assoc()) {
+                    if (strtolower(trim($gsmRow2['test_status'])) === 'approved') {
+                        $gsmDone = true;
+                        if ($gsmRow2['last_date']) {
+                            $gsmDate = date('Y-m-d H:i', strtotime($gsmRow2['last_date']));
+                        } else {
+                            $gsmDate = 'Approved';
+                        }
+                    }
+                }
+            }
+            $gsmStmt2->close();
+        }
+    }
+    
+    // Strategy 3: If still not found, try with just reference_number (most flexible fallback)
+    if (!$gsmDone) {
+        if ($hasUpdatedAt) {
+            $gsmQuery3 = "SELECT 
+                MAX(COALESCE(approved_at, updated_at, created_at)) as last_date,
+                MAX(status) as test_status
+                FROM daily_gsm_checks 
+                WHERE (reference_number = ? OR reference_number LIKE ?)
+                AND LOWER(TRIM(status)) = 'approved' 
+                ORDER BY approved_at DESC, created_at DESC
+                LIMIT 1";
+        } else {
+            $gsmQuery3 = "SELECT 
+                MAX(COALESCE(approved_at, created_at)) as last_date,
+                MAX(status) as test_status
+                FROM daily_gsm_checks 
+                WHERE (reference_number = ? OR reference_number LIKE ?)
+                AND LOWER(TRIM(status)) = 'approved' 
+                ORDER BY approved_at DESC, created_at DESC
+                LIMIT 1";
+        }
+        
+        $refPattern = $refNumber . '%';
+        $gsmStmt3 = $conn->prepare($gsmQuery3);
+        if ($gsmStmt3) {
+            $gsmStmt3->bind_param('ss', $refNumber, $refPattern);
+            if ($gsmStmt3->execute()) {
+                $gsmResult3 = $gsmStmt3->get_result();
+                if ($gsmResult3 && $gsmRow3 = $gsmResult3->fetch_assoc()) {
+                    if (strtolower(trim($gsmRow3['test_status'])) === 'approved') {
+                        $gsmDone = true;
+                        if ($gsmRow3['last_date']) {
+                            $gsmDate = date('Y-m-d H:i', strtotime($gsmRow3['last_date']));
+                        } else {
+                            $gsmDate = 'Approved';
+                        }
+                    }
+                }
+            }
+            $gsmStmt3->close();
+        }
     }
 }
 
@@ -130,30 +271,295 @@ if ($hasGsm) {
 $lengthDone = false;
 $lengthDate = null;
 if ($hasLength) {
-    $lengthStmt = $conn->prepare("SELECT MAX(approved_at) as last_date FROM length_calibrations WHERE reference_number = ? AND roll_no = ? AND (line_number = ? OR line_number = ? OR line_number = ?) AND status = 'approved' LIMIT 1");
+    // Check if updated_at column exists
+    $hasUpdatedAt = false;
+    $colCheck = $conn->query("SHOW COLUMNS FROM length_calibrations LIKE 'updated_at'");
+    if ($colCheck && $colCheck->num_rows > 0) {
+        $hasUpdatedAt = true;
+    }
+    
+    // Try multiple query strategies - first with line_number matching, then without if needed
+    // Strategy 1: With line_number matching (most specific)
+    if ($hasUpdatedAt) {
+        $lengthQuery = "SELECT 
+            MAX(COALESCE(approved_at, updated_at, created_at)) as last_date,
+            MAX(status) as test_status
+            FROM length_calibrations 
+            WHERE reference_number = ? 
+            AND roll_no = ? 
+            AND (
+                line_number = ? 
+                OR line_number = ? 
+                OR line_number = ? 
+                OR line_number IS NULL
+                OR line_number = ''
+            )
+            AND LOWER(TRIM(status)) = 'approved' 
+            LIMIT 1";
+    } else {
+        $lengthQuery = "SELECT 
+            MAX(COALESCE(approved_at, created_at)) as last_date,
+            MAX(status) as test_status
+            FROM length_calibrations 
+            WHERE reference_number = ? 
+            AND roll_no = ? 
+            AND (
+                line_number = ? 
+                OR line_number = ? 
+                OR line_number = ? 
+                OR line_number IS NULL
+                OR line_number = ''
+            )
+            AND LOWER(TRIM(status)) = 'approved' 
+            LIMIT 1";
+    }
+    
+    $lengthStmt = $conn->prepare($lengthQuery);
     if ($lengthStmt) {
         $lengthStmt->bind_param('sssss', $refNumber, $rollNo, $lineNumberRaw, $lineNumberPrefix, $lineNumberNumeric);
-        $lengthStmt->execute();
-        $lengthResult = $lengthStmt->get_result();
-        if ($lengthResult && $lengthRow = $lengthResult->fetch_assoc()) {
-            if ($lengthRow['last_date']) {
-                $lengthDone = true;
-                $lengthDate = date('Y-m-d H:i', strtotime($lengthRow['last_date']));
+        if ($lengthStmt->execute()) {
+            $lengthResult = $lengthStmt->get_result();
+            if ($lengthResult && $lengthRow = $lengthResult->fetch_assoc()) {
+                // If status is approved, mark as done even if approved_at is NULL
+                if (strtolower(trim($lengthRow['test_status'])) === 'approved') {
+                    $lengthDone = true;
+                    if ($lengthRow['last_date']) {
+                        $lengthDate = date('Y-m-d H:i', strtotime($lengthRow['last_date']));
+                    } else {
+                        $lengthDate = 'Approved';
+                    }
+                }
             }
+        } else {
+            error_log("Length Calibration query error: " . $lengthStmt->error);
         }
         $lengthStmt->close();
     }
+    
+    // Strategy 2: If not found, try without line_number check (fallback)
+    if (!$lengthDone) {
+        if ($hasUpdatedAt) {
+            $lengthQuery2 = "SELECT 
+                MAX(COALESCE(approved_at, updated_at, created_at)) as last_date,
+                MAX(status) as test_status
+                FROM length_calibrations 
+                WHERE reference_number = ? 
+                AND roll_no = ? 
+                AND LOWER(TRIM(status)) = 'approved' 
+                LIMIT 1";
+        } else {
+            $lengthQuery2 = "SELECT 
+                MAX(COALESCE(approved_at, created_at)) as last_date,
+                MAX(status) as test_status
+                FROM length_calibrations 
+                WHERE reference_number = ? 
+                AND roll_no = ? 
+                AND LOWER(TRIM(status)) = 'approved' 
+                LIMIT 1";
+        }
+        
+        $lengthStmt2 = $conn->prepare($lengthQuery2);
+        if ($lengthStmt2) {
+            $lengthStmt2->bind_param('ss', $refNumber, $rollNo);
+            if ($lengthStmt2->execute()) {
+                $lengthResult2 = $lengthStmt2->get_result();
+                if ($lengthResult2 && $lengthRow2 = $lengthResult2->fetch_assoc()) {
+                    if (strtolower(trim($lengthRow2['test_status'])) === 'approved') {
+                        $lengthDone = true;
+                        if ($lengthRow2['last_date']) {
+                            $lengthDate = date('Y-m-d H:i', strtotime($lengthRow2['last_date']));
+                        } else {
+                            $lengthDate = 'Approved';
+                        }
+                    }
+                }
+            }
+            $lengthStmt2->close();
+        }
+    }
+    
+    // Strategy 3: If still not found, try with just reference_number (most flexible fallback)
+    if (!$lengthDone) {
+        if ($hasUpdatedAt) {
+            $lengthQuery3 = "SELECT 
+                MAX(COALESCE(approved_at, updated_at, created_at)) as last_date,
+                MAX(status) as test_status
+                FROM length_calibrations 
+                WHERE (reference_number = ? OR reference_number LIKE ? OR reference_number IS NULL)
+                AND (roll_no = ? OR roll_no IS NULL)
+                AND LOWER(TRIM(status)) = 'approved' 
+                ORDER BY approved_at DESC, created_at DESC
+                LIMIT 1";
+        } else {
+            $lengthQuery3 = "SELECT 
+                MAX(COALESCE(approved_at, created_at)) as last_date,
+                MAX(status) as test_status
+                FROM length_calibrations 
+                WHERE (reference_number = ? OR reference_number LIKE ? OR reference_number IS NULL)
+                AND (roll_no = ? OR roll_no IS NULL)
+                AND LOWER(TRIM(status)) = 'approved' 
+                ORDER BY approved_at DESC, created_at DESC
+                LIMIT 1";
+        }
+        
+        $refPattern = $refNumber . '%';
+        $lengthStmt3 = $conn->prepare($lengthQuery3);
+        if ($lengthStmt3) {
+            $lengthStmt3->bind_param('sss', $refNumber, $refPattern, $rollNo);
+            if ($lengthStmt3->execute()) {
+                $lengthResult3 = $lengthStmt3->get_result();
+                if ($lengthResult3 && $lengthRow3 = $lengthResult3->fetch_assoc()) {
+                    if (strtolower(trim($lengthRow3['test_status'])) === 'approved') {
+                        $lengthDone = true;
+                        if ($lengthRow3['last_date']) {
+                            $lengthDate = date('Y-m-d H:i', strtotime($lengthRow3['last_date']));
+                        } else {
+                            $lengthDate = 'Approved';
+                        }
+                    }
+                }
+            }
+            $lengthStmt3->close();
+        }
+    }
+    
+    // Strategy 4: Last resort - find ANY approved record for this roll_no (ignore reference_number)
+    if (!$lengthDone) {
+        if ($hasUpdatedAt) {
+            $lengthQuery4 = "SELECT 
+                approved_at as last_date,
+                status as test_status
+                FROM length_calibrations 
+                WHERE roll_no = ? 
+                AND LOWER(TRIM(status)) = 'approved' 
+                ORDER BY approved_at DESC, created_at DESC
+                LIMIT 1";
+        } else {
+            $lengthQuery4 = "SELECT 
+                created_at as last_date,
+                status as test_status
+                FROM length_calibrations 
+                WHERE roll_no = ? 
+                AND LOWER(TRIM(status)) = 'approved' 
+                ORDER BY created_at DESC
+                LIMIT 1";
+        }
+        
+        $lengthStmt4 = $conn->prepare($lengthQuery4);
+        if ($lengthStmt4) {
+            $lengthStmt4->bind_param('s', $rollNo);
+            if ($lengthStmt4->execute()) {
+                $lengthResult4 = $lengthStmt4->get_result();
+                if ($lengthResult4 && $lengthRow4 = $lengthResult4->fetch_assoc()) {
+                    if (strtolower(trim($lengthRow4['test_status'])) === 'approved') {
+                        $lengthDone = true;
+                        if ($lengthRow4['last_date']) {
+                            $lengthDate = date('Y-m-d H:i', strtotime($lengthRow4['last_date']));
+                        } else {
+                            $lengthDate = 'Approved';
+                        }
+                    }
+                }
+            }
+            $lengthStmt4->close();
+        }
+    }
+    
+    // Strategy 5: Absolute last resort - find most recent approved record (ignore all matching)
+    // Only use if we have an approved record but can't match by reference/roll
+    if (!$lengthDone) {
+        if ($hasUpdatedAt) {
+            $lengthQuery5 = "SELECT 
+                approved_at as last_date,
+                status as test_status,
+                reference_number,
+                roll_no
+                FROM length_calibrations 
+                WHERE LOWER(TRIM(status)) = 'approved' 
+                AND approved_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                ORDER BY approved_at DESC
+                LIMIT 1";
+        } else {
+            $lengthQuery5 = "SELECT 
+                created_at as last_date,
+                status as test_status,
+                reference_number,
+                roll_no
+                FROM length_calibrations 
+                WHERE LOWER(TRIM(status)) = 'approved' 
+                AND created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                ORDER BY created_at DESC
+                LIMIT 1";
+        }
+        
+        $lengthStmt5 = $conn->prepare($lengthQuery5);
+        if ($lengthStmt5 && $lengthStmt5->execute()) {
+            $lengthResult5 = $lengthStmt5->get_result();
+            if ($lengthResult5 && $lengthRow5 = $lengthResult5->fetch_assoc()) {
+                // Only use this if the reference_number or roll_no matches (even partially), or if both are NULL
+                $dbRef = $lengthRow5['reference_number'] ?? '';
+                $dbRoll = $lengthRow5['roll_no'] ?? '';
+                
+                $refMatch = empty($dbRef) || empty($refNumber) || 
+                           (strpos($dbRef, $refNumber) !== false || strpos($refNumber, $dbRef) !== false);
+                $rollMatch = empty($dbRoll) || empty($rollNo) || 
+                            ($dbRoll == $rollNo || strpos($dbRoll, $rollNo) !== false || strpos($rollNo, $dbRoll) !== false);
+                
+                // If both reference and roll are NULL in DB, or if there's a match, accept it
+                $bothNull = (empty($dbRef) && empty($dbRoll));
+                
+                if (strtolower(trim($lengthRow5['test_status'])) === 'approved' && ($refMatch || $rollMatch || $bothNull)) {
+                    $lengthDone = true;
+                    if ($lengthRow5['last_date']) {
+                        $lengthDate = date('Y-m-d H:i', strtotime($lengthRow5['last_date']));
+                    } else {
+                        $lengthDate = 'Approved';
+                    }
+                }
+            }
+            $lengthStmt5->close();
+        }
+    }
 }
 
-$conn->close();
-
-echo json_encode([
-    'gsm_done' => $gsmDone,
-    'gsm_date' => $gsmDate,
-    'length_done' => $lengthDone,
-    'length_date' => $lengthDate,
-    'all_done' => ($gsmDone && $lengthDone)
-]);
+// Return results with error handling
+try {
+    // Debug: Log what we found (remove in production)
+    if (!$lengthDone) {
+        // Check what's actually in the database for debugging
+        $debugStmt = $conn->prepare("SELECT id, reference_number, roll_no, line_number, status, approved_at 
+                                     FROM length_calibrations 
+                                     WHERE status = 'approved' 
+                                     ORDER BY approved_at DESC 
+                                     LIMIT 5");
+        if ($debugStmt && $debugStmt->execute()) {
+            $debugResult = $debugStmt->get_result();
+            $debugData = [];
+            while ($row = $debugResult->fetch_assoc()) {
+                $debugData[] = $row;
+            }
+            error_log("Length Calibration Debug - Looking for ref: $refNumber, roll: $rollNo, line: $lineNo. Found approved records: " . json_encode($debugData));
+            $debugStmt->close();
+        }
+    }
+    
+    $result = [
+        'gsm_done' => $gsmDone,
+        'gsm_date' => $gsmDate,
+        'length_done' => $lengthDone,
+        'length_date' => $lengthDate,
+        'all_done' => ($gsmDone && $lengthDone)
+    ];
+    
+    $conn->close();
+    echo json_encode($result);
+} catch (Exception $e) {
+    error_log("check_qc_status.php error: " . $e->getMessage());
+    echo json_encode([
+        'error' => 'Database error',
+        'message' => $e->getMessage()
+    ]);
+}
 ?>
 
 

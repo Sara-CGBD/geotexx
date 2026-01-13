@@ -10,7 +10,7 @@ if (!isset($_SESSION['user_id']) || !isset($_SESSION['username'])) {
 
 // Role-based access control
 $user_role = strtolower(trim($_SESSION['role'] ?? ''));
-$allowed_roles = ['admin', 'production_user', 'management', 'agm ops', 'agm operations'];
+$allowed_roles = ['admin', 'production_user', 'management', 'agm ops', 'agm operations', 'sewing_test'];
 if (!in_array($user_role, $allowed_roles)) {
     http_response_code(403);
     die("<div style='font-family: Arial; max-width: 600px; margin: 100px auto; padding: 30px; border: 2px solid #e74c3c; border-radius: 10px; background: #ffe8e8;'>
@@ -22,6 +22,10 @@ if (!in_array($user_role, $allowed_roles)) {
 
 date_default_timezone_set('Asia/Dhaka');
 $conn = SecurityConfig::getConnection();
+
+// Determine which sewing table exists
+$sewingTableCheck = $conn->query("SHOW TABLES LIKE 'sewing_machine_entry'");
+$sewingTable = ($sewingTableCheck && $sewingTableCheck->num_rows > 0) ? 'sewing_machine_entry' : 'swing_machine_entry';
 
 // Get filter parameters
 $dateFrom = $_GET['date_from'] ?? '';
@@ -175,7 +179,7 @@ $sewingQuery = "SELECT
         WHEN HOUR(date_time) >= 8 AND HOUR(date_time) < 20 THEN 'Day'
         ELSE 'Night'
     END as calculated_shift
-FROM swing_machine_entry
+FROM $sewingTable
 WHERE $sewingWhere";
 
 if ($shift) {
@@ -203,7 +207,7 @@ $dailyQuery = "SELECT
     line_no,
     COUNT(*) as entry_count,
     SUM(sewing_qty) as total_qty
-FROM swing_machine_entry
+FROM $sewingTable
 WHERE $sewingWhere
 GROUP BY production_date, calculated_shift, line_no
 ORDER BY production_date DESC, calculated_shift, line_no";
@@ -225,7 +229,7 @@ $shiftQuery = "SELECT
     line_no,
     COUNT(*) as entry_count,
     SUM(sewing_qty) as total_qty
-FROM swing_machine_entry
+FROM $sewingTable
 WHERE $sewingWhere
 GROUP BY calculated_shift, line_no
 ORDER BY calculated_shift, line_no";
@@ -540,10 +544,94 @@ $conn->close();
             display: block;
         }
         @media print {
-            .filters, .back-link, .tabs, .print-btn { display: none; }
-            body { background: white; padding: 0; }
-            .container { box-shadow: none; }
+            * { 
+                box-sizing: border-box;
+                -webkit-print-color-adjust: exact;
+                print-color-adjust: exact;
+            }
+            body { 
+                background: white !important; 
+                padding: 5px !important; 
+                margin: 0 !important;
+                font-size: 9px !important;
+                overflow: visible !important;
+            }
+            .container { 
+                box-shadow: none !important; 
+                padding: 5px !important;
+                margin: 0 !important;
+                max-width: 100% !important;
+                width: 100% !important;
+            }
+            .filters, .back-link, .tabs, .print-btn { display: none !important; }
             .tab-content { display: block !important; }
+            h1 { 
+                font-size: 14px !important; 
+                margin: 3px 0 !important; 
+                padding: 0 !important;
+                page-break-after: avoid;
+            }
+            .subtitle { 
+                font-size: 9px !important; 
+                margin: 2px 0 8px !important; 
+                padding: 0 !important;
+            }
+            .section-title { 
+                font-size: 11px !important; 
+                margin: 8px 0 3px !important; 
+                padding: 3px 0 !important; 
+                page-break-after: avoid;
+            }
+            .section { 
+                margin-bottom: 10px !important;
+                page-break-inside: avoid;
+                overflow: visible !important;
+            }
+            table { 
+                font-size: 7px !important; 
+                width: 100% !important;
+                page-break-inside: auto;
+                border-collapse: collapse !important;
+                margin-bottom: 8px !important;
+            }
+            th, td { 
+                padding: 3px 2px !important; 
+                font-size: 7px !important;
+                line-height: 1.1 !important;
+                border: 1px solid #ddd !important;
+            }
+            th { 
+                font-size: 8px !important; 
+                font-weight: 600 !important;
+            }
+            .chart-container { 
+                height: 200px !important; 
+                max-height: 200px !important;
+            }
+            .stats-grid { 
+                grid-template-columns: repeat(3, 1fr) !important;
+                gap: 5px !important;
+                margin-bottom: 10px !important;
+            }
+            .stat-card { 
+                padding: 8px 5px !important;
+                page-break-inside: avoid;
+                margin-bottom: 0 !important;
+            }
+            .stat-value { 
+                font-size: 1.2em !important; 
+                margin-bottom: 2px !important;
+            }
+            .stat-label { 
+                font-size: 0.75em !important; 
+            }
+            tr { page-break-inside: avoid; }
+            thead { display: table-header-group !important; }
+            tfoot { display: table-footer-group !important; }
+            @page {
+                size: A4 landscape;
+                margin: 0.3cm;
+            }
         }
     </style>
 </head>

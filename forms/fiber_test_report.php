@@ -569,7 +569,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_report'])) {
             
             // Call update method (we'll use the same saveReport but check for ID)
             $result = $fiberTestHandler->saveReport($_POST, $reportId);
-            $message = "✅ Fiber Test Report resubmitted successfully! Report Number: " . $editData['report_number'] . " (Status: Pending Approval)";
+            $message = "Fiber Test Report resubmitted successfully! Report Number: " . $editData['report_number'] . " (Status: Pending Approval)";
             
             // Exit edit mode
             $editMode = false;
@@ -581,9 +581,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_report'])) {
             
             // Auto-approval message
             if ($can_approve) {
-                $message = "✅ Fiber Test Report saved and auto-approved! Report Number: " . $result['report_number'];
+                $message = "Fiber Test Report saved and auto-approved! Report Number: " . $result['report_number'];
             } else {
-                $message = "✅ Fiber Test Report submitted successfully! Report Number: " . $result['report_number'] . " (Status: Pending Approval)";
+                $message = "Fiber Test Report submitted successfully! Report Number: " . $result['report_number'] . " (Status: Pending Approval)";
             }
             
             // Store success message in session and redirect to refresh dropdown
@@ -666,7 +666,7 @@ $acceptance_criteria = [
 
   <?php if ($message): ?>
     <div class="alert alert-success" style="background:#d4edda;color:#155724;padding:12px;border-radius:6px;border:1px solid #c3e6cb;margin-bottom:15px;">
-      ✅ <?php echo htmlspecialchars($message); ?>
+      <?php echo htmlspecialchars($message); ?>
     </div>
   <?php endif; ?>
 

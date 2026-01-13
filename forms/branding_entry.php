@@ -195,19 +195,14 @@ $brandingId = 'BR-' . date('Ymd') . '-' . str_pad($nextBrandingNumber, 3, '0', S
       <input type="hidden" id="shiftIncharge" name="shiftIncharge">
     </div>
 
-    <!-- Reference Number -->
-    <div class="form-group">
-      <label>Reference Number:</label>
-      <select id="referenceNumber" name="referenceNumber" onchange="updateCNCBatch()" required>
-        <option value="">-- Loading Reference Numbers... --</option>
-      </select>
-      <small id="ref_loading" style="display: block; color: #7f8c8d; font-size: 0.75em; margin-top: 2px;">Loading options...</small>
-    </div>
-
-    <!-- CNC Cutting Batch (Auto-filled) -->
+    <!-- CNC Cutting Batch (dropdown from sewing machine entries) -->
     <div class="form-group">
       <label>CNC Cutting Batch:</label>
-      <input type="text" id="cncCuttingBatch" name="cncCuttingBatch" placeholder="Auto-filled from reference" readonly class="readonly" required>
+      <select id="cncCuttingBatch" name="cncCuttingBatch" required onchange="updateReferenceFromBatch()">
+        <option value="">-- Loading CNC Cutting Batches... --</option>
+      </select>
+      <div id="batch_loading" style="display: none; margin-top: 10px;"></div>
+      <input type="hidden" id="referenceNumber" name="referenceNumber" value="">
     </div>
 
     <!-- Project Selection -->
@@ -281,7 +276,7 @@ $brandingId = 'BR-' . date('Ymd') . '-' . str_pad($nextBrandingNumber, 3, '0', S
     <div class="form-group">
       <label>Print Quantity:</label>
       <input type="number" id="printQty" name="printQty" min="1" required oninput="validatePrintQty()">
-      <small id="available_print_text" style="color:#27ae60; font-weight:600; display:none; margin-top:5px;"></small>
+      <div id="available_print_text" style="display:none; margin-top:10px;"></div>
       <small id="print_warning" style="color:#e74c3c; font-weight:600; display:none; margin-top:5px;"></small>
     </div>
 
@@ -460,40 +455,10 @@ function selectBtn(btn, groupId) {
     updateSummary();
 }
 
-function updateCNCBatch() {
-    const refSelect = document.getElementById("referenceNumber");
-    const selectedOption = refSelect.options[refSelect.selectedIndex];
-    const cncBatch = selectedOption.getAttribute("data-cnc");
-    const availableText = document.getElementById("available_print_text");
-    const warningText = document.getElementById("print_warning");
-    const printQtyInput = document.getElementById("printQty");
-    
-    document.getElementById("cncCuttingBatch").value = cncBatch || '';
-    
-    // Load available print quantity
-    if (selectedOption && selectedOption.value) {
-        const sewingQty = parseInt(selectedOption.getAttribute("data-sewing-qty")) || 0;
-        const printedQty = parseInt(selectedOption.getAttribute("data-printed-qty")) || 0;
-        const availablePrint = parseInt(selectedOption.getAttribute("data-available-print")) || 0;
-        
-        // Display available quantity
-        availableText.textContent = `✓ Available: ${availablePrint} pcs (Sewing: ${sewingQty} pcs, Already Printed: ${printedQty} pcs)`;
-        availableText.style.color = '#27ae60';
-        availableText.style.display = 'block';
-        warningText.style.display = 'none';
-        
-        // Store for validation
-        printQtyInput.setAttribute('data-max-qty', availablePrint);
-        printQtyInput.max = availablePrint;
-    } else {
-        availableText.style.display = 'none';
-        warningText.style.display = 'none';
-        printQtyInput.removeAttribute('data-max-qty');
-        printQtyInput.removeAttribute('max');
-    }
-    
-    updateSummary();
-}
+// Removed updateCNCBatch function - CNC batch is now selected directly from dropdown
+
+// Track if popup is already shown to avoid multiple popups
+let popupShown = false;
 
 function validatePrintQty() {
     const printQtyInput = document.getElementById("printQty");
@@ -506,15 +471,234 @@ function validatePrintQty() {
         warningText.textContent = `⚠️ Print quantity (${printQty} pcs) exceeds available quantity (${maxQty} pcs)`;
         warningText.style.display = 'block';
         printQtyInput.style.border = '2px solid #e74c3c';
+        
+        // Show popup immediately if not already shown
+        if (!popupShown) {
+            showPrintQtyPopup(printQty, maxQty);
+            popupShown = true;
+        }
     } else {
         warningText.style.display = 'none';
         printQtyInput.style.border = '1px solid #ccc';
+        // Reset flag when quantity is valid (allows popup to show again if user exceeds limit again)
+        if (printQty <= maxQty) {
+            popupShown = false;
+        }
         
-        // Keep available text visible and green
+        // Keep available text visible (already styled in updateReferenceFromBatch)
         if (availableText && maxQty > 0) {
-            availableText.style.color = '#27ae60';
             availableText.style.display = 'block';
         }
+    }
+}
+
+// Show popup when print quantity exceeds limit
+function showPrintQtyPopup(enteredQty, maxQty) {
+    // Remove existing popup if any
+    const existingOverlay = document.getElementById('printQtyPopupOverlay');
+    if (existingOverlay) {
+        existingOverlay.remove();
+    }
+    
+    // Create popup overlay with modern backdrop blur
+    const overlay = document.createElement('div');
+    overlay.id = 'printQtyPopupOverlay';
+    overlay.style.cssText = `
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.6);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        z-index: 10000;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        animation: fadeIn 0.3s ease-out;
+    `;
+    
+    // Add fade-in animation
+    const style = document.createElement('style');
+    style.textContent = `
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        @keyframes slideUp {
+            from { 
+                opacity: 0;
+                transform: translateY(30px) scale(0.95);
+            }
+            to { 
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
+        @keyframes shake {
+            0%, 100% { transform: translateX(0); }
+            25% { transform: translateX(-10px); }
+            75% { transform: translateX(10px); }
+        }
+    `;
+    document.head.appendChild(style);
+    
+    // Create popup content with modern design
+    const popup = document.createElement('div');
+    popup.style.cssText = `
+        background: linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%);
+        padding: 0;
+        border-radius: 16px;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.1);
+        max-width: 380px;
+        width: 85%;
+        overflow: hidden;
+        animation: slideUp 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+        position: relative;
+    `;
+    
+    popup.innerHTML = `
+        <!-- Header with gradient -->
+        <div style="
+            background: linear-gradient(135deg, #ff6b6b 0%, #ee5a6f 100%);
+            padding: 20px 20px 18px 20px;
+            text-align: center;
+            position: relative;
+        ">
+            <div style="
+                width: 60px;
+                height: 60px;
+                margin: 0 auto 12px;
+                background: rgba(255, 255, 255, 0.2);
+                border-radius: 50%;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                backdrop-filter: blur(10px);
+                animation: shake 0.5s ease-in-out;
+            ">
+                <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+                    <line x1="12" y1="9" x2="12" y2="13"></line>
+                    <line x1="12" y1="17" x2="12.01" y2="17"></line>
+                </svg>
+            </div>
+            <h2 style="
+                color: white;
+                margin: 0;
+                font-size: 20px;
+                font-weight: 700;
+                letter-spacing: -0.3px;
+                text-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+            ">Quantity Limit Exceeded</h2>
+        </div>
+        
+        <!-- Content -->
+        <div style="padding: 22px 20px 20px 20px;">
+            <div style="
+                background: linear-gradient(135deg, #fff5f5 0%, #ffe5e5 100%);
+                border-left: 4px solid #ff6b6b;
+                padding: 14px 16px;
+                border-radius: 10px;
+                margin-bottom: 16px;
+            ">
+                <p style="
+                    color: #2d3748;
+                    margin: 0 0 10px 0;
+                    font-size: 14px;
+                    line-height: 1.5;
+                    font-weight: 500;
+                ">
+                    You entered <strong style="color: #ff6b6b; font-size: 15px;">${formatNumber(enteredQty)} pieces</strong>
+                </p>
+                <p style="
+                    color: #4a5568;
+                    margin: 0;
+                    font-size: 13px;
+                    line-height: 1.5;
+                ">
+                    Available quantity: <strong style="color: #27ae60; font-size: 15px;">${formatNumber(maxQty)} pieces</strong>
+                </p>
+            </div>
+            
+            <div style="
+                background: linear-gradient(135deg, #fff3cd 0%, #ffeaa7 100%);
+                border-left: 4px solid #f39c12;
+                padding: 12px 14px;
+                border-radius: 10px;
+                margin-bottom: 18px;
+            ">
+                <p style="
+                    color: #2d3748;
+                    margin: 0;
+                    font-size: 12px;
+                    line-height: 1.5;
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                ">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f39c12" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="10"></circle>
+                        <line x1="12" y1="8" x2="12" y2="12"></line>
+                        <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                    </svg>
+                    <span>Please adjust the print quantity to <strong style="color: #27ae60;">${formatNumber(maxQty)} pieces</strong> or less to proceed.</span>
+                </p>
+            </div>
+            
+            <button onclick="closePrintQtyPopup()" style="
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                border: none;
+                padding: 12px 30px;
+                border-radius: 10px;
+                font-size: 13px;
+                font-weight: 600;
+                cursor: pointer;
+                box-shadow: 0 6px 16px rgba(102, 126, 234, 0.4);
+                transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+                width: 100%;
+                letter-spacing: 0.3px;
+                text-transform: uppercase;
+            " onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 10px 24px rgba(102, 126, 234, 0.5)'" 
+               onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='0 6px 16px rgba(102, 126, 234, 0.4)'"
+               onmousedown="this.style.transform='translateY(0)'"
+               onmouseup="this.style.transform='translateY(-2px)'">
+                Got It
+            </button>
+        </div>
+    `;
+    
+    overlay.appendChild(popup);
+    document.body.appendChild(overlay);
+    
+    // Close on overlay click
+    overlay.addEventListener('click', function(e) {
+        if (e.target === overlay) {
+            closePrintQtyPopup();
+        }
+    });
+    
+    // Close on Escape key
+    const escapeHandler = function(e) {
+        if (e.key === 'Escape') {
+            closePrintQtyPopup();
+            document.removeEventListener('keydown', escapeHandler);
+        }
+    };
+    document.addEventListener('keydown', escapeHandler);
+}
+
+// Close popup
+function closePrintQtyPopup() {
+    const overlay = document.getElementById('printQtyPopupOverlay');
+    if (overlay) {
+        overlay.style.animation = 'fadeIn 0.2s ease-out reverse';
+        setTimeout(() => {
+            overlay.remove();
+            popupShown = false;
+        }, 200);
     }
 }
 
@@ -532,7 +716,6 @@ function updateSummary() {
     const selectedShiftIncharge = document.querySelector('#shiftInchargeGroup .btn.selected');
     const shiftInchargeName = selectedShiftIncharge ? selectedShiftIncharge.textContent.trim() : '';
     
-    const referenceNumber = document.getElementById("referenceNumber").value;
     const cncCuttingBatch = document.getElementById("cncCuttingBatch").value;
     
     const selectedProject = document.querySelector('#projectGroup .btn.selected');
@@ -549,7 +732,6 @@ function updateSummary() {
     if (dateTime && shift) {
         let summary = `${brandingId} | ${dateTime} | Shift: ${shift}`;
         if (shiftInchargeName) summary += ` | Shift Incharge: ${shiftInchargeName}`;
-        if (referenceNumber) summary += ` | Reference: ${referenceNumber}`;
         if (cncCuttingBatch) summary += ` | CNC Batch: ${cncCuttingBatch}`;
         if (projectName) summary += ` | Project: ${projectName}`;
         if (printMachine) summary += ` | Print Machine: ${printMachine}`;
@@ -607,7 +789,7 @@ function validateForm() {
 }
 
 // Add event listeners for input fields
-["referenceNumber", "printMachine", "bagSizeCustom", "printQty"].forEach(id => {
+["cncCuttingBatch", "printMachine", "bagSizeCustom", "printQty"].forEach(id => {
     const elem = document.getElementById(id);
     if (elem) {
         elem.addEventListener("input", updateSummary);
@@ -620,8 +802,236 @@ document.addEventListener('DOMContentLoaded', function() {
     loadFormData();
 });
 
+// Load CNC cutting batches from sewing machine entries
+function loadCNCCuttingBatches() {
+    const batchSelect = document.getElementById('cncCuttingBatch');
+    const loadingText = document.getElementById('batch_loading');
+    
+    if (!batchSelect) return;
+    
+    // Show loading state
+    if (loadingText) {
+        loadingText.innerHTML = `
+            <div style="display: flex; align-items: center; gap: 10px; padding: 10px 16px; background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 10px; color: #0369a1; font-size: 0.9rem;">
+                <i class="fas fa-spinner fa-spin" style="font-size: 1rem;"></i>
+                <span style="font-weight: 500;">Loading batches from sewing entries...</span>
+            </div>
+        `;
+        loadingText.style.display = 'block';
+    }
+    
+    fetch('api/get_sewing_cnc_batches.php')
+        .then(response => {
+            if (!response.ok) {
+                throw new Error('Network response was not ok');
+            }
+            return response.json();
+        })
+        .then(data => {
+            console.log('API Response:', data); // Debug log
+            
+            if (loadingText) {
+                loadingText.innerHTML = '';
+                loadingText.style.display = 'none';
+            }
+            
+            if (!data.success) {
+                batchSelect.innerHTML = '<option value="">-- Failed to load batches --</option>';
+                if (loadingText) {
+                    loadingText.innerHTML = `
+                        <div style="display: flex; align-items: center; gap: 10px; padding: 12px 16px; background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%); border: 1px solid #fca5a5; border-radius: 10px; color: #991b1b; font-size: 0.9rem; box-shadow: 0 2px 8px rgba(239, 68, 68, 0.1);">
+                            <i class="fas fa-exclamation-circle" style="font-size: 1.1rem; color: #dc2626;"></i>
+                            <span style="font-weight: 500;">Error loading batches. Please try again.</span>
+                        </div>
+                    `;
+                    loadingText.style.display = 'block';
+                }
+                return;
+            }
+            
+            const batches = data.batches || [];
+            console.log('Batches found:', batches.length, data.debug_info); // Debug log
+            batchSelect.innerHTML = '<option value="">-- Select CNC Cutting Batch --</option>';
+            
+            if (batches.length === 0) {
+                batchSelect.innerHTML = '<option value="">-- No batches available --</option>';
+                if (loadingText) {
+                    loadingText.innerHTML = `
+                        <div style="display: flex; align-items: center; gap: 10px; padding: 12px 16px; background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%); border: 1px solid #fbbf24; border-radius: 10px; color: #92400e; font-size: 0.9rem; box-shadow: 0 2px 8px rgba(245, 158, 11, 0.1);">
+                            <i class="fas fa-info-circle" style="font-size: 1.1rem; color: #d97706;"></i>
+                            <div style="flex: 1;">
+                                <div style="font-weight: 600; margin-bottom: 4px;">No CNC cutting batches found</div>
+                                <div style="font-size: 0.85rem; opacity: 0.9;">Please create sewing machine entries first to proceed with branding entry.</div>
+                            </div>
+                        </div>
+                    `;
+                    loadingText.style.display = 'block';
+                }
+                return;
+            }
+            
+            // Store batch data globally for reference number lookup
+            window.batchDataMap = window.batchDataMap || {};
+            
+            batches.forEach(batch => {
+                const option = document.createElement('option');
+                option.value = batch.batch;
+                
+                // Store batch data for reference lookup
+                window.batchDataMap[batch.batch] = batch;
+                
+                // Build display text: batch - references - quantity
+                let displayText = batch.batch;
+                
+                // Add reference numbers if available
+                if (batch.references && batch.references.length > 0) {
+                    const refCount = batch.references.length;
+                    if (refCount <= 5) {
+                        // Show all references if 5 or fewer
+                        displayText += ` - ${batch.references.join(', ')}`;
+                    } else {
+                        // Show first 2 + count if more than 5
+                        displayText += ` - ${batch.references.slice(0, 2).join(', ')} +${refCount - 2} more`;
+                    }
+                }
+                
+                // Add remaining quantity (or total if remaining not available)
+                const qty = batch.remaining_qty || batch.total_sewing_qty || 0;
+                if (qty > 0) {
+                    displayText += ` - ${formatNumber(qty)}`;
+                }
+                
+                option.textContent = displayText;
+                batchSelect.appendChild(option);
+            });
+        })
+        .catch(error => {
+            console.error('Error fetching batches:', error);
+            if (loadingText) {
+                loadingText.innerHTML = '';
+                loadingText.style.display = 'none';
+            }
+            batchSelect.innerHTML = '<option value="">-- Error loading batches --</option>';
+            if (loadingText) {
+                loadingText.innerHTML = `
+                    <div style="display: flex; align-items: center; gap: 10px; padding: 12px 16px; background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%); border: 1px solid #fca5a5; border-radius: 10px; color: #991b1b; font-size: 0.9rem; box-shadow: 0 2px 8px rgba(239, 68, 68, 0.1);">
+                        <i class="fas fa-exclamation-circle" style="font-size: 1.1rem; color: #dc2626;"></i>
+                        <span style="font-weight: 500;">Network error. Please check your connection and try again.</span>
+                    </div>
+                `;
+                loadingText.style.display = 'block';
+            }
+        });
+}
+
+// Format number helper
+function formatNumber(num) {
+    return new Intl.NumberFormat().format(num);
+}
+
+// Update reference number from selected batch
+function updateReferenceFromBatch() {
+    const batchSelect = document.getElementById('cncCuttingBatch');
+    const refInput = document.getElementById('referenceNumber');
+    const printQtyInput = document.getElementById('printQty');
+    const availableText = document.getElementById('available_print_text');
+    
+    if (!batchSelect || !refInput) return;
+    
+    const selectedBatch = batchSelect.value;
+    
+    if (!selectedBatch) {
+        refInput.value = '';
+        if (printQtyInput) {
+            printQtyInput.removeAttribute('data-max-qty');
+            printQtyInput.removeAttribute('max');
+        }
+        if (availableText) {
+            availableText.style.display = 'none';
+        }
+        return;
+    }
+    
+    // Get batch data from stored map
+    if (window.batchDataMap && window.batchDataMap[selectedBatch]) {
+        const batch = window.batchDataMap[selectedBatch];
+        
+        // Update reference number
+        if (batch.references && batch.references.length > 0) {
+            refInput.value = batch.references.join(', ');
+        } else {
+            refInput.value = '';
+        }
+        
+        // Update print quantity limit using remaining quantity
+        const maxQty = batch.remaining_qty || batch.total_sewing_qty || 0;
+        if (printQtyInput && maxQty > 0) {
+            printQtyInput.setAttribute('data-max-qty', maxQty);
+            printQtyInput.setAttribute('max', maxQty);
+            
+            // Show available quantity with modern UI
+            if (availableText) {
+                availableText.innerHTML = `
+                    <div style="
+                        background: linear-gradient(135deg, #e8f5e9 0%, #c8e6c9 100%);
+                        border: 1px solid #27ae60;
+                        border-radius: 6px;
+                        padding: 6px 10px;
+                        display: inline-flex;
+                        align-items: center;
+                        gap: 8px;
+                        box-shadow: 0 1px 4px rgba(39, 174, 96, 0.1);
+                    ">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#27ae60" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0;">
+                            <polyline points="20 6 9 17 4 12"></polyline>
+                        </svg>
+                        <span style="
+                            color: #1e8449;
+                            font-size: 11px;
+                            font-weight: 600;
+                        ">Available Printing Quantity:</span>
+                        <span style="
+                            color: #27ae60;
+                            font-size: 13px;
+                            font-weight: 700;
+                        ">${formatNumber(maxQty)} pieces</span>
+                    </div>
+                `;
+                availableText.style.display = 'block';
+            }
+            
+            // Check if current quantity exceeds the new limit (but don't auto-adjust)
+            const currentQty = parseInt(printQtyInput.value) || 0;
+            if (currentQty > maxQty) {
+                // Just validate to show warning, but don't change the value
+                validatePrintQty();
+            }
+        } else {
+            if (printQtyInput) {
+                printQtyInput.removeAttribute('data-max-qty');
+                printQtyInput.removeAttribute('max');
+            }
+            if (availableText) {
+                availableText.style.display = 'none';
+            }
+        }
+    } else {
+        refInput.value = '';
+        if (printQtyInput) {
+            printQtyInput.removeAttribute('data-max-qty');
+            printQtyInput.removeAttribute('max');
+        }
+        if (availableText) {
+            availableText.style.display = 'none';
+        }
+    }
+}
+
 // Load form dropdowns asynchronously to avoid blocking page render
 function loadFormData() {
+    // Load CNC cutting batches
+    loadCNCCuttingBatches();
+    
     // Load projects
     fetch('api/get_projects.php')
         .then(response => response.json())
@@ -651,49 +1061,6 @@ function loadFormData() {
             if (loadingText) loadingText.textContent = 'Failed to load projects';
         });
     
-    // Load reference numbers (sewing data)
-    fetch('api/get_branding_references.php')
-        .then(response => response.json())
-        .then(data => {
-            const refSelect = document.getElementById('referenceNumber');
-            const loadingText = document.getElementById('ref_loading');
-            if (loadingText) loadingText.style.display = 'none';
-
-            if (!data.success) {
-                refSelect.innerHTML = '<option value="">-- Failed to load references --</option>';
-                return;
-            }
-
-            const refs = data.references || [];
-            refSelect.innerHTML = '<option value="">-- Select Reference Number --</option>';
-            if (refs.length === 0) {
-                refSelect.innerHTML = '<option value="">-- No references available --</option>';
-                return;
-            }
-
-            refs.forEach(ref => {
-                const option = document.createElement('option');
-                option.value = ref.reference_number;
-                option.setAttribute('data-cnc', ref.cnc_cutting_batch || '');
-                option.setAttribute('data-sewing-qty', ref.total_sewing_qty || 0);
-                option.setAttribute('data-printed-qty', ref.total_printed || 0);
-                option.setAttribute('data-available-print', ref.available_for_print || 0);
-                option.textContent = ref.reference_number + ' - Available: ' + (ref.available_for_print || 0) + ' pcs';
-                refSelect.appendChild(option);
-            });
-        })
-        .catch(err => {
-            console.error('Error loading references:', err);
-            const refSelect = document.getElementById('referenceNumber');
-            const loadingText = document.getElementById('ref_loading');
-            if (loadingText) {
-                loadingText.style.display = 'none';
-                loadingText.textContent = 'Failed to load references';
-            }
-            if (refSelect) {
-                refSelect.innerHTML = '<option value="">-- Failed to load references --</option>';
-            }
-        });
 }
 </script>
 </body>

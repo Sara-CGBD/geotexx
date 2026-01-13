@@ -52,14 +52,26 @@ try {
     // Calculate total cost
     $totalCost = $deliveryQty * $unitPrice;
     
-    // Validate required fields
-    if (empty($referenceNumber) || $deliveryQty <= 0) {
-        header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode('⚠️ Missing reference or invalid delivery quantity!'));
+    // Validate required fields based on product type
+    if ($deliveryQty <= 0) {
+        header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode('Invalid delivery quantity!'));
+        exit();
+    }
+    
+    // For rolls, reference_number is required
+    // For bags, cnc_cutting_batch is required (reference_number is not used)
+    if ($deliveryProductType === 'roll' && empty($referenceNumber)) {
+        header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode('Please select a reference number!'));
+        exit();
+    }
+    
+    if ($deliveryProductType === 'bag' && empty($cncCuttingBatch)) {
+        header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode('Please select a CNC cutting batch!'));
         exit();
     }
     
     if (empty($clientName)) {
-        header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode('⚠️ Please select or enter a client name!'));
+        header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode('Please select or enter a client name!'));
         exit();
     }
     
@@ -91,55 +103,117 @@ try {
     }
     
     // --- ROBUST STOCK VALIDATION ---
-    // Check FG entry exists and get stock information
-    // Calculate delivered_quantity dynamically from fg_deliveries to ensure accuracy even after deletions
-    $checkStmt = $conn->prepare("SELECT 
-                                    fe.id,
-                                    fe.passed_qty, 
-                                    fe.actual_weight,
-                                    fe.product_type,
-                                    COALESCE(SUM(fd.delivery_quantity), 0) as delivered_quantity,
-                                    CASE 
-                                        WHEN fe.product_type = 'roll' THEN (fe.actual_weight - COALESCE(SUM(fd.delivery_quantity), 0))
-                                        ELSE (fe.passed_qty - COALESCE(SUM(fd.delivery_quantity), 0))
-                                    END as remaining_quantity
-                                  FROM fg_entry fe
-                                  LEFT JOIN fg_deliveries fd ON fe.id = fd.fg_entry_id
-                                  WHERE fe.reference_number = ?
-                                  GROUP BY fe.id, fe.passed_qty, fe.actual_weight, fe.product_type");
-    $checkStmt->bind_param('s', $referenceNumber);
-    $checkStmt->execute();
-    $result = $checkStmt->get_result();
+    // For bags: Calculate remaining quantity from branding entries (print_qty - delivered_qty)
+    // For rolls: Get stock from FG entry using reference_number
     
-    if ($result->num_rows === 0) {
-        header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode('⚠️ No FG Entry found for this reference!\n\nSolution:\n1. Check FG Entry form - ensure this reference exists\n2. If no FG Entry exists, create one first'));
-        exit();
+    if ($deliveryProductType === 'bag') {
+        // For bags, calculate remaining quantity from branding entries
+        // Check if is_deleted column exists in branding_entries
+        $isDeletedCheck = $conn->query("SHOW COLUMNS FROM branding_entries LIKE 'is_deleted'");
+        $hasIsDeleted = ($isDeletedCheck && $isDeletedCheck->num_rows > 0);
+        
+        // Get total print_qty from branding entries for this CNC batch
+        $query = "SELECT 
+                    SUM(COALESCE(print_qty, 0)) as total_print_qty
+                  FROM branding_entries
+                  WHERE cnc_cutting_batch = ?";
+        
+        if ($hasIsDeleted) {
+            $query .= " AND (is_deleted = 0 OR is_deleted IS NULL)";
+        }
+        
+        $brandingCheck = $conn->prepare($query);
+        $brandingCheck->bind_param('s', $cncCuttingBatch);
+        $brandingCheck->execute();
+        $brandingResult = $brandingCheck->get_result();
+        
+        if ($brandingResult->num_rows === 0) {
+            header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode('No branding entries found for this CNC cutting batch!'));
+            $brandingCheck->close();
+            exit();
+        }
+        
+        $brandingData = $brandingResult->fetch_assoc();
+        $totalPrintQty = (float)$brandingData['total_print_qty'];
+        $brandingCheck->close();
+        
+        // Get total delivered quantity for this CNC batch
+        $deliveredCheck = $conn->prepare("SELECT 
+                                            SUM(COALESCE(delivery_quantity, 0)) as total_delivered
+                                          FROM fg_deliveries
+                                          WHERE cnc_cutting_batch = ?");
+        $deliveredCheck->bind_param('s', $cncCuttingBatch);
+        $deliveredCheck->execute();
+        $deliveredResult = $deliveredCheck->get_result();
+        $deliveredData = $deliveredResult->fetch_assoc();
+        $totalDelivered = (float)($deliveredData['total_delivered'] ?? 0);
+        $deliveredCheck->close();
+        
+        $remainingQty = $totalPrintQty - $totalDelivered;
+        $passedQty = $totalPrintQty;
+        $actualWeight = 0;
+        $productType = 'bag';
+        $deliveredQty = $totalDelivered;
+        
+        // Set reference_number to empty for bags (not used)
+        $referenceNumber = '';
+        
+        // For bags, we don't need fg_entry_id, set to NULL
+        if (empty($fgEntryId)) {
+            $fgEntryId = null;
+        }
+        
+    } else {
+        // For rolls, use existing logic with reference_number
+        $checkStmt = $conn->prepare("SELECT 
+                                        fe.id,
+                                        fe.passed_qty, 
+                                        fe.actual_weight,
+                                        fe.product_type,
+                                        COALESCE(SUM(fd.delivery_quantity), 0) as delivered_quantity,
+                                        CASE 
+                                            WHEN fe.product_type = 'roll' THEN (fe.actual_weight - COALESCE(SUM(fd.delivery_quantity), 0))
+                                            ELSE (fe.passed_qty - COALESCE(SUM(fd.delivery_quantity), 0))
+                                        END as remaining_quantity
+                                      FROM fg_entry fe
+                                      LEFT JOIN fg_deliveries fd ON fe.id = fd.fg_entry_id
+                                      WHERE fe.reference_number = ?
+                                      GROUP BY fe.id, fe.passed_qty, fe.actual_weight, fe.product_type");
+        $checkStmt->bind_param('s', $referenceNumber);
+        $checkStmt->execute();
+        $result = $checkStmt->get_result();
+        
+        if ($result->num_rows === 0) {
+            header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode('No FG Entry found for this reference!\n\nSolution:\n1. Check FG Entry form - ensure this reference exists\n2. If no FG Entry exists, create one first'));
+            $checkStmt->close();
+            exit();
+        }
+        
+        $fgData = $result->fetch_assoc();
+        $checkStmt->close();
+        
+        // Use the ID from the query if not provided in form
+        if (empty($fgEntryId)) {
+            $fgEntryId = $fgData['id'];
+        }
+        
+        $passedQty = (float)$fgData['passed_qty'];
+        $actualWeight = (float)$fgData['actual_weight'];
+        $productType = $fgData['product_type'];
+        $deliveredQty = (float)$fgData['delivered_quantity'];
+        $remainingQty = (float)$fgData['remaining_quantity'];
     }
-    
-    $fgData = $result->fetch_assoc();
-    $checkStmt->close();
-    
-    // Use the ID from the query if not provided in form
-    if (empty($fgEntryId)) {
-        $fgEntryId = $fgData['id'];
-    }
-    
-    $passedQty = (float)$fgData['passed_qty'];
-    $actualWeight = (float)$fgData['actual_weight'];
-    $productType = $fgData['product_type'];
-    $deliveredQty = (float)$fgData['delivered_quantity'];
-    $remainingQty = (float)$fgData['remaining_quantity'];
     
     // Check if there's any stock available
     if ($remainingQty <= 0) {
         if ($productType === 'roll' && $actualWeight <= 0) {
-            header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode('⚠️ No stock available for delivery!\n\nReason:\n• The FG Entry for this reference has 0 Actual Weight, OR\n• All stock has already been delivered\n\nSolution:\n1. Check FG Entry form - ensure Actual Weight > 0\n2. Verify delivery history for this reference'));
+            header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode('No stock available for delivery!\n\nReason:\n• The FG Entry for this reference has 0 Actual Weight, OR\n• All stock has already been delivered\n\nSolution:\n1. Check FG Entry form - ensure Actual Weight > 0\n2. Verify delivery history for this reference'));
             exit();
         } else if ($passedQty <= 0) {
-            header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode('⚠️ No stock available for delivery!\n\nReason:\n• The FG Entry for this reference has 0 Passed Quantity, OR\n• All stock has already been delivered\n\nSolution:\n1. Check FG Entry form - ensure Passed Quantity > 0\n2. Verify delivery history for this reference'));
+            header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode('No stock available for delivery!\n\nReason:\n• The FG Entry for this reference has 0 Passed Quantity, OR\n• All stock has already been delivered\n\nSolution:\n1. Check FG Entry form - ensure Passed Quantity > 0\n2. Verify delivery history for this reference'));
             exit();
         } else {
-            header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode('⚠️ All stock has already been delivered for this reference!\n\nPassed Qty: ' . $passedQty . '\nDelivered: ' . $deliveredQty . '\nRemaining: 0'));
+            header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode('All stock has already been delivered for this reference!\n\nPassed Qty: ' . $passedQty . '\nDelivered: ' . $deliveredQty . '\nRemaining: 0'));
             exit();
         }
     }
@@ -147,7 +221,7 @@ try {
     // Prevent delivery quantity exceeding available stock
     if ($deliveryQty > $remainingQty) {
         $unit = ($deliveryProductType === 'roll') ? 'kg' : 'pcs';
-        header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode("⚠️ Delivery quantity ({$deliveryQty} {$unit}) exceeds available stock ({$remainingQty} {$unit})!\n\nPlease reduce the quantity."));
+        header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode("Delivery quantity ({$deliveryQty} {$unit}) exceeds available stock ({$remainingQty} {$unit})!\n\nPlease reduce the quantity."));
         exit();
     }
     
@@ -155,7 +229,7 @@ try {
     $conn->query("CREATE TABLE IF NOT EXISTS fg_deliveries (
         id INT AUTO_INCREMENT PRIMARY KEY,
         delivery_id VARCHAR(50) UNIQUE,
-        fg_entry_id INT NOT NULL,
+        fg_entry_id INT,
         reference_number VARCHAR(100),
         cnc_cutting_batch VARCHAR(100),
         delivery_date DATE NOT NULL,
@@ -173,9 +247,19 @@ try {
         remarks TEXT,
         delivered_by VARCHAR(100),
         delivered_at DATETIME,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (fg_entry_id) REFERENCES fg_entry(id)
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )");
+    
+    // Add foreign key constraint only if it doesn't exist and fg_entry_id column is NOT NULL
+    // For bags, fg_entry_id can be NULL, so we'll make it nullable
+    $colCheck = $conn->query("SHOW COLUMNS FROM fg_deliveries LIKE 'fg_entry_id'");
+    if ($colCheck && $colCheck->num_rows > 0) {
+        $colData = $colCheck->fetch_assoc();
+        if ($colData['Null'] === 'NO') {
+            // Make fg_entry_id nullable for bags
+            $conn->query("ALTER TABLE fg_deliveries MODIFY COLUMN fg_entry_id INT NULL");
+        }
+    }
     
     // Add columns if they don't exist (proper MySQL syntax)
     $deliveryColsCheck = $conn->query("SHOW COLUMNS FROM fg_deliveries");
@@ -233,10 +317,18 @@ try {
          unit_price, total_cost, remarks, delivered_by, delivered_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
     
+    // Handle nullable fg_entry_id for bags - use 0 for bags, actual ID for rolls
+    // MySQL will treat 0 as NULL if column allows NULL, or we can use actual NULL
+    $fgEntryIdValue = ($deliveryProductType === 'bag' && (empty($fgEntryId) || $fgEntryId == 0)) ? null : (int)$fgEntryId;
+    
+    // For NULL values in mysqli, we need to use a different approach
+    // Convert NULL to 0 for binding, then update after if needed
+    $fgEntryIdForBind = ($fgEntryIdValue === null) ? 0 : (int)$fgEntryIdValue;
+    
     $stmt->bind_param(
         'sisssssssssdssisddsss',  // Type string: 21 characters
         $deliveryId,              // 1. s - delivery_id
-        $fgEntryId,               // 2. i - fg_entry_id
+        $fgEntryIdForBind,        // 2. i - fg_entry_id (0 for bags)
         $referenceNumber,         // 3. s - reference_number
         $cncCuttingBatch,         // 4. s - cnc_cutting_batch
         $deliveryDate,            // 5. s - delivery_date
@@ -261,39 +353,58 @@ try {
     if (!$stmt->execute()) {
         throw new Exception('Failed to insert delivery record: ' . $stmt->error);
     }
+    
+    // Get insert ID before closing statement
+    $insertId = $conn->insert_id;
     $stmt->close();
     
-    // Update fg_entry: recalculate delivered_quantity from actual deliveries to ensure accuracy
-    // This ensures the cached value stays in sync even if deliveries are deleted
-    $updateStmt = $conn->prepare("UPDATE fg_entry fe
-                                   SET delivered_quantity = (
-                                       SELECT COALESCE(SUM(fd.delivery_quantity), 0)
-                                       FROM fg_deliveries fd
-                                       WHERE fd.fg_entry_id = fe.id
-                                   )
-                                   WHERE fe.id = ?");
-    $updateStmt->bind_param('i', $fgEntryId);
-    
-    if (!$updateStmt->execute()) {
-        throw new Exception('Failed to update delivered quantity: ' . $updateStmt->error);
+    // If fg_entry_id should be NULL for bags, update it after insert
+    if ($fgEntryIdValue === null && $insertId) {
+        $conn->query("UPDATE fg_deliveries SET fg_entry_id = NULL WHERE id = $insertId");
     }
-    $updateStmt->close();
     
-    // Check if fully delivered and update status
-    $newRemaining = $remainingQty - $deliveryQty;
-    if ($newRemaining <= 0) {
-        $conn->query("UPDATE fg_entry SET status = 'Fully Delivered' WHERE id = $fgEntryId");
+    // Update fg_entry: recalculate delivered_quantity from actual deliveries to ensure accuracy
+    // Only for rolls (bags don't use fg_entry_id)
+    if ($deliveryProductType === 'roll' && !empty($fgEntryId) && $fgEntryId > 0) {
+        $updateStmt = $conn->prepare("UPDATE fg_entry fe
+                                       SET delivered_quantity = (
+                                           SELECT COALESCE(SUM(fd.delivery_quantity), 0)
+                                           FROM fg_deliveries fd
+                                           WHERE fd.fg_entry_id = fe.id
+                                       )
+                                       WHERE fe.id = ?");
+        $updateStmt->bind_param('i', $fgEntryId);
+        
+        if (!$updateStmt->execute()) {
+            throw new Exception('Failed to update delivered quantity: ' . $updateStmt->error);
+        }
+        $updateStmt->close();
+        
+        // Check if fully delivered and update status
+        $newRemaining = $remainingQty - $deliveryQty;
+        if ($newRemaining <= 0) {
+            $conn->query("UPDATE fg_entry SET status = 'Fully Delivered' WHERE id = $fgEntryId");
+        }
+    } else {
+        // For bags, calculate new remaining
+        $newRemaining = $remainingQty - $deliveryQty;
     }
     
     $conn->close();
     
     // Success message with detailed information
     $unitLabel = ($deliveryProductType === 'roll') ? 'kg' : 'pcs';
-    $successMsg = "✅ Delivery successful!\n\n";
+    $productLabel = ($deliveryProductType === 'roll') ? 'Rolls' : 'Bags';
+    
+    $successMsg = " {$deliveryQty} {$productLabel} delivered successfully!\n\n";
     $successMsg .= "Delivery ID: {$deliveryId}\n";
-    $successMsg .= "Reference: {$referenceNumber}\n";
-    $successMsg .= "Delivered Qty: {$deliveryQty} {$unitLabel}\n";
-    $successMsg .= "Remaining: {$newRemaining} {$unitLabel}\n";
+    if ($deliveryProductType === 'roll') {
+        $successMsg .= "Reference: {$referenceNumber}\n";
+    } else {
+        $successMsg .= "CNC Batch: {$cncCuttingBatch}\n";
+    }
+    $successMsg .= "Quantity: {$deliveryQty} {$unitLabel}\n";
+    $successMsg .= "Remaining Stock: {$newRemaining} {$unitLabel}\n";
     $successMsg .= "Client: {$clientName}";
     
     header("Location: ../forms/fg_delivery_entry.php?success=" . urlencode($successMsg));

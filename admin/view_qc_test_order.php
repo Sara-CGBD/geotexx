@@ -70,6 +70,48 @@ if (!$report) {
 // Decode test data
 $test_data = json_decode($report['test_data'], true) ?? [];
 
+// Find all related reports in the same bulk group (same bulk reference range, same test name, same method)
+$related_report_numbers = [];
+if (isset($test_data['is_bulk_reference']) && $test_data['is_bulk_reference'] && 
+    isset($test_data['bulk_from_reference']) && isset($test_data['bulk_to_reference'])) {
+    // This is a bulk reference submission - find all related reports
+    $bulk_from = $test_data['bulk_from_reference'];
+    $bulk_to = $test_data['bulk_to_reference'];
+    $test_name = $report['test_name'] ?? '';
+    $chosen_method = $report['chosen_method'] ?? '';
+    $current_status = $report['status'];
+    $current_report_number = $report['report_number'];
+    
+    // Query to find all reports - fetch all and filter in PHP for better compatibility
+    $related_query = $conn->prepare("
+        SELECT qto.report_number, qto.test_data, qto.chosen_method, qto.status, ts.test_name
+        FROM qc_test_orders qto
+        LEFT JOIN test_standards ts ON qto.test_standard_id = ts.id
+        WHERE ts.test_name = ?
+        AND qto.chosen_method = ?
+        AND qto.status = ?
+        AND qto.report_number != ?
+    ");
+    
+    if ($related_query) {
+        $related_query->bind_param("ssss", $test_name, $chosen_method, $current_status, $current_report_number);
+        $related_query->execute();
+        $related_result = $related_query->get_result();
+        
+        while ($row = $related_result->fetch_assoc()) {
+            $row_test_data = json_decode($row['test_data'], true) ?? [];
+            // Check if this report has the same bulk reference range
+            if (isset($row_test_data['is_bulk_reference']) && $row_test_data['is_bulk_reference'] &&
+                isset($row_test_data['bulk_from_reference']) && isset($row_test_data['bulk_to_reference']) &&
+                $row_test_data['bulk_from_reference'] === $bulk_from &&
+                $row_test_data['bulk_to_reference'] === $bulk_to) {
+                $related_report_numbers[] = $row['report_number'];
+            }
+        }
+        $related_query->close();
+    }
+}
+
 $conn->close();
 ?>
 <!DOCTYPE html>
@@ -220,6 +262,72 @@ $conn->close();
             <div class="info-label">Inspector/Tester</div>
             <div class="info-value"><?php echo htmlspecialchars($report['inspector_name'] ?? 'N/A'); ?></div>
         </div>
+        <?php 
+        // Check for bulk reference data - be more flexible with the check
+        $has_bulk_data = false;
+        $bulk_from = '';
+        $bulk_to = '';
+        $bulk_count = 0;
+        
+        // Check multiple ways the data might be stored
+        if (isset($test_data['is_bulk_reference']) && ($test_data['is_bulk_reference'] === true || $test_data['is_bulk_reference'] === '1' || $test_data['is_bulk_reference'] === 1)) {
+            $has_bulk_data = true;
+            $bulk_from = isset($test_data['bulk_from_reference']) ? trim($test_data['bulk_from_reference']) : '';
+            $bulk_to = isset($test_data['bulk_to_reference']) ? trim($test_data['bulk_to_reference']) : '';
+            $bulk_count = isset($test_data['bulk_reference_count']) ? intval($test_data['bulk_reference_count']) : 0;
+        } elseif (isset($test_data['bulk_from_reference']) && isset($test_data['bulk_to_reference'])) {
+            // Also check if bulk reference fields exist even without is_bulk_reference flag
+            $bulk_from = trim($test_data['bulk_from_reference']);
+            $bulk_to = trim($test_data['bulk_to_reference']);
+            if (!empty($bulk_from) && !empty($bulk_to)) {
+                $has_bulk_data = true;
+                $bulk_count = isset($test_data['bulk_reference_count']) ? intval($test_data['bulk_reference_count']) : 0;
+            }
+        }
+        
+        // Display bulk reference range if we have valid data
+        if ($has_bulk_data && !empty($bulk_from) && !empty($bulk_to)): ?>
+        <div class="info-item" style="grid-column: 1 / -1; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 18px; border-radius: 8px; border-left: 4px solid #fff; box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);">
+            <div class="info-label" style="color: white; font-weight: 600; margin-bottom: 10px; font-size: 12px;">
+                <i class="fas fa-tags"></i> BULK REFERENCE RANGE
+            </div>
+            <div class="info-value" style="color: white; font-size: 16px; font-weight: 500; line-height: 1.6;">
+                <span style="background: rgba(255,255,255,0.2); padding: 6px 12px; border-radius: 4px; display: inline-block; margin-right: 8px;">
+                    <?php echo htmlspecialchars($bulk_from); ?>
+                </span>
+                <i class="fas fa-arrow-right" style="margin: 0 12px; opacity: 0.9;"></i> 
+                <span style="background: rgba(255,255,255,0.2); padding: 6px 12px; border-radius: 4px; display: inline-block;">
+                    <?php echo htmlspecialchars($bulk_to); ?>
+                </span>
+                <?php if ($bulk_count > 0): ?>
+                    <span style="display: block; margin-top: 12px; font-size: 13px; opacity: 0.9; font-weight: 400;">
+                        <i class="fas fa-list-ol"></i> <?php echo $bulk_count; ?> reference(s) in this range
+                    </span>
+                <?php endif; ?>
+            </div>
+        </div>
+        <?php endif; ?>
+        
+        <?php 
+        // Temporary debug output - remove after confirming data structure
+        if (isset($_GET['debug']) && $_GET['debug'] == '1'): ?>
+        <div class="info-item" style="grid-column: 1 / -1; background: #fff3cd; padding: 15px; border-radius: 8px; border-left: 4px solid #ffc107;">
+            <div class="info-label" style="color: #856404; font-weight: 600; margin-bottom: 10px;">
+                DEBUG: Test Data Structure
+            </div>
+            <div class="info-value" style="color: #856404; font-size: 12px; font-family: monospace; white-space: pre-wrap; overflow-x: auto;">
+                <?php echo htmlspecialchars(json_encode($test_data, JSON_PRETTY_PRINT)); ?>
+            </div>
+            <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #ffc107;">
+                <strong>Bulk Reference Check:</strong><br>
+                is_bulk_reference: <?php echo isset($test_data['is_bulk_reference']) ? ($test_data['is_bulk_reference'] ? 'true' : 'false') : 'NOT SET'; ?><br>
+                bulk_from_reference: <?php echo isset($test_data['bulk_from_reference']) ? htmlspecialchars($test_data['bulk_from_reference']) : 'NOT SET'; ?><br>
+                bulk_to_reference: <?php echo isset($test_data['bulk_to_reference']) ? htmlspecialchars($test_data['bulk_to_reference']) : 'NOT SET'; ?><br>
+                bulk_reference_count: <?php echo isset($test_data['bulk_reference_count']) ? $test_data['bulk_reference_count'] : 'NOT SET'; ?>
+            </div>
+        </div>
+        <?php endif; ?>
+        
         <div class="info-item">
             <div class="info-label">Submitted At</div>
             <div class="info-value"><?php echo date('M d, Y - g:i A', strtotime($report['created_at'])); ?></div>
@@ -1287,29 +1395,44 @@ $conn->close();
     <!-- Action Buttons for Checker/Admin -->
     <?php if ($report['status'] === 'pending_checker' && $is_checker): ?>
     <div style="margin-top:30px; padding:20px; background:#f8f9fa; border-radius:6px; text-align:center;">
+        <?php if (!empty($related_report_numbers)): ?>
+        <p style="margin-bottom:15px; color:#666; font-weight:600;">
+            <i class="fas fa-info-circle" style="color:#17a2b8;"></i> 
+            This report is part of a bulk submission. Approving/Rejecting will affect <?php echo count($related_report_numbers) + 1; ?> report(s) total.
+        </p>
+        <?php else: ?>
         <p style="margin-bottom:15px; color:#666;">Review the test data above and approve or reject this report:</p>
-        <form method="POST" action="../admin/lab_testing_dashboard.php" style="display:inline; margin-right:10px;">
+        <?php endif; ?>
+        <form method="POST" action="../admin/lab_testing_dashboard.php" style="display:inline; margin-right:10px;" id="checkerApproveForm">
             <input type="hidden" name="report_type" value="qc_test_order">
             <input type="hidden" name="report_number" value="<?php echo htmlspecialchars($report['report_number']); ?>">
+            <input type="hidden" name="related_report_numbers" value="<?php echo htmlspecialchars(implode(',', $related_report_numbers)); ?>">
             <input type="hidden" name="action" value="approve">
             <button type="submit" style="padding:12px 24px; background:#28a745; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:15px; font-weight:500;">
-                <i class="fas fa-check"></i> Approve This Report
+                <i class="fas fa-check"></i> <?php echo !empty($related_report_numbers) ? 'Approve All (' . (count($related_report_numbers) + 1) . ')' : 'Approve This Report'; ?>
             </button>
         </form>
-        <button type="button" onclick="showCheckerRejectModal('<?php echo htmlspecialchars($report['report_number']); ?>')" style="padding:12px 24px; background:#dc3545; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:15px; font-weight:500;">
-            <i class="fas fa-times"></i> Reject This Report
+        <button type="button" onclick="showCheckerRejectModal('<?php echo htmlspecialchars($report['report_number']); ?>', <?php echo json_encode($related_report_numbers); ?>)" style="padding:12px 24px; background:#dc3545; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:15px; font-weight:500;">
+            <i class="fas fa-times"></i> <?php echo !empty($related_report_numbers) ? 'Reject All (' . (count($related_report_numbers) + 1) . ')' : 'Reject This Report'; ?>
         </button>
     </div>
     <?php endif; ?>
     
     <?php if ($report['status'] === 'pending_approval' && $is_admin): ?>
     <div style="margin-top:30px; padding:20px; background:#f8f9fa; border-radius:6px; text-align:center;">
+        <?php if (!empty($related_report_numbers)): ?>
+        <p style="margin-bottom:15px; color:#666; font-weight:600;">
+            <i class="fas fa-info-circle" style="color:#17a2b8;"></i> 
+            This report is part of a bulk submission. Approving/Rejecting will affect <?php echo count($related_report_numbers) + 1; ?> report(s) total.
+        </p>
+        <?php else: ?>
         <p style="margin-bottom:15px; color:#666;">Review the test data above and approve or reject this report:</p>
-        <button type="button" id="approveBtn" onclick="approveReport('qc_test_order', '<?php echo htmlspecialchars($report['report_number']); ?>')" style="padding:12px 24px; background:#28a745; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:15px; font-weight:500; margin-right:10px;">
-            <i class="fas fa-check"></i> Approve This Report
+        <?php endif; ?>
+        <button type="button" id="approveBtn" style="padding:12px 24px; background:#28a745; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:15px; font-weight:500; margin-right:10px;">
+            <i class="fas fa-check"></i> <?php echo !empty($related_report_numbers) ? 'Approve All (' . (count($related_report_numbers) + 1) . ')' : 'Approve This Report'; ?>
         </button>
-        <button type="button" onclick="showAdminRejectModal('<?php echo htmlspecialchars($report['report_number']); ?>')" style="padding:12px 24px; background:#dc3545; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:15px; font-weight:500;">
-            <i class="fas fa-times"></i> Reject This Report
+        <button type="button" id="rejectBtn" style="padding:12px 24px; background:#dc3545; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:15px; font-weight:500;">
+            <i class="fas fa-times"></i> <?php echo !empty($related_report_numbers) ? 'Reject All (' . (count($related_report_numbers) + 1) . ')' : 'Reject This Report'; ?>
         </button>
     </div>
     <?php endif; ?>
@@ -1317,7 +1440,7 @@ $conn->close();
 </div>
 
 <!-- Admin Rejection Modal with Checkboxes -->
-<div id="adminRejectModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.6); z-index:9999; justify-content:center; align-items:center;">
+<div id="adminRejectModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.6); z-index:9999;">
   <div style="max-width:600px; margin:50px auto; background:#fff; border-radius:8px; padding:25px; box-shadow:0 4px 20px rgba(0,0,0,0.3);">
     <h3 style="margin-top:0; color:#dc3545; border-bottom:2px solid #dc3545; padding-bottom:10px;">
       ❌ Reject QC Test Report
@@ -1326,6 +1449,7 @@ $conn->close();
     <form id="adminRejectForm" onsubmit="return rejectReport('qc_test_order', document.getElementById('adminRejectReportNumber').value, event)">
       <input type="hidden" name="report_type" value="qc_test_order">
       <input type="hidden" id="adminRejectReportNumber" name="report_number" value="<?php echo htmlspecialchars($report['report_number']); ?>">
+      <input type="hidden" id="adminRejectRelatedReports" name="related_report_numbers" value="">
       <input type="hidden" name="action" value="reject">
       
       <label style="font-weight:600; display:block; margin-bottom:10px;">Reason for Rejection (Select at least one):</label>
@@ -1386,22 +1510,80 @@ $conn->close();
 </div>
 
 <script>
-function showAdminRejectModal(reportNumber) {
-    document.getElementById('adminRejectReportNumber').value = reportNumber;
-    document.getElementById('adminRejectModal').style.display = 'flex';
+function showAdminRejectModal(reportNumber, relatedReports = []) {
+    console.log('showAdminRejectModal called with:', reportNumber, relatedReports);
+    
+    // Ensure relatedReports is an array
+    if (!Array.isArray(relatedReports)) {
+        relatedReports = [];
+    }
+    
+    const reportNumberInput = document.getElementById('adminRejectReportNumber');
+    const relatedReportsInput = document.getElementById('adminRejectRelatedReports');
+    const modal = document.getElementById('adminRejectModal');
+    
+    if (!reportNumberInput || !relatedReportsInput || !modal) {
+        console.error('Required elements not found:', {
+            reportNumberInput: !!reportNumberInput,
+            relatedReportsInput: !!relatedReportsInput,
+            modal: !!modal
+        });
+        alert('❌ Error: Required form elements not found. Please refresh the page.');
+        return;
+    }
+    
+    reportNumberInput.value = reportNumber;
+    if (relatedReports && relatedReports.length > 0) {
+        relatedReportsInput.value = relatedReports.join(',');
+        // Update modal title to show bulk action
+        const modalTitle = document.querySelector('#adminRejectModal h3');
+        if (modalTitle) {
+            modalTitle.innerHTML = '❌ Reject QC Test Reports (' + (relatedReports.length + 1) + ' reports)';
+        }
+    } else {
+        relatedReportsInput.value = '';
+        // Reset modal title
+        const modalTitle = document.querySelector('#adminRejectModal h3');
+        if (modalTitle) {
+            modalTitle.innerHTML = '❌ Reject QC Test Report';
+        }
+    }
+    // Show modal with flexbox layout
+    modal.style.display = 'flex';
+    modal.style.justifyContent = 'center';
+    modal.style.alignItems = 'center';
     
     // Enable/disable submit button based on checkbox selection
     const checkboxes = document.querySelectorAll('input[name="qc_rejection_reasons[]"]');
     const submitBtn = document.getElementById('adminRejectSubmitBtn');
     
+    if (submitBtn && checkboxes.length > 0) {
+        // Remove existing event listeners by using a flag
     checkboxes.forEach(cb => {
+            // Remove old listener if exists
+            const newCb = cb.cloneNode(true);
+            cb.parentNode.replaceChild(newCb, cb);
+        });
+        
+        // Re-query after cloning
+        const newCheckboxes = document.querySelectorAll('input[name="qc_rejection_reasons[]"]');
+        newCheckboxes.forEach(cb => {
         cb.addEventListener('change', function() {
-            const anyChecked = Array.from(checkboxes).some(c => c.checked);
+                const anyChecked = Array.from(newCheckboxes).some(c => c.checked);
+                if (submitBtn) {
             submitBtn.disabled = !anyChecked;
             submitBtn.style.cursor = anyChecked ? 'pointer' : 'not-allowed';
             submitBtn.style.opacity = anyChecked ? '1' : '0.6';
+                }
         });
     });
+        
+        // Set initial state
+        const anyChecked = Array.from(newCheckboxes).some(c => c.checked);
+        submitBtn.disabled = !anyChecked;
+        submitBtn.style.cursor = anyChecked ? 'pointer' : 'not-allowed';
+        submitBtn.style.opacity = anyChecked ? '1' : '0.6';
+    }
 }
 
 function closeAdminRejectModal() {
@@ -1410,8 +1592,20 @@ function closeAdminRejectModal() {
 }
 
 // AJAX function to approve report
-function approveReport(reportType, reportNumber) {
-    if (!confirm('Are you sure you want to approve this report?')) {
+function approveReport(reportType, reportNumber, relatedReports = []) {
+    console.log('approveReport called with:', reportType, reportNumber, relatedReports);
+    
+    // Ensure relatedReports is an array
+    if (!Array.isArray(relatedReports)) {
+        relatedReports = [];
+    }
+    
+    const totalReports = relatedReports.length + 1;
+    const confirmMsg = totalReports > 1 
+        ? `Are you sure you want to approve all ${totalReports} report(s) in this bulk group?`
+        : 'Are you sure you want to approve this report?';
+    
+    if (!confirm(confirmMsg)) {
         return;
     }
     
@@ -1431,13 +1625,26 @@ function approveReport(reportType, reportNumber) {
     const formData = new FormData();
     formData.append('action', 'approve');
     formData.append('report_type', reportType);
+    
+    // Send primary report number and related reports separately
+    // The API will combine them to process all reports
     formData.append('report_number', reportNumber);
+    if (relatedReports && relatedReports.length > 0) {
+        formData.append('related_report_numbers', relatedReports.join(','));
+    }
+    
+    console.log('Sending approval request:', {
+        reportType: reportType,
+        reportNumber: reportNumber,
+        relatedReports: relatedReports
+    });
     
     fetch('../admin/api/approve_reject_report.php', {
         method: 'POST',
         body: formData
     })
     .then(response => {
+        console.log('Response status:', response.status);
         if (!response.ok) {
             throw new Error('Network response was not ok: ' + response.status);
         }
@@ -1445,6 +1652,11 @@ function approveReport(reportType, reportNumber) {
     })
     .then(data => {
         if (data.success) {
+            const totalReports = relatedReports ? relatedReports.length + 1 : 1;
+            const successMsg = totalReports > 1 
+                ? `✅ Successfully approved ${totalReports} report(s)!`
+                : data.message;
+            
             // Notify parent window to remove this report
             if (typeof notifyParentDashboard === 'function') {
                 notifyParentDashboard(reportType, reportNumber, 'approve');
@@ -1456,7 +1668,7 @@ function approveReport(reportType, reportNumber) {
             
             if (returnPage === 'qc_test_approval_dashboard') {
                 // Redirect back to QC Test Approval Dashboard
-                window.location.href = '../admin/qc_test_approval_dashboard.php';
+                window.location.href = '../admin/qc_test_approval_dashboard.php?success=' + encodeURIComponent(successMsg);
             } else {
                 // Reload the page immediately to show updated status
                 window.location.reload();
@@ -1495,6 +1707,15 @@ function rejectReport(reportType, reportNumber, event) {
     
     const formData = new FormData(form);
     formData.append('action', 'reject');
+    
+    // Include related reports count in confirmation message
+    const relatedReportsInput = form.querySelector('input[name="related_report_numbers"]');
+    const relatedReports = relatedReportsInput ? relatedReportsInput.value.split(',').filter(r => r.trim()) : [];
+    const totalReports = relatedReports.length + 1;
+    
+    if (totalReports > 1 && !confirm(`Are you sure you want to reject all ${totalReports} report(s) in this bulk group?`)) {
+        return false;
+    }
     formData.append('report_type', reportType);
     formData.append('report_number', reportNumber);
     
@@ -1510,7 +1731,10 @@ function rejectReport(reportType, reportNumber, event) {
     .then(response => response.json())
     .then(data => {
         if (data.success) {
-            alert('✅ ' + data.message);
+            const successMsg = totalReports > 1 
+                ? `✅ Successfully rejected ${totalReports} report(s)!`
+                : data.message;
+            alert('✅ ' + successMsg);
             closeAdminRejectModal();
             // Notify parent window to remove this report
             notifyParentDashboard(reportType, reportNumber, 'reject');
@@ -1566,15 +1790,34 @@ function notifyParentDashboard(reportType, reportNumber, action) {
     }
 }
 
-// Close modal on outside click
-document.getElementById('adminRejectModal').addEventListener('click', function(e) {
+// Close modal on outside click - wait for DOM to be ready
+document.addEventListener('DOMContentLoaded', function() {
+    const adminModal = document.getElementById('adminRejectModal');
+    if (adminModal) {
+        adminModal.addEventListener('click', function(e) {
     if (e.target === this) {
         closeAdminRejectModal();
     }
 });
+    }
+    
+    const checkerModal = document.getElementById('checkerRejectModal');
+    if (checkerModal) {
+        checkerModal.addEventListener('click', function(e) {
+            if (e.target === this) {
+                closeCheckerRejectModal();
+            }
+        });
+    }
+});
 
-function showCheckerRejectModal(reportNumber) {
+function showCheckerRejectModal(reportNumber, relatedReports = []) {
     document.getElementById('checkerRejectReportNumber').value = reportNumber;
+    if (relatedReports && relatedReports.length > 0) {
+        document.getElementById('checkerRejectRelatedReports').value = relatedReports.join(',');
+    } else {
+        document.getElementById('checkerRejectRelatedReports').value = '';
+    }
     document.getElementById('checkerRejectModal').style.display = 'flex';
     
     // Enable/disable submit button based on checkbox selection
@@ -1592,15 +1835,25 @@ function showCheckerRejectModal(reportNumber) {
 }
 
 function closeCheckerRejectModal() {
-    document.getElementById('checkerRejectModal').style.display = 'none';
+    const modal = document.getElementById('checkerRejectModal');
+    if (modal) {
+        modal.style.display = 'none';
 }
-
-// Close checker modal on outside click
-document.getElementById('checkerRejectModal').addEventListener('click', function(e) {
-    if (e.target === this) {
-        closeCheckerRejectModal();
+    const form = document.getElementById('checkerRejectForm');
+    if (form) {
+        form.reset();
+        // Reset checkboxes
+        const checkboxes = form.querySelectorAll('input[name="qc_rejection_reasons[]"]');
+        checkboxes.forEach(cb => cb.checked = false);
+        // Reset submit button
+        const submitBtn = document.getElementById('checkerRejectSubmitBtn');
+        if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.style.cursor = 'not-allowed';
+            submitBtn.style.opacity = '0.6';
     }
-});
+    }
+}
 
 // Maintain responsive columns for info-grid sections (desktop: 2 cols, tablet/mobile: 1 col)
 (function() {
@@ -1619,6 +1872,52 @@ document.getElementById('checkerRejectModal').addEventListener('click', function
     // Also run after a short delay to override any late-loading styles
     setTimeout(enforceResponsiveColumns, 100);
 })();
+
+// Store report data for button handlers
+var reportData = {
+    reportNumber: '<?php echo htmlspecialchars($report['report_number']); ?>',
+    relatedReports: <?php echo !empty($related_report_numbers) ? json_encode($related_report_numbers) : '[]'; ?>
+};
+
+// Setup button event listeners when DOM is ready
+document.addEventListener('DOMContentLoaded', function() {
+    const approveBtn = document.getElementById('approveBtn');
+    const rejectBtn = document.getElementById('rejectBtn');
+    
+    if (approveBtn) {
+        approveBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            console.log('Approve button clicked via event listener', reportData);
+            if (typeof approveReport === 'function') {
+                approveReport('qc_test_order', reportData.reportNumber, reportData.relatedReports);
+            } else {
+                console.error('approveReport function not found');
+                alert('Error: approveReport function not found. Please refresh the page.');
+            }
+            return false;
+        });
+    } else {
+        console.error('Approve button not found');
+    }
+    
+    if (rejectBtn) {
+        rejectBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            console.log('Reject button clicked via event listener', reportData);
+            if (typeof showAdminRejectModal === 'function') {
+                showAdminRejectModal(reportData.reportNumber, reportData.relatedReports);
+            } else {
+                console.error('showAdminRejectModal function not found');
+                alert('Error: showAdminRejectModal function not found. Please refresh the page.');
+            }
+            return false;
+        });
+    } else {
+        console.error('Reject button not found');
+    }
+});
 </script>
 
 <!-- Checker Rejection Modal with Checkboxes -->
@@ -1631,6 +1930,7 @@ document.getElementById('checkerRejectModal').addEventListener('click', function
     <form id="checkerRejectForm" method="POST" action="../admin/lab_testing_dashboard.php">
       <input type="hidden" name="report_type" value="qc_test_order">
       <input type="hidden" id="checkerRejectReportNumber" name="report_number" value="">
+      <input type="hidden" id="checkerRejectRelatedReports" name="related_report_numbers" value="">
       <input type="hidden" name="action" value="reject">
       
       <label style="font-weight:600; display:block; margin-bottom:10px;">Reason for Rejection (Select at least one):</label>

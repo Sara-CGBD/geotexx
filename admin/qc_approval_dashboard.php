@@ -89,16 +89,57 @@ ensureColumnExists($conn, 'length_calibrations', 'status', " `status` VARCHAR(50
 ensureColumnExists($conn, 'qc_entries', 'status', " `status` VARCHAR(50) NOT NULL DEFAULT 'pending' AFTER inspector_name");
 ensureColumnExists($conn, 'qc_entries', 'inspector_name', " `inspector_name` VARCHAR(255) NULL AFTER qc_result");
 
+// Ensure columns exist for auto-approval tracking
+ensureColumnExists($conn, 'daily_gsm_checks', 'approved_by', " `approved_by` VARCHAR(100) NULL AFTER status");
+ensureColumnExists($conn, 'daily_gsm_checks', 'approved_at', " `approved_at` DATETIME NULL AFTER approved_by");
+ensureColumnExists($conn, 'daily_gsm_checks', 'auto_approved', " `auto_approved` TINYINT(1) DEFAULT 0 AFTER approved_at");
+ensureColumnExists($conn, 'length_calibrations', 'approved_by', " `approved_by` VARCHAR(100) NULL AFTER status");
+ensureColumnExists($conn, 'length_calibrations', 'approved_at', " `approved_at` DATETIME NULL AFTER approved_by");
+ensureColumnExists($conn, 'length_calibrations', 'auto_approved', " `auto_approved` TINYINT(1) DEFAULT 0 AFTER approved_at");
+
+// Create AGM auto-approval settings table
+ensureTableExists($conn, 'agm_auto_approval_settings', "
+    CREATE TABLE IF NOT EXISTS agm_auto_approval_settings (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NOT NULL,
+        test_type ENUM('gsm', 'length_calibration') NOT NULL,
+        auto_approve_enabled TINYINT(1) DEFAULT 0,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY unique_user_test (user_id, test_type),
+        INDEX idx_user_id (user_id),
+        INDEX idx_test_type (test_type)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+");
+
+// Fetch current auto-approval settings for the current user
+$userId = $_SESSION['user_id'];
+$autoApproveGSM = false;
+$autoApproveLC = false;
+
+$settingsQuery = $conn->prepare("SELECT test_type, auto_approve_enabled FROM agm_auto_approval_settings WHERE user_id = ?");
+$settingsQuery->bind_param("i", $userId);
+$settingsQuery->execute();
+$settingsResult = $settingsQuery->get_result();
+while ($row = $settingsResult->fetch_assoc()) {
+    if ($row['test_type'] === 'gsm') {
+        $autoApproveGSM = (bool)$row['auto_approve_enabled'];
+    } elseif ($row['test_type'] === 'length_calibration') {
+        $autoApproveLC = (bool)$row['auto_approve_enabled'];
+    }
+}
+$settingsQuery->close();
+
 // Fetch pending GSM checks
-$gsmQuery = $conn->query("
-    SELECT id, entry_id, " . ($gsmHasRef ? "reference_number" : "NULL AS reference_number") . ", roll_no, date_time, shift, line_number, inspector, created_at, status
+$gsmPendingQuery = $conn->query("
+    SELECT id, entry_id, " . ($gsmHasRef ? "reference_number" : "NULL AS reference_number") . ", roll_no, date_time, shift, line_number, inspector, created_at, status, 
+           COALESCE(approved_by, '') as approved_by, COALESCE(approved_at, '') as approved_at, COALESCE(auto_approved, 0) as auto_approved
     FROM daily_gsm_checks
     WHERE status = 'pending'
     ORDER BY created_at DESC, entry_id, roll_no
 ");
 $gsmChecks = [];
-if ($gsmQuery) {
-    while ($row = $gsmQuery->fetch_assoc()) {
+if ($gsmPendingQuery) {
+    while ($row = $gsmPendingQuery->fetch_assoc()) {
         $refNum = $row['reference_number'] ?? 'No Reference';
         if (!isset($gsmChecks[$refNum])) {
             $gsmChecks[$refNum] = [];
@@ -107,21 +148,62 @@ if ($gsmQuery) {
     }
 }
 
+// Fetch auto-approved GSM checks
+$gsmAutoApprovedQuery = $conn->query("
+    SELECT id, entry_id, " . ($gsmHasRef ? "reference_number" : "NULL AS reference_number") . ", roll_no, date_time, shift, line_number, inspector, created_at, status, 
+           COALESCE(approved_by, '') as approved_by, COALESCE(approved_at, '') as approved_at, COALESCE(auto_approved, 0) as auto_approved
+    FROM daily_gsm_checks
+    WHERE status = 'approved' AND auto_approved = 1
+    ORDER BY approved_at DESC, entry_id, roll_no
+    LIMIT 50
+");
+$gsmAutoApproved = [];
+if ($gsmAutoApprovedQuery) {
+    while ($row = $gsmAutoApprovedQuery->fetch_assoc()) {
+        $refNum = $row['reference_number'] ?? 'No Reference';
+        if (!isset($gsmAutoApproved[$refNum])) {
+            $gsmAutoApproved[$refNum] = [];
+        }
+        $gsmAutoApproved[$refNum][] = $row;
+    }
+}
+
 // Fetch pending length calibrations
-$lcQuery = $conn->query("
-    SELECT id, entry_id, " . ($lcHasRef ? "reference_number" : "NULL AS reference_number") . ", roll_no, date_time, shift, line_number, inspector, created_at, status
+$lcPendingQuery = $conn->query("
+    SELECT id, entry_id, " . ($lcHasRef ? "reference_number" : "NULL AS reference_number") . ", roll_no, date_time, shift, line_number, inspector, created_at, status,
+           COALESCE(approved_by, '') as approved_by, COALESCE(approved_at, '') as approved_at, COALESCE(auto_approved, 0) as auto_approved
     FROM length_calibrations
     WHERE status = 'pending'
     ORDER BY created_at DESC, entry_id, roll_no
 ");
 $lcCalibrations = [];
-if ($lcQuery) {
-    while ($row = $lcQuery->fetch_assoc()) {
+if ($lcPendingQuery) {
+    while ($row = $lcPendingQuery->fetch_assoc()) {
         $refNum = $row['reference_number'] ?? 'No Reference';
         if (!isset($lcCalibrations[$refNum])) {
             $lcCalibrations[$refNum] = [];
         }
         $lcCalibrations[$refNum][] = $row;
+    }
+}
+
+// Fetch auto-approved length calibrations
+$lcAutoApprovedQuery = $conn->query("
+    SELECT id, entry_id, " . ($lcHasRef ? "reference_number" : "NULL AS reference_number") . ", roll_no, date_time, shift, line_number, inspector, created_at, status,
+           COALESCE(approved_by, '') as approved_by, COALESCE(approved_at, '') as approved_at, COALESCE(auto_approved, 0) as auto_approved
+    FROM length_calibrations
+    WHERE status = 'approved' AND auto_approved = 1
+    ORDER BY approved_at DESC, entry_id, roll_no
+    LIMIT 50
+");
+$lcAutoApproved = [];
+if ($lcAutoApprovedQuery) {
+    while ($row = $lcAutoApprovedQuery->fetch_assoc()) {
+        $refNum = $row['reference_number'] ?? 'No Reference';
+        if (!isset($lcAutoApproved[$refNum])) {
+            $lcAutoApproved[$refNum] = [];
+        }
+        $lcAutoApproved[$refNum][] = $row;
     }
 }
 
@@ -382,6 +464,73 @@ $conn->close();
         .btn-modal-cancel:hover {
             background: #5a6268;
         }
+        
+        /* Toggle Switch Styles */
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+        }
+        
+        .toggle-switch input[type="checkbox"] {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        
+        .toggle-label {
+            position: relative;
+            display: inline-block;
+            width: 60px;
+            height: 30px;
+            cursor: pointer;
+        }
+        
+        .toggle-slider {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            border-radius: 30px;
+            transition: 0.3s;
+            box-shadow: inset 0 2px 4px rgba(0,0,0,0.2);
+        }
+        
+        .toggle-slider:before {
+            position: absolute;
+            content: "";
+            height: 22px;
+            width: 22px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            border-radius: 50%;
+            transition: 0.3s;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+        
+        .toggle-switch input:checked + .toggle-label .toggle-slider {
+            background: linear-gradient(135deg, #27ae60 0%, #229954 100%);
+        }
+        
+        .toggle-switch input:checked + .toggle-label .toggle-slider:before {
+            transform: translateX(30px);
+        }
+        
+        .toggle-switch input:focus + .toggle-label .toggle-slider {
+            box-shadow: 0 0 0 3px rgba(39, 174, 96, 0.3);
+        }
+        
+        .badge-auto-approved {
+            display: inline-block;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            background: #d4edda;
+            color: #155724;
+        }
     </style>
 </head>
 <body>
@@ -572,6 +721,38 @@ $conn->close();
     <div class="header">
         <h1><i class="fas fa-clipboard-check"></i> QC Approval Dashboard</h1>
         <p>Approve or reject QC Entries, Daily GSM Checks and Length Calibrations</p>
+        
+        <!-- Auto-Approval Toggle Section -->
+        <div style="margin-top: 25px; padding: 24px; background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 50%, #bae6fd 100%); border: 2px solid #0ea5e9; border-radius: 12px; box-shadow: 0 4px 12px rgba(14, 165, 233, 0.15);">
+            <h3 style="margin: 0 0 18px 0; font-size: 17px; font-weight: 700; color: #0369a1;">
+                <i class="fas fa-cog" style="margin-right: 8px;"></i> Auto-Approval Settings
+            </h3>
+            <div style="display: flex; align-items: center; justify-content: space-between;">
+                <div style="flex: 1;">
+                    <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 12px;">
+                        <i class="fas fa-weight" style="font-size: 18px; color: #0284c7;"></i>
+                        <i class="fas fa-ruler" style="font-size: 18px; color: #0284c7;"></i>
+                        <label style="font-weight: 600; font-size: 15px; cursor: pointer; color: #0c4a6e;" for="combined_auto_approve_toggle">
+                            GSM Checks & Length Calibration Auto-Approval
+                        </label>
+                    </div>
+                    <p id="auto_approval_description" style="font-size: 13px; margin: 0; color: #075985; line-height: 1.5;">
+                        <?php 
+                        $bothEnabled = $autoApproveGSM && $autoApproveLC;
+                        echo $bothEnabled 
+                            ? 'Auto-approval enabled for both GSM and Length Calibration. Auto-approved reports are shown below.' 
+                            : 'Manual approval required. Only pending reports are shown.'; 
+                        ?>
+                    </p>
+                </div>
+                <div class="toggle-switch" style="margin-left: 20px;">
+                    <input type="checkbox" id="combined_auto_approve_toggle" <?php echo ($autoApproveGSM && $autoApproveLC) ? 'checked' : ''; ?> onchange="toggleAutoApprovalCombined(this.checked)">
+                    <label for="combined_auto_approve_toggle" class="toggle-label">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- QC Entries Section -->
@@ -632,8 +813,145 @@ $conn->close();
         <?php endif; ?>
     </div>
 
+    <!-- Auto-Approved Reports Section (shown when auto-approval is enabled) -->
+    <div id="auto_approved_section" class="section" style="border: 2px solid #27ae60; background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%); display: <?php echo ($autoApproveGSM || $autoApproveLC) ? 'block' : 'none'; ?>;">
+        <h2 style="color: #15803d;">
+            <i class="fas fa-check-circle"></i> Auto-Approved Reports
+        </h2>
+        
+        <?php if ($autoApproveGSM): ?>
+        <div style="margin-bottom: 30px;">
+            <h3 style="color: #15803d; margin-bottom: 15px; font-size: 18px;">
+                <i class="fas fa-weight"></i> Auto-Approved GSM Checks (<?php 
+                    $totalGsmAutoApproved = 0;
+                    foreach ($gsmAutoApproved as $tests) { $totalGsmAutoApproved += count($tests); }
+                    echo $totalGsmAutoApproved; 
+                ?>)
+            </h3>
+            <?php if (count($gsmAutoApproved) > 0): ?>
+                <?php foreach ($gsmAutoApproved as $refNumber => $tests): ?>
+                <div style="margin-bottom: 30px; border: 2px solid #27ae60; border-radius: 8px; padding: 15px; background: white;">
+                    <h3 style="color: #15803d; margin: 0 0 15px 0; font-size: 16px;">
+                        <i class="fas fa-barcode"></i> Reference: <strong><?php echo htmlspecialchars($refNumber); ?></strong>
+                        <span style="font-size: 14px; color: #666; font-weight: normal;">(<?php echo count($tests); ?> test<?php echo count($tests) > 1 ? 's' : ''; ?>)</span>
+                    </h3>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Entry ID</th>
+                                <th>Roll No</th>
+                                <th>Date & Time</th>
+                                <th>Shift</th>
+                                <th>Line Number</th>
+                                <th>Inspector</th>
+                                <th>Approved At</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ($tests as $gsm): ?>
+                            <tr>
+                                <td><strong><?php echo htmlspecialchars($gsm['entry_id']); ?></strong></td>
+                                <td><?php echo htmlspecialchars($gsm['roll_no'] ?? 'N/A'); ?></td>
+                                <td><?php echo date('d M Y, h:i A', strtotime($gsm['date_time'])); ?></td>
+                                <td><?php echo htmlspecialchars($gsm['shift']); ?></td>
+                                <td><?php echo htmlspecialchars($gsm['line_number']); ?></td>
+                                <td><?php echo htmlspecialchars($gsm['inspector']); ?></td>
+                                <td><?php echo $gsm['approved_at'] ? date('d M Y, h:i A', strtotime($gsm['approved_at'])) : 'N/A'; ?></td>
+                                <td>
+                                    <span class="badge-auto-approved">
+                                        <i class="fas fa-check-circle"></i> Auto-Approved
+                                    </span>
+                                </td>
+                                <td>
+                                    <a href="view_gsm_check.php?id=<?php echo urlencode($gsm['entry_id']); ?>&approval_dashboard=1" class="btn btn-view" target="_blank">
+                                        <i class="fas fa-eye"></i> View
+                                    </a>
+                                </td>
+                            </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+                <?php endforeach; ?>
+            <?php else: ?>
+            <div class="empty-state">
+                <i class="fas fa-inbox"></i>
+                <p>No auto-approved GSM checks</p>
+            </div>
+            <?php endif; ?>
+        </div>
+        <?php endif; ?>
+        
+        <?php if ($autoApproveLC): ?>
+        <div>
+            <h3 style="color: #15803d; margin-bottom: 15px; font-size: 18px;">
+                <i class="fas fa-ruler"></i> Auto-Approved Length Calibrations (<?php 
+                    $totalLcAutoApproved = 0;
+                    foreach ($lcAutoApproved as $tests) { $totalLcAutoApproved += count($tests); }
+                    echo $totalLcAutoApproved; 
+                ?>)
+            </h3>
+            <?php if (count($lcAutoApproved) > 0): ?>
+                <?php foreach ($lcAutoApproved as $refNumber => $tests): ?>
+                <div style="margin-bottom: 30px; border: 2px solid #27ae60; border-radius: 8px; padding: 15px; background: white;">
+                    <h3 style="color: #15803d; margin: 0 0 15px 0; font-size: 16px;">
+                        <i class="fas fa-barcode"></i> Reference: <strong><?php echo htmlspecialchars($refNumber); ?></strong>
+                        <span style="font-size: 14px; color: #666; font-weight: normal;">(<?php echo count($tests); ?> test<?php echo count($tests) > 1 ? 's' : ''; ?>)</span>
+                    </h3>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Entry ID</th>
+                                <th>Roll No</th>
+                                <th>Date & Time</th>
+                                <th>Shift</th>
+                                <th>Line Number</th>
+                                <th>Inspector</th>
+                                <th>Approved At</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ($tests as $lc): ?>
+                            <tr>
+                                <td><strong><?php echo htmlspecialchars($lc['entry_id']); ?></strong></td>
+                                <td><?php echo htmlspecialchars($lc['roll_no'] ?? 'N/A'); ?></td>
+                                <td><?php echo date('d M Y, h:i A', strtotime($lc['date_time'])); ?></td>
+                                <td><?php echo htmlspecialchars($lc['shift']); ?></td>
+                                <td><?php echo htmlspecialchars($lc['line_number']); ?></td>
+                                <td><?php echo htmlspecialchars($lc['inspector']); ?></td>
+                                <td><?php echo $lc['approved_at'] ? date('d M Y, h:i A', strtotime($lc['approved_at'])) : 'N/A'; ?></td>
+                                <td>
+                                    <span class="badge-auto-approved">
+                                        <i class="fas fa-check-circle"></i> Auto-Approved
+                                    </span>
+                                </td>
+                                <td>
+                                    <a href="view_length_calibration.php?id=<?php echo urlencode($lc['entry_id']); ?>&approval_dashboard=1" class="btn btn-view" target="_blank">
+                                        <i class="fas fa-eye"></i> View
+                                    </a>
+                                </td>
+                            </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+                <?php endforeach; ?>
+            <?php else: ?>
+            <div class="empty-state">
+                <i class="fas fa-inbox"></i>
+                <p>No auto-approved length calibrations</p>
+            </div>
+            <?php endif; ?>
+        </div>
+        <?php endif; ?>
+    </div>
+
     <!-- Daily GSM Check Section -->
-    <div class="section">
+    <div id="pending_gsm_section" class="section">
         <h2><i class="fas fa-weight"></i> Pending Daily GSM Checks (<?php 
             $totalGsmTests = 0;
             foreach ($gsmChecks as $tests) { $totalGsmTests += count($tests); }
@@ -670,9 +988,22 @@ $conn->close();
                             <td><?php echo htmlspecialchars($gsm['line_number']); ?></td>
                             <td><?php echo htmlspecialchars($gsm['inspector']); ?></td>
                             <td><?php echo date('d M Y, h:i A', strtotime($gsm['created_at'])); ?></td>
-                            <td><span class="badge">Pending</span></td>
                             <td>
-                                <a href="view_gsm_check.php?id=<?php echo urlencode($gsm['entry_id']); ?>" class="btn btn-view" target="_blank">
+                                <?php if ($gsm['status'] === 'approved' && $gsm['auto_approved']): ?>
+                                    <span class="badge-auto-approved">
+                                        <i class="fas fa-check-circle"></i> Auto-Approved
+                                    </span>
+                                    <?php if ($gsm['approved_at']): ?>
+                                        <br><small style="color: #6c757d; font-size: 11px;">
+                                            <?php echo date('d M Y, h:i A', strtotime($gsm['approved_at'])); ?>
+                                        </small>
+                                    <?php endif; ?>
+                                <?php else: ?>
+                                    <span class="badge">Pending</span>
+                                <?php endif; ?>
+                            </td>
+                            <td>
+                                <a href="view_gsm_check.php?id=<?php echo urlencode($gsm['entry_id']); ?>&approval_dashboard=1" class="btn btn-view" target="_blank">
                                     <i class="fas fa-eye"></i> View
                                 </a>
                                 <button class="btn btn-approve" onclick="approveGSM('<?php echo htmlspecialchars($gsm['entry_id']); ?>')">
@@ -697,7 +1028,7 @@ $conn->close();
     </div>
 
     <!-- Length Calibration Section -->
-    <div class="section">
+    <div id="pending_lc_section" class="section">
         <h2><i class="fas fa-ruler"></i> Pending Length Calibrations (<?php 
             $totalLcTests = 0;
             foreach ($lcCalibrations as $tests) { $totalLcTests += count($tests); }
@@ -734,9 +1065,22 @@ $conn->close();
                             <td><?php echo htmlspecialchars($lc['line_number']); ?></td>
                             <td><?php echo htmlspecialchars($lc['inspector']); ?></td>
                             <td><?php echo date('d M Y, h:i A', strtotime($lc['created_at'])); ?></td>
-                            <td><span class="badge">Pending</span></td>
                             <td>
-                                <a href="view_length_calibration.php?id=<?php echo urlencode($lc['entry_id']); ?>" class="btn btn-view" target="_blank">
+                                <?php if ($lc['status'] === 'approved' && $lc['auto_approved']): ?>
+                                    <span class="badge-auto-approved">
+                                        <i class="fas fa-check-circle"></i> Auto-Approved
+                                    </span>
+                                    <?php if ($lc['approved_at']): ?>
+                                        <br><small style="color: #6c757d; font-size: 11px;">
+                                            <?php echo date('d M Y, h:i A', strtotime($lc['approved_at'])); ?>
+                                        </small>
+                                    <?php endif; ?>
+                                <?php else: ?>
+                                    <span class="badge">Pending</span>
+                                <?php endif; ?>
+                            </td>
+                            <td>
+                                <a href="view_length_calibration.php?id=<?php echo urlencode($lc['entry_id']); ?>&approval_dashboard=1" class="btn btn-view" target="_blank">
                                     <i class="fas fa-eye"></i> View
                                 </a>
                                 <button class="btn btn-approve" onclick="approveLC('<?php echo htmlspecialchars($lc['entry_id']); ?>')">
@@ -761,6 +1105,73 @@ $conn->close();
     </div>
 
     <script>
+    // Toggle auto-approval setting for both GSM and Length Calibration
+    function toggleAutoApprovalCombined(enabled) {
+        const toggle = document.getElementById('combined_auto_approve_toggle');
+        
+        // Disable toggle while processing
+        toggle.disabled = true;
+        
+        // Toggle both settings
+        Promise.all([
+            fetch('../handlers/toggle_auto_approval.php', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ test_type: 'gsm', enabled: enabled ? 1 : 0 })
+            }),
+            fetch('../handlers/toggle_auto_approval.php', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ test_type: 'length_calibration', enabled: enabled ? 1 : 0 })
+            })
+        ])
+        .then(responses => Promise.all(responses.map(r => r.json())))
+        .then(results => {
+            const allSuccess = results.every(r => r.success);
+            if (allSuccess) {
+                // If enabling auto-approval, auto-approve all pending reports
+                if (enabled) {
+                    return fetch('../handlers/auto_approve_pending_reports.php', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ test_type: 'both' })
+                    })
+                    .then(res => res.json())
+                    .then(data => {
+                        if (data.success) {
+                            // Update the description text
+                            const descText = document.getElementById('auto_approval_description');
+                            if (descText) {
+                                descText.textContent = 'Auto-approval enabled for both GSM and Length Calibration. Auto-approved reports are shown below.';
+                            }
+                            // Update dashboard sections dynamically
+                            updateDashboardSections();
+                        } else {
+                            throw new Error(data.message || 'Failed to auto-approve reports');
+                        }
+                    });
+                } else {
+                    // Update the description text
+                    const descText = document.getElementById('auto_approval_description');
+                    if (descText) {
+                        descText.textContent = 'Manual approval required. Only pending reports are shown.';
+                    }
+                    // Update dashboard sections dynamically
+                    updateDashboardSections();
+                }
+            } else {
+                throw new Error(results.find(r => !r.success)?.message || 'Failed to update settings');
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('Error: ' + error.message);
+            // Revert toggle
+            toggle.checked = !enabled;
+            toggle.disabled = false;
+        });
+    }
+    
     let currentRejectEntryId = '';
     
     function toggleOtherReason(type) {

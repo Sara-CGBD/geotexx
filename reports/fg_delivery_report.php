@@ -12,7 +12,7 @@ $user_role = strtolower(trim($_SESSION['role'] ?? ''));
 if ($user_role === 'agm operations' || $user_role === 'agm_ops' || $user_role === 'agm_operations') {
     $user_role = 'agm ops';
 }
-$allowed_roles = ['admin', 'management', 'agm ops', 'finance_user'];
+$allowed_roles = ['admin', 'management', 'agm ops', 'finance_user', 'delivery_user'];
 if (!in_array($user_role, $allowed_roles)) {
     http_response_code(403);
     die("Access Denied");
@@ -112,17 +112,100 @@ $referenceNumbers = [];
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: 'Inter', sans-serif; background: #f5f7fa; padding: 20px; color: #2c3e50; }
-        .container { max-width: 1800px; margin: 0 auto; background: white; border-radius: 12px; padding: 30px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
+        body { font-family: 'Inter', sans-serif; background: #f5f7fa; padding: 20px; color: #2c3e50; overflow-x: hidden; }
+        .container { max-width: 1800px; margin: 0 auto; background: white; border-radius: 12px; padding: 30px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); box-sizing: border-box; width: 100%; }
         h1 { text-align: center; color: #34495e; margin-bottom: 10px; }
         .subtitle { text-align: center; color: #7f8c8d; margin-bottom: 30px; font-size: 0.95em; }
         
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin-bottom: 30px; }
-        .stat-card { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 10px; padding: 25px; color: white; text-align: center; }
-        .stat-card.green { background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); }
-        .stat-card.blue { background: linear-gradient(135deg, #3498db 0%, #2980b9 100%); }
-        .stat-value { font-size: 2.5em; font-weight: bold; margin-bottom: 5px; }
-        .stat-label { font-size: 0.9em; opacity: 0.95; }
+        .stats-grid { 
+            display: grid; 
+            grid-template-columns: repeat(4, 1fr); 
+            gap: 20px; 
+            margin-bottom: 30px; 
+            width: 100%;
+            box-sizing: border-box;
+        }
+        @media (max-width: 1200px) {
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+        @media (max-width: 600px) {
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+        .stat-card { 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+            border-radius: 16px; 
+            padding: 25px 20px; 
+            color: white; 
+            text-align: center; 
+            box-shadow: 0 8px 16px rgba(102, 126, 234, 0.25), 0 4px 8px rgba(0, 0, 0, 0.1); 
+            transition: all 0.3s ease; 
+            position: relative;
+            overflow: hidden;
+            box-sizing: border-box;
+            min-width: 0;
+            max-width: 100%;
+        }
+        .stat-card::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            right: -50%;
+            width: 200%;
+            height: 200%;
+            background: radial-gradient(circle, rgba(255, 255, 255, 0.1) 0%, transparent 70%);
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+        .stat-card:hover { 
+            transform: translateY(-4px); 
+            box-shadow: 0 12px 24px rgba(102, 126, 234, 0.35), 0 6px 12px rgba(0, 0, 0, 0.15);
+        }
+        .stat-card:hover::before {
+            opacity: 1;
+        }
+        .stat-card.green { 
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); 
+            box-shadow: 0 8px 16px rgba(17, 153, 142, 0.25), 0 4px 8px rgba(0, 0, 0, 0.1);
+        }
+        .stat-card.green:hover {
+            box-shadow: 0 12px 24px rgba(17, 153, 142, 0.35), 0 6px 12px rgba(0, 0, 0, 0.15);
+        }
+        .stat-card.blue { 
+            background: linear-gradient(135deg, #2980b9 0%, #3498db 100%); 
+            box-shadow: 0 8px 16px rgba(41, 128, 185, 0.25), 0 4px 8px rgba(0, 0, 0, 0.1);
+        }
+        .stat-card.blue:hover {
+            box-shadow: 0 12px 24px rgba(41, 128, 185, 0.35), 0 6px 12px rgba(0, 0, 0, 0.15);
+        }
+        .stat-card.amber { 
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); 
+            box-shadow: 0 8px 16px rgba(245, 87, 108, 0.25), 0 4px 8px rgba(0, 0, 0, 0.1);
+        }
+        .stat-card.amber:hover {
+            box-shadow: 0 12px 24px rgba(245, 87, 108, 0.35), 0 6px 12px rgba(0, 0, 0, 0.15);
+        }
+        .stat-value { 
+            font-size: 2.5em; 
+            font-weight: 700; 
+            margin-bottom: 8px; 
+            text-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+            position: relative;
+            z-index: 1;
+            word-break: break-word;
+            line-height: 1.2;
+        }
+        .stat-label { 
+            font-size: 0.95em; 
+            opacity: 0.95; 
+            font-weight: 500; 
+            letter-spacing: 0.5px;
+            position: relative;
+            z-index: 1;
+        }
         
         .filters { background: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 25px; }
         .filter-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; align-items: end; }
@@ -198,7 +281,7 @@ $referenceNumbers = [];
             <div class="stat-value">৳<?php echo number_format($totalValue, 2); ?></div>
             <div class="stat-label">Total Value</div>
         </div>
-        <div class="stat-card" style="background: linear-gradient(135deg, #f39c12 0%, #e67e22 100%);">
+        <div class="stat-card amber">
             <div class="stat-value"><?php echo count($byClient); ?></div>
             <div class="stat-label">Unique Clients</div>
         </div>

@@ -19,11 +19,10 @@ if (SecurityConfig::isAccountLocked($_SESSION['username'])) {
     exit();
 }
 
-// Role-based access control for QC module and Production
+// Role-based access control for QC module
 require_once '../config/AccessControl.php';
 $userRole = strtolower(trim($_SESSION['role'] ?? ''));
-$hasAccess = AccessControl::hasModuleAccess($_SESSION['role'], AccessControl::MODULE_QC, AccessControl::PERMISSION_ENTRY) 
-             || in_array($userRole, ['production_user', 'production']);
+$hasAccess = AccessControl::hasModuleAccess($_SESSION['role'], AccessControl::MODULE_QC, AccessControl::PERMISSION_ENTRY);
              
 if (!$hasAccess) {
     http_response_code(403);
@@ -280,12 +279,32 @@ async function loadRollData() {
     // Add timestamp to prevent caching
     const timestamp = new Date().getTime();
     const response = await fetch(`../handlers/check_qc_status.php?ref_number=${encodeURIComponent(refNumber)}&roll_no=${encodeURIComponent(rollNo)}&line_number=${encodeURIComponent(lineNumber)}&_t=${timestamp}`);
-    const data = await response.json();
+    
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    
+    const text = await response.text();
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (parseError) {
+      console.error('JSON parse error. Response text:', text);
+      throw new Error('Invalid JSON response: ' + text.substring(0, 100));
+    }
+    
+    if (data.error) {
+      throw new Error(data.error + (data.message ? ': ' + data.message : ''));
+    }
+    
+    // Debug logging
+    console.log('QC Status Response:', data);
+    console.log('GSM Done:', data.gsm_done, 'Length Done:', data.length_done);
     
     // Update GSM Status
     if (data.gsm_done) {
-      document.getElementById('gsmStatus').innerHTML = '<span class="status-done">Done</span>';
-      document.getElementById('gsmDate').textContent = data.gsm_date || '-';
+      document.getElementById('gsmStatus').innerHTML = '<span class="status-done">Approved</span>';
+      document.getElementById('gsmDate').textContent = data.gsm_date || 'Approved';
     } else {
       document.getElementById('gsmStatus').innerHTML = '<span class="status-pending">Pending</span>';
       document.getElementById('gsmDate').textContent = '-';
@@ -293,8 +312,8 @@ async function loadRollData() {
     
     // Update Length Calibration Status
     if (data.length_done) {
-      document.getElementById('lengthStatus').innerHTML = '<span class="status-done">Done</span>';
-      document.getElementById('lengthDate').textContent = data.length_date || '-';
+      document.getElementById('lengthStatus').innerHTML = '<span class="status-done">Approved</span>';
+      document.getElementById('lengthDate').textContent = data.length_date || 'Approved';
     } else {
       document.getElementById('lengthStatus').innerHTML = '<span class="status-pending">Pending</span>';
       document.getElementById('lengthDate').textContent = '-';
@@ -302,7 +321,7 @@ async function loadRollData() {
     
     // Update Overall Status
     if (data.gsm_done && data.length_done) {
-      document.getElementById('overallStatus').innerHTML = '<span class="status-done">All Tests Done</span>';
+      document.getElementById('overallStatus').innerHTML = '<span class="status-done">All Tests Approved</span>';
     } else {
       document.getElementById('overallStatus').innerHTML = '<span class="status-pending">Tests Pending</span>';
     }
@@ -311,7 +330,10 @@ async function loadRollData() {
     
   } catch (error) {
     console.error('Error loading QC status:', error);
-    alert('Error loading QC status');
+    // Try to get more details about the error
+    const errorMsg = error.message || 'Unknown error';
+    console.error('Full error:', error);
+    alert('Error loading QC status: ' + errorMsg);
   }
 }
 

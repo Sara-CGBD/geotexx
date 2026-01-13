@@ -1765,7 +1765,7 @@ $fixQuery = $conn->query("
                     </div>
                     <?php if (!empty($material['fiber_test_id']) && isset($material['fiber_status']) && $material['fiber_status'] === 'pending'): ?>
                     <div style="display:flex; gap:8px; flex-shrink:0;">
-                        <a href="../admin/view_fiber_report.php?id=<?php echo $material['fiber_test_id']; ?>" class="btn btn-view" style="padding:6px 12px; font-size:12px;">
+                        <a href="../admin/view_fiber_report.php?id=<?php echo $material['fiber_test_id']; ?>&approval_dashboard=1&report_number=<?php echo urlencode($material['fiber_report_number']); ?>" target="_blank" class="btn btn-view" style="padding:6px 12px; font-size:12px;">
                             <i class="fas fa-eye"></i> View
                         </a>
                         <button type="button" class="btn btn-approve" onclick="approveFiberTest('<?php echo htmlspecialchars($material['fiber_report_number']); ?>')" style="padding:6px 12px; font-size:12px;">
@@ -1805,7 +1805,7 @@ $fixQuery = $conn->query("
                     </div>
                     <?php if (!empty($material['sewing_test_id']) && isset($material['sewing_status']) && $material['sewing_status'] === 'pending'): ?>
                     <div style="display:flex; gap:8px; flex-shrink:0;">
-                        <a href="../admin/view_sewing_report.php?id=<?php echo $material['sewing_test_id']; ?>" class="btn btn-view" style="padding:6px 12px; font-size:12px;">
+                        <a href="../admin/view_sewing_report.php?id=<?php echo $material['sewing_test_id']; ?>&approval_dashboard=1&report_number=<?php echo urlencode($material['sewing_report_number']); ?>" target="_blank" class="btn btn-view" style="padding:6px 12px; font-size:12px;">
                             <i class="fas fa-eye"></i> View
                         </a>
                         <button type="button" class="btn btn-approve" onclick="approveSewingTest('<?php echo htmlspecialchars($material['sewing_report_number']); ?>')" style="padding:6px 12px; font-size:12px;">
@@ -1845,7 +1845,7 @@ $fixQuery = $conn->query("
                     </div>
                     <?php if (!empty($material['fineness_fiber_test_id']) && isset($material['fineness_fiber_status']) && $material['fineness_fiber_status'] === 'pending'): ?>
                     <div style="display:flex; gap:8px; flex-shrink:0;">
-                        <button type="button" class="btn btn-view" onclick="viewFinenessFiberTest('<?php echo $material['fineness_fiber_test_id']; ?>')" style="padding:6px 12px; font-size:12px;">
+                        <button type="button" class="btn btn-view" onclick="viewFinenessFiberTest('<?php echo $material['fineness_fiber_test_id']; ?>', '<?php echo htmlspecialchars($material['fineness_fiber_report_number']); ?>')" style="padding:6px 12px; font-size:12px;">
                             <i class="fas fa-eye"></i> View
                         </button>
                         <button type="button" class="btn btn-approve" onclick="approveFinenessFiberTest('<?php echo htmlspecialchars($material['fineness_fiber_report_number']); ?>')" style="padding:6px 12px; font-size:12px;">
@@ -1885,7 +1885,7 @@ $fixQuery = $conn->query("
                     </div>
                     <?php if (!empty($material['cut_length_fiber_test_id']) && isset($material['cut_length_fiber_status']) && $material['cut_length_fiber_status'] === 'pending'): ?>
                     <div style="display:flex; gap:8px; flex-shrink:0;">
-                        <button type="button" class="btn btn-view" onclick="viewCutLengthFiberTest('<?php echo $material['cut_length_fiber_test_id']; ?>')" style="padding:6px 12px; font-size:12px;">
+                        <button type="button" class="btn btn-view" onclick="viewCutLengthFiberTest('<?php echo $material['cut_length_fiber_test_id']; ?>', '<?php echo htmlspecialchars($material['cut_length_fiber_report_number']); ?>')" style="padding:6px 12px; font-size:12px;">
                             <i class="fas fa-eye"></i> View
                         </button>
                         <button type="button" class="btn btn-approve" onclick="approveCutLengthFiberTest('<?php echo htmlspecialchars($material['cut_length_fiber_report_number']); ?>')" style="padding:6px 12px; font-size:12px;">
@@ -1925,7 +1925,7 @@ $fixQuery = $conn->query("
                     </div>
                     <?php if (!empty($material['fiber_tenacity_test_id']) && isset($material['fiber_tenacity_status']) && $material['fiber_tenacity_status'] === 'pending'): ?>
                     <div style="display:flex; gap:8px; flex-shrink:0;">
-                        <button type="button" class="btn btn-view" onclick="viewFiberTenacityTest('<?php echo $material['fiber_tenacity_test_id']; ?>')" style="padding:6px 12px; font-size:12px;">
+                        <button type="button" class="btn btn-view" onclick="viewFiberTenacityTest('<?php echo $material['fiber_tenacity_test_id']; ?>', '<?php echo htmlspecialchars($material['fiber_tenacity_report_number']); ?>')" style="padding:6px 12px; font-size:12px;">
                             <i class="fas fa-eye"></i> View
                         </button>
                         <button type="button" class="btn btn-approve" onclick="approveFiberTenacityTest('<?php echo htmlspecialchars($material['fiber_tenacity_report_number']); ?>')" style="padding:6px 12px; font-size:12px;">
@@ -1965,7 +1965,7 @@ $fixQuery = $conn->query("
                     </div>
                     <?php if (!empty($material['yarn_test_id']) && isset($material['yarn_status']) && $material['yarn_status'] === 'pending'): ?>
                     <div style="display:flex; gap:8px; flex-shrink:0;">
-                        <button type="button" class="btn btn-view" onclick="viewYarnTest('<?php echo $material['yarn_test_id']; ?>')" style="padding:6px 12px; font-size:12px;">
+                        <button type="button" class="btn btn-view" onclick="viewYarnTest('<?php echo $material['yarn_test_id']; ?>', '<?php echo htmlspecialchars($material['yarn_report_number']); ?>')" style="padding:6px 12px; font-size:12px;">
                             <i class="fas fa-eye"></i> View
                         </button>
                         <button type="button" class="btn btn-approve" onclick="approveYarnTest('<?php echo htmlspecialchars($material['yarn_report_number']); ?>')" style="padding:6px 12px; font-size:12px;">
@@ -2244,8 +2244,8 @@ function approveFinenessFiberTest(reportNumber) {
 }
 
 // View Fineness of Fiber Test
-function viewFinenessFiberTest(testId) {
-    window.open('../forms/fineness_fiber_report.php?view=' + testId, '_blank');
+function viewFinenessFiberTest(testId, reportNumber) {
+    window.open('../forms/fineness_fiber_report.php?view=' + testId + '&approval_dashboard=1&report_number=' + encodeURIComponent(reportNumber), '_blank');
 }
 
 // Approve Cut Length of Fiber Test (direct, no modal)
@@ -2263,8 +2263,8 @@ function approveCutLengthFiberTest(reportNumber) {
 }
 
 // View Cut Length of Fiber Test
-function viewCutLengthFiberTest(testId) {
-    window.open('../forms/cut_length_fiber_report.php?view=' + testId, '_blank');
+function viewCutLengthFiberTest(testId, reportNumber) {
+    window.open('../forms/cut_length_fiber_report.php?view=' + testId + '&approval_dashboard=1&report_number=' + encodeURIComponent(reportNumber), '_blank');
 }
 
 // Approve Tenacity of Fiber Test (direct, no modal)
@@ -2282,8 +2282,8 @@ function approveFiberTenacityTest(reportNumber) {
 }
 
 // View Tenacity of Fiber Test
-function viewFiberTenacityTest(testId) {
-    window.open('../forms/tenacity_fiber_report.php?view=' + testId, '_blank');
+function viewFiberTenacityTest(testId, reportNumber) {
+    window.open('../forms/tenacity_fiber_report.php?view=' + testId + '&approval_dashboard=1&report_number=' + encodeURIComponent(reportNumber), '_blank');
 }
 
 // Approve Tenacity of Yarn Test (direct, no modal)
@@ -2301,8 +2301,8 @@ function approveYarnTest(reportNumber) {
 }
 
 // View Tenacity of Yarn Test
-function viewYarnTest(testId) {
-    window.open('../forms/tenacity_yarn_report.php?view=' + testId, '_blank');
+function viewYarnTest(testId, reportNumber) {
+    window.open('../forms/tenacity_yarn_report.php?view=' + testId + '&approval_dashboard=1&report_number=' + encodeURIComponent(reportNumber), '_blank');
 }
 
 // Fiber Test Rejection Modal

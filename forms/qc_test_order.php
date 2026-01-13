@@ -118,6 +118,12 @@ function getStatusLabel($status) {
 $message = '';
 $error = '';
 
+// Check for error message from session
+if (isset($_SESSION['error_message'])) {
+    $error = $_SESSION['error_message'];
+    unset($_SESSION['error_message']); // Clear it after displaying
+}
+
 // Check if coming from Roll Entry and pre-select reference
 $preselected_reference = '';
 if (isset($_SESSION['last_roll_entry_reference'])) {
@@ -201,6 +207,68 @@ if ($edit_id > 0) {
         if ($can_edit) {
             $edit_mode = true;
             $existing_test_data = json_decode($existing_report['test_data'], true) ?? [];
+            
+            // Find all related reports in the same bulk group to determine which test methods were submitted
+            $submitted_test_methods = []; // Array to store test_name => [methods] that were submitted
+            $bulk_from_ref = '';
+            $bulk_to_ref = '';
+            
+            // Always get the current report's test method (for both bulk and single reports)
+            $current_test_name = $existing_report['test_name'] ?? '';
+            $current_method = $existing_report['chosen_method'] ?? '';
+            if (!empty($current_test_name) && !empty($current_method)) {
+                if (!isset($submitted_test_methods[$current_test_name])) {
+                    $submitted_test_methods[$current_test_name] = [];
+                }
+                if (!in_array($current_method, $submitted_test_methods[$current_test_name])) {
+                    $submitted_test_methods[$current_test_name][] = $current_method;
+                }
+            }
+            
+            if (isset($existing_test_data['is_bulk_reference']) && $existing_test_data['is_bulk_reference'] && 
+                isset($existing_test_data['bulk_from_reference']) && isset($existing_test_data['bulk_to_reference'])) {
+                // This is a bulk reference submission - find all related reports
+                $bulk_from_ref = $existing_test_data['bulk_from_reference'];
+                $bulk_to_ref = $existing_test_data['bulk_to_reference'];
+                $current_status = $existing_report['status'];
+                $current_report_id = $existing_report['id'];
+                
+                // Query to find all reports with the same status - filter in PHP for better compatibility
+                $related_query = $conn->prepare("
+                    SELECT ts.test_name, qto.chosen_method, qto.test_data
+                    FROM qc_test_orders qto
+                    LEFT JOIN test_standards ts ON qto.test_standard_id = ts.id
+                    WHERE qto.status = ?
+                    AND qto.id != ?
+                ");
+                
+                if ($related_query) {
+                    $related_query->bind_param("si", $current_status, $current_report_id);
+                    $related_query->execute();
+                    $related_result = $related_query->get_result();
+                    
+                    while ($row = $related_result->fetch_assoc()) {
+                        $row_test_data = json_decode($row['test_data'] ?? '{}', true) ?? [];
+                        // Check if this report has the same bulk reference range
+                        if (isset($row_test_data['is_bulk_reference']) && $row_test_data['is_bulk_reference'] &&
+                            isset($row_test_data['bulk_from_reference']) && isset($row_test_data['bulk_to_reference']) &&
+                            $row_test_data['bulk_from_reference'] === $bulk_from_ref &&
+                            $row_test_data['bulk_to_reference'] === $bulk_to_ref) {
+                            $test_name = $row['test_name'] ?? '';
+                            $method = $row['chosen_method'] ?? '';
+                            if (!empty($test_name) && !empty($method)) {
+                                if (!isset($submitted_test_methods[$test_name])) {
+                                    $submitted_test_methods[$test_name] = [];
+                                }
+                                if (!in_array($method, $submitted_test_methods[$test_name])) {
+                                    $submitted_test_methods[$test_name][] = $method;
+                                }
+                            }
+                        }
+                    }
+                    $related_query->close();
+                }
+            }
             
             // Store the existing_report in a way that persists for $lock_general_fields check
             // This ensures we have all the data needed to determine if fields should be locked
@@ -782,8 +850,273 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_order'])) {
 
         $conn->begin_transaction();
         
+        // Check for bulk reference selection (from From/To reference dropdowns when line is selected)
+        $bulk_rolls = [];
+        if (isset($_POST['from_reference']) && isset($_POST['to_reference']) && 
+            !empty($_POST['from_reference']) && !empty($_POST['to_reference'])) {
+            
+            $fromRef = $_POST['from_reference'];
+            $toRef = $_POST['to_reference'];
+            
+            // Determine line filter from the reference
+            $lineFilter = '';
+            if (strpos($fromRef, 'L1') !== false) {
+                $lineFilter = 'L1';
+            } elseif (strpos($fromRef, 'L2') !== false) {
+                $lineFilter = 'L2';
+            }
+            
+            // Fetch all references for this line, ordered alphabetically
+            if ($lineFilter) {
+                $linePattern = '%' . $lineFilter . '%';
+                $stmt_line = $conn->prepare("
+                    SELECT DISTINCT reference_number 
+                    FROM roll_entry 
+                    WHERE reference_number IS NOT NULL 
+                    AND reference_number LIKE ?
+                    ORDER BY reference_number ASC
+                ");
+                $stmt_line->bind_param("s", $linePattern);
+                $stmt_line->execute();
+                $result_line = $stmt_line->get_result();
+                
+                $allRefs = [];
+                while ($row = $result_line->fetch_assoc()) {
+                    $allRefs[] = $row['reference_number'];
+                }
+                $stmt_line->close();
+                
+                // Extract base references and roll numbers from From and To
+                $fromBaseRef = '';
+                $fromRollNum = 0;
+                $toBaseRef = '';
+                $toRollNum = 0;
+                
+                // Extract base reference and roll number from From value
+                if (preg_match('/^(.+)-(\d+)$/', $fromRef, $fromMatches)) {
+                    $fromBaseRef = $fromMatches[1];
+                    $fromRollNum = (int)$fromMatches[2];
+                } else {
+                    $fromBaseRef = $fromRef;
+                    $fromRollNum = 1;
+                }
+                
+                // Extract base reference and roll number from To value
+                if (preg_match('/^(.+)-(\d+)$/', $toRef, $toMatches)) {
+                    $toBaseRef = $toMatches[1];
+                    $toRollNum = (int)$toMatches[2];
+                } else {
+                    $toBaseRef = $toRef;
+                    $toRollNum = 1;
+                }
+                
+                // Check if From and To are from the same bundle
+                if ($fromBaseRef === $toBaseRef && $fromRollNum > 0 && $toRollNum > 0) {
+                    // Same bundle - include ALL rolls from the bundle (from roll 1 to the last roll)
+                    // First, find the bundle to get the total roll count
+                    $stmt_bundle = $conn->prepare("
+                        SELECT reference_number 
+                        FROM roll_entry 
+                        WHERE reference_number LIKE ? 
+                        AND reference_number REGEXP '-[0-9]+$'
+                        ORDER BY LENGTH(reference_number) DESC, reference_number DESC
+                        LIMIT 1
+                    ");
+                    $bundlePattern = $fromBaseRef . '-%';
+                    $stmt_bundle->bind_param("s", $bundlePattern);
+                    $stmt_bundle->execute();
+                    $result_bundle = $stmt_bundle->get_result();
+                    
+                    $bundleRollCount = max($fromRollNum, $toRollNum);
+                    if ($result_bundle && $row_bundle = $result_bundle->fetch_assoc()) {
+                        $bundleRef = $row_bundle['reference_number'];
+                        if (preg_match('/-(\d+)$/', $bundleRef, $bundleMatches)) {
+                            $potentialCount = (int)$bundleMatches[1];
+                            // If the bundle reference ends with a number > 1, it might be the roll count
+                            // Check if there are individual roll entries
+                            $stmt_check = $conn->prepare("
+                                SELECT COUNT(DISTINCT reference_number) as roll_count
+                                FROM roll_entry 
+                                WHERE reference_number LIKE ?
+                                AND reference_number REGEXP '-[0-9]+$'
+                            ");
+                            $checkPattern = $fromBaseRef . '-%';
+                            $stmt_check->bind_param("s", $checkPattern);
+                            $stmt_check->execute();
+                            $result_check = $stmt_check->get_result();
+                            if ($result_check && $row_check = $result_check->fetch_assoc()) {
+                                $actualCount = (int)$row_check['roll_count'];
+                                if ($actualCount > $bundleRollCount) {
+                                    $bundleRollCount = $actualCount;
+                                } else {
+                                    $bundleRollCount = max($bundleRollCount, $potentialCount);
+                                }
+                            }
+                            $stmt_check->close();
+                        }
+                    }
+                    $stmt_bundle->close();
+                    
+                    // Include all rolls from 1 to bundleRollCount
+                    for ($roll = 1; $roll <= $bundleRollCount; $roll++) {
+                        $bulk_rolls[] = $fromBaseRef . '-' . $roll;
+                    }
+                } else {
+                    // Different bundles or references - process serially
+                    $fromIndex = array_search($fromRef, $allRefs);
+                    $toIndex = array_search($toRef, $allRefs);
+                    
+                    if ($fromIndex !== false && $toIndex !== false && $fromIndex <= $toIndex) {
+                        // Process each reference in the range
+                        for ($i = $fromIndex; $i <= $toIndex; $i++) {
+                            $ref = $allRefs[$i];
+                            
+                            // Extract base reference and roll number
+                            $refBaseRef = '';
+                            $refRollNum = 0;
+                            if (preg_match('/^(.+)-(\d+)$/', $ref, $refMatches)) {
+                                $refBaseRef = $refMatches[1];
+                                $refRollNum = (int)$refMatches[2];
+                            } else {
+                                $refBaseRef = $ref;
+                                $refRollNum = 1;
+                            }
+                            
+                            // Check if we need to generate serial references for this base
+                            // If this is the first reference and there are more in the range with the same base
+                            $needsSerial = false;
+                            $endRollNum = $refRollNum;
+                            
+                            if ($i === $fromIndex) {
+                                // Check if To reference has the same base
+                                if ($refBaseRef === $toBaseRef) {
+                                    $needsSerial = true;
+                                    $endRollNum = $toRollNum;
+                                } else {
+                                    // Check if any reference in the range has the same base
+                                    for ($j = $i + 1; $j <= $toIndex; $j++) {
+                                        $checkRef = $allRefs[$j];
+                                        $checkBaseRef = '';
+                                        $checkRollNum = 0;
+                                        if (preg_match('/^(.+)-(\d+)$/', $checkRef, $checkMatches)) {
+                                            $checkBaseRef = $checkMatches[1];
+                                            $checkRollNum = (int)$checkMatches[2];
+                                        } else {
+                                            $checkBaseRef = $checkRef;
+                                            $checkRollNum = 1;
+                                        }
+                                        
+                                        if ($checkBaseRef === $refBaseRef) {
+                                            $needsSerial = true;
+                                            if ($checkRollNum > $endRollNum) {
+                                                $endRollNum = $checkRollNum;
+                                            }
+                                        } else if ($needsSerial) {
+                                            // Found a different base, stop
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            if ($needsSerial && $endRollNum > $refRollNum) {
+                                // Generate all serial references from refRollNum to endRollNum
+                                for ($roll = $refRollNum; $roll <= $endRollNum; $roll++) {
+                                    $bulk_rolls[] = $refBaseRef . '-' . $roll;
+                                }
+                            } else {
+                                // Single reference - check if it's part of a bundle
+                                $stmt_bundle = $conn->prepare("
+                                    SELECT reference_number 
+                                    FROM roll_entry 
+                                    WHERE reference_number LIKE ? 
+                                    AND reference_number REGEXP '-[0-9]+$'
+                                    ORDER BY LENGTH(reference_number) DESC, reference_number DESC
+                                    LIMIT 1
+                                ");
+                                $bundlePattern = $refBaseRef . '-%';
+                                $stmt_bundle->bind_param("s", $bundlePattern);
+                                $stmt_bundle->execute();
+                                $result_bundle = $stmt_bundle->get_result();
+                                
+                                $bundleRollCount = 1;
+                                if ($result_bundle && $row_bundle = $result_bundle->fetch_assoc()) {
+                                    $bundleRef = $row_bundle['reference_number'];
+                                    if (preg_match('/-(\d+)$/', $bundleRef, $bundleMatches)) {
+                                        $potentialCount = (int)$bundleMatches[1];
+                                        // Check actual count of individual rolls
+                                        $stmt_check = $conn->prepare("
+                                            SELECT COUNT(DISTINCT reference_number) as roll_count
+                                            FROM roll_entry 
+                                            WHERE reference_number LIKE ?
+                                            AND reference_number REGEXP '-[0-9]+$'
+                                        ");
+                                        $checkPattern = $refBaseRef . '-%';
+                                        $stmt_check->bind_param("s", $checkPattern);
+                                        $stmt_check->execute();
+                                        $result_check = $stmt_check->get_result();
+                                        if ($result_check && $row_check = $result_check->fetch_assoc()) {
+                                            $actualCount = (int)$row_check['roll_count'];
+                                            $bundleRollCount = max($actualCount, $potentialCount);
+                                        } else {
+                                            $bundleRollCount = $potentialCount;
+                                        }
+                                        $stmt_check->close();
+                                    }
+                                }
+                                $stmt_bundle->close();
+                                
+                                // If it's a bundle (rollCount > 1), add all individual rolls
+                                if ($bundleRollCount > 1) {
+                                    for ($roll = 1; $roll <= $bundleRollCount; $roll++) {
+                                        $bulk_rolls[] = $refBaseRef . '-' . $roll;
+                                    }
+                                } else {
+                                    // Single roll reference
+                                    $bulk_rolls[] = $ref;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } elseif (isset($_POST['from_roll']) && isset($_POST['to_roll']) && 
+            !empty($_POST['from_roll']) && !empty($_POST['to_roll']) &&
+            isset($_POST['product_reference']) && !empty($_POST['product_reference'])) {
+            
+            // Legacy support for roll-based bulk selection (when "All Lines" is selected)
+            $productRefSelect = $_POST['product_reference'];
+            $stmt_check = $conn->prepare("SELECT reference_number FROM roll_entry WHERE reference_number = ? LIMIT 1");
+            $stmt_check->bind_param("s", $productRefSelect);
+            $stmt_check->execute();
+            $result_check = $stmt_check->get_result();
+            if ($result_check && $result_check->num_rows > 0) {
+                $baseRef = preg_replace('/-\d+$/', '', $productRefSelect);
+                $fromRoll = (int)$_POST['from_roll'];
+                $toRoll = (int)$_POST['to_roll'];
+                
+                for ($i = $fromRoll; $i <= $toRoll; $i++) {
+                    $bulk_rolls[] = $baseRef . '-' . $i;
+                }
+            }
+            $stmt_check->close();
+        }
+        
         $inserted_count = 0;
-        foreach ($selected_methods as $selected) {
+        
+        // If bulk rolls are selected, process each roll separately
+        $rolls_to_process = !empty($bulk_rolls) ? $bulk_rolls : [null]; // null means process single reference
+        $original_user_ref = $user_reference;
+        
+        foreach ($rolls_to_process as $bulk_roll_ref) {
+            // If processing bulk, temporarily set the individual roll reference
+            $original_individual_ref = $_POST['individual_roll_reference'] ?? '';
+            if ($bulk_roll_ref) {
+                $_POST['individual_roll_reference'] = $bulk_roll_ref;
+                $user_reference = $bulk_roll_ref; // Update user_reference for this roll
+            }
+            
+            foreach ($selected_methods as $selected) {
             // Find or create the test_standard_id
             $test_standard_id = $ensureTestStandard($conn, $selected['test_name'], $selected['method']);
             if (!$test_standard_id) {
@@ -851,6 +1184,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_order'])) {
             if (isset($_POST['yarn_reference_no']) && !empty($_POST['yarn_reference_no'])) {
                 $test_data['yarn_reference_no'] = $_POST['yarn_reference_no'];
                 file_put_contents('qc_debug.txt', "Saved yarn_reference_no: " . $_POST['yarn_reference_no'] . "\n", FILE_APPEND);
+            }
+                
+            // Store bulk reference information if this is a bulk submission
+            if (!empty($bulk_rolls) && isset($_POST['from_reference']) && isset($_POST['to_reference'])) {
+                $test_data['is_bulk_reference'] = true;
+                $test_data['bulk_from_reference'] = $_POST['from_reference'];
+                $test_data['bulk_to_reference'] = $_POST['to_reference'];
+                $test_data['bulk_reference_count'] = count($bulk_rolls);
+                file_put_contents('qc_debug.txt', "Saved bulk reference: " . $_POST['from_reference'] . " to " . $_POST['to_reference'] . " (" . count($bulk_rolls) . " references)\n", FILE_APPEND);
             }
                 
                 // Collect thickness test data if this is a thickness test
@@ -1053,7 +1395,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_order'])) {
             $test_data_json = json_encode($test_data);
             
             // Use user's reference if available, otherwise use generated reference
-            $final_reference = !empty($user_reference) ? $user_reference : $generated_sample_ref;
+            // For bulk rolls, use the current bulk roll reference
+            if (isset($bulk_roll_ref) && $bulk_roll_ref) {
+                $final_reference = $bulk_roll_ref;
+            } else {
+                $final_reference = !empty($user_reference) ? $user_reference : $generated_sample_ref;
+            }
             
             // Generate report number for this test order
             $report_number = generateReportNumber();
@@ -1117,6 +1464,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_order'])) {
                 // If admin/AGM Ops submits, auto-approve ONLY for production products
                 // For external products, AGM creates order → tester performs tests → checker reviews (same as production)
                 if ($is_admin && !$is_external_product) {
+                    // Check for duplicate before inserting - match by test_name and method from test_standards
+                    $check_duplicate = $conn->prepare("
+                        SELECT qto.id, qto.report_number, qto.status, ts.test_name, ts.standard_code
+                        FROM qc_test_orders qto
+                        INNER JOIN test_standards ts ON qto.test_standard_id = ts.id
+                        WHERE qto.sample_reference_id = ? 
+                        AND ts.test_name = ?
+                        AND ts.standard_code = ?
+                        LIMIT 1
+                    ");
+                    $check_duplicate->bind_param("sss", $final_reference, $selected['test_name'], $selected['method']);
+                    $check_duplicate->execute();
+                    $duplicate_result = $check_duplicate->get_result();
+                    
+                    if ($duplicate_result && $duplicate_row = $duplicate_result->fetch_assoc()) {
+                        $check_duplicate->close();
+                        $conn->rollback();
+                        $_SESSION['error_message'] = "❌ Test has already been submitted for reference: " . htmlspecialchars($final_reference) . " with test: " . htmlspecialchars($selected['test_name']) . " (" . htmlspecialchars($selected['method']) . "). Report Number: " . htmlspecialchars($duplicate_row['report_number']);
+                        header("Location: " . $_SERVER['PHP_SELF']);
+                        exit;
+                    }
+                    $check_duplicate->close();
+                    
                     $status = 'approved';
                     $approved_by = $_SESSION['full_name'] ?? $_SESSION['username'];
                     $approved_at = date('Y-m-d H:i:s');
@@ -1137,6 +1507,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_order'])) {
                         error_log("QC Test Order: Production product, setting status to " . $status);
                     }
                     
+                    // Check if test order already exists for this reference and test
+                    // Check by joining with test_standards to match by test_name and method
+                    $check_duplicate = $conn->prepare("
+                        SELECT qto.id, qto.report_number, qto.status, ts.test_name, ts.standard_code
+                        FROM qc_test_orders qto
+                        INNER JOIN test_standards ts ON qto.test_standard_id = ts.id
+                        WHERE qto.sample_reference_id = ? 
+                        AND ts.test_name = ?
+                        AND ts.standard_code = ?
+                        AND qto.id != ?
+                        LIMIT 1
+                    ");
+                    $check_id = $is_editing ? $edit_id_post : 0;
+                    $check_duplicate->bind_param("sssi", $final_reference, $selected['test_name'], $selected['method'], $check_id);
+                    $check_duplicate->execute();
+                    $duplicate_result = $check_duplicate->get_result();
+                    
+                    if ($duplicate_result && $duplicate_row = $duplicate_result->fetch_assoc()) {
+                        // Duplicate found - show error and skip this test
+                        $check_duplicate->close();
+                        $conn->rollback();
+                        $_SESSION['error_message'] = "❌ Test has already been submitted for reference: " . htmlspecialchars($final_reference) . " with test: " . htmlspecialchars($selected['test_name']) . " (" . htmlspecialchars($selected['method']) . "). Report Number: " . htmlspecialchars($duplicate_row['report_number']);
+                        header("Location: " . $_SERVER['PHP_SELF'] . ($is_editing && $edit_id_post > 0 ? "?edit_id=" . $edit_id_post : ""));
+                        exit;
+                    }
+                    $check_duplicate->close();
+                    
                     // Insert with appropriate status - EXPLICITLY set status to avoid database defaults
                     // Ensure status is set before binding
                     if (empty($status)) {
@@ -1152,6 +1549,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_order'])) {
         
             // Ensure status is set before executing
             if (empty($status) && isset($stmt)) {
+                // Check for duplicate again before re-binding
+                $check_duplicate = $conn->prepare("
+                    SELECT qto.id, qto.report_number, qto.status, ts.test_name, ts.standard_code
+                    FROM qc_test_orders qto
+                    INNER JOIN test_standards ts ON qto.test_standard_id = ts.id
+                    WHERE qto.sample_reference_id = ? 
+                    AND ts.test_name = ?
+                    AND ts.standard_code = ?
+                    AND qto.id != ?
+                    LIMIT 1
+                ");
+                $check_id = $is_editing ? $edit_id_post : 0;
+                $check_duplicate->bind_param("sssi", $final_reference, $selected['test_name'], $selected['method'], $check_id);
+                $check_duplicate->execute();
+                $duplicate_result = $check_duplicate->get_result();
+                
+                if ($duplicate_result && $duplicate_row = $duplicate_result->fetch_assoc()) {
+                    $check_duplicate->close();
+                    $conn->rollback();
+                    $_SESSION['error_message'] = "❌ Test has already been submitted for reference: " . htmlspecialchars($final_reference) . " with test: " . htmlspecialchars($selected['test_name']) . " (" . htmlspecialchars($selected['method']) . "). Report Number: " . htmlspecialchars($duplicate_row['report_number']);
+                    header("Location: " . $_SERVER['PHP_SELF'] . ($is_editing && $edit_id_post > 0 ? "?edit_id=" . $edit_id_post : ""));
+                    exit;
+                }
+                $check_duplicate->close();
+                
                 error_log("QC Test Order: WARNING - Status is empty before execute! Setting default to pending_checker");
                 $status = 'pending_checker'; // Fallback default
                 // Re-bind with the default status
@@ -1205,7 +1627,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_order'])) {
                 error_log("QC INSERT ERROR for " . $selected['test_name'] . ": " . $stmt->error);
             }
             $stmt->close();
-        }
+            } // End foreach selected_methods
+            
+            // Restore original values after processing each bulk roll
+            if ($bulk_roll_ref) {
+                if ($original_individual_ref) {
+                    $_POST['individual_roll_reference'] = $original_individual_ref;
+                } else {
+                    unset($_POST['individual_roll_reference']);
+                }
+                $user_reference = $original_user_ref;
+            }
+        } // End foreach rolls_to_process
         
         $conn->commit();
 
@@ -1362,7 +1795,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_order'])) {
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['checker_action']) && $is_checker) {
     try {
         $action = $_POST['checker_action'];
-        $report_number = trim($_POST['checker_report_number']);
         $comment = trim($_POST['checker_comment'] ?? '');
         
         // Handle rejection reasons checkboxes
@@ -1376,19 +1808,61 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['checker_action']) && 
         $checked_by = $_SESSION['full_name'] ?? $_SESSION['username'];
         $checked_at = date('Y-m-d H:i:s');
         
+        // Check if this is a bulk action (multiple report numbers)
+        if (isset($_POST['checker_report_numbers']) && !empty($_POST['checker_report_numbers'])) {
+            // Bulk action - process multiple reports
+            $report_numbers_str = trim($_POST['checker_report_numbers']);
+            $report_numbers = array_filter(array_map('trim', explode(',', $report_numbers_str)));
+            
+            if (empty($report_numbers)) {
+                throw new Exception("No report numbers provided");
+            }
+            
+            $success_count = 0;
+            $failed_reports = [];
+            
+            foreach ($report_numbers as $report_number) {
+                $stmt = $conn->prepare("UPDATE qc_test_orders SET status = ?, checked_by = ?, checked_at = ?, checker_remarks = ?, updated_at = NOW() WHERE report_number = ?");
+                $stmt->bind_param("sssss", $status, $checked_by, $checked_at, $comment, $report_number);
+                
+                if ($stmt->execute()) {
+                    $success_count++;
+                } else {
+                    $failed_reports[] = $report_number . ' (' . $stmt->error . ')';
+                }
+                $stmt->close();
+            }
+            
+            if ($success_count > 0) {
+                $message = "$success_count report(s) have been " . ($action === 'approved' ? 'forwarded to AGM/Admin for approval' : 'rejected') . " successfully!";
+                if (!empty($failed_reports)) {
+                    $message .= " Failed: " . implode(', ', $failed_reports);
+                }
+                header("Location: " . $_SERVER['PHP_SELF'] . "?msg=" . urlencode($message));
+                exit();
+            } else {
+                throw new Exception("Failed to update all reports: " . implode(', ', $failed_reports));
+            }
+        } else {
+            // Single report action (backward compatibility)
+            $report_number = trim($_POST['checker_report_number'] ?? '');
+            if (empty($report_number)) {
+                throw new Exception("No report number provided");
+            }
+            
         $stmt = $conn->prepare("UPDATE qc_test_orders SET status = ?, checked_by = ?, checked_at = ?, checker_remarks = ?, updated_at = NOW() WHERE report_number = ?");
         $stmt->bind_param("sssss", $status, $checked_by, $checked_at, $comment, $report_number);
         
         if ($stmt->execute()) {
             $stmt->close();
             $message = "Report $report_number has been " . ($action === 'approved' ? 'forwarded to AGM/Admin for approval' : 'rejected') . " successfully!";
-            // Redirect to refresh the page and update the pending list
             header("Location: " . $_SERVER['PHP_SELF'] . "?msg=" . urlencode($message));
             exit();
         } else {
             $error_msg = $stmt->error;
             $stmt->close();
             throw new Exception("Failed to update report: " . $error_msg);
+            }
         }
     } catch (Exception $e) {
         $error = $e->getMessage();
@@ -1399,12 +1873,62 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['checker_action']) && 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action']) && $is_admin) {
     try {
         $action = $_POST['admin_action'];
-        $report_number = trim($_POST['admin_report_number']);
         $comment = trim($_POST['admin_comment'] ?? '');
         $destination = trim($_POST['roll_destination'] ?? '');
         
         // Add roll_destination column if not exists
         $conn->query("ALTER TABLE qc_test_orders ADD COLUMN IF NOT EXISTS roll_destination VARCHAR(50) AFTER status");
+        
+        // Check if this is a bulk action (multiple report numbers)
+        if (isset($_POST['admin_report_numbers']) && !empty($_POST['admin_report_numbers'])) {
+            // Bulk action - process multiple reports
+            $report_numbers_str = trim($_POST['admin_report_numbers']);
+            $report_numbers = array_filter(array_map('trim', explode(',', $report_numbers_str)));
+            
+            if (empty($report_numbers)) {
+                throw new Exception("No report numbers provided");
+            }
+            
+            $status = ($action === 'approved') ? 'approved' : 'rejected_by_approver';
+            $approved_by = $_SESSION['full_name'] ?? $_SESSION['username'];
+            $approved_at = date('Y-m-d H:i:s');
+            
+            $success_count = 0;
+            $failed_reports = [];
+            
+            foreach ($report_numbers as $report_number) {
+                if ($action === 'approved' && !empty($destination)) {
+                    $stmt = $conn->prepare("UPDATE qc_test_orders SET status = ?, approved_by = ?, approved_at = ?, admin_remarks = ?, roll_destination = ?, updated_at = NOW() WHERE report_number = ?");
+                    $stmt->bind_param("ssssss", $status, $approved_by, $approved_at, $comment, $destination, $report_number);
+                } else {
+                    $stmt = $conn->prepare("UPDATE qc_test_orders SET status = ?, approved_by = ?, approved_at = ?, admin_remarks = ?, updated_at = NOW() WHERE report_number = ?");
+                    $stmt->bind_param("sssss", $status, $approved_by, $approved_at, $comment, $report_number);
+                }
+                
+                if ($stmt->execute()) {
+                    $success_count++;
+                } else {
+                    $failed_reports[] = $report_number . ' (' . $stmt->error . ')';
+                }
+                $stmt->close();
+            }
+            
+            if ($success_count > 0) {
+                $message = "$success_count report(s) have been " . ($action === 'approved' ? 'approved' : 'rejected') . " successfully!";
+                if (!empty($failed_reports)) {
+                    $message .= " Failed: " . implode(', ', $failed_reports);
+                }
+                header("Location: " . $_SERVER['PHP_SELF'] . "?msg=" . urlencode($message));
+                exit();
+            } else {
+                throw new Exception("Failed to update all reports: " . implode(', ', $failed_reports));
+            }
+        } else {
+            // Single report action (backward compatibility)
+            $report_number = trim($_POST['admin_report_number'] ?? '');
+            if (empty($report_number)) {
+                throw new Exception("No report number provided");
+            }
         
         $status = ($action === 'approved') ? 'approved' : 'rejected_by_approver';
         $approved_by = $_SESSION['full_name'] ?? $_SESSION['username'];
@@ -1422,13 +1946,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action']) && $i
             $stmt->close();
             $dest_text = ($destination === 'fg_production') ? 'FG' : (($destination === 'bag_production') ? 'Bag Production' : '');
             $message = "Report $report_number has been " . ($status === 'approved' ? "approved for $dest_text" : 'rejected') . " successfully!";
-            // Redirect to refresh the page and update the pending list
             header("Location: " . $_SERVER['PHP_SELF'] . "?msg=" . urlencode($message));
             exit();
         } else {
             $error_msg = $stmt->error;
             $stmt->close();
             throw new Exception("Failed to update report: " . $error_msg);
+            }
         }
     } catch (Exception $e) {
         $error = $e->getMessage();
@@ -1665,6 +2189,332 @@ function generateExternalReference() {
   .alert { padding:10px; border-radius:6px; margin-bottom:10px; }
   .alert-success { background:#d4edda; color:#155724; border:1px solid #c3e6cb; }
   .alert-error { background:#f8d7da; color:#721c24; border:1px solid #f5c6cb; }
+  
+  /* Modern Toast Notification System */
+  .toast-container {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    z-index: 10000;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    pointer-events: none;
+  }
+  
+  .toast {
+    min-width: 320px;
+    max-width: 450px;
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+    padding: 16px 20px;
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    pointer-events: auto;
+    animation: slideInRight 0.3s ease-out;
+    border-left: 4px solid;
+    transition: all 0.3s ease;
+  }
+  
+  .toast.error {
+    border-left-color: #dc3545;
+    background: #fff5f5;
+  }
+  
+  .toast.warning {
+    border-left-color: #ff9800;
+    background: #fff8f0;
+  }
+  
+  .toast.success {
+    border-left-color: #28a745;
+    background: #f0fff4;
+  }
+  
+  .toast.info {
+    border-left-color: #17a2b8;
+    background: #f0f9ff;
+  }
+  
+  .toast-icon {
+    font-size: 20px;
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+  
+  .toast.error .toast-icon { color: #dc3545; }
+  .toast.warning .toast-icon { color: #ff9800; }
+  .toast.success .toast-icon { color: #28a745; }
+  .toast.info .toast-icon { color: #17a2b8; }
+  
+  .toast-content {
+    flex: 1;
+  }
+  
+  .toast-title {
+    font-weight: 600;
+    font-size: 15px;
+    margin-bottom: 4px;
+    color: #2c3e50;
+  }
+  
+  .toast-message {
+    font-size: 13px;
+    color: #6c757d;
+    line-height: 1.5;
+  }
+  
+  .toast-close {
+    background: none;
+    border: none;
+    font-size: 18px;
+    color: #adb5bd;
+    cursor: pointer;
+    padding: 0;
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    transition: all 0.2s;
+    flex-shrink: 0;
+  }
+  
+  .toast-close:hover {
+    background: rgba(0, 0, 0, 0.05);
+    color: #495057;
+  }
+  
+  @keyframes slideInRight {
+    from {
+      transform: translateX(100%);
+      opacity: 0;
+    }
+    to {
+      transform: translateX(0);
+      opacity: 1;
+    }
+  }
+  
+  @keyframes slideOutRight {
+    from {
+      transform: translateX(0);
+      opacity: 1;
+    }
+    to {
+      transform: translateX(100%);
+      opacity: 0;
+    }
+  }
+  
+  .toast.hiding {
+    animation: slideOutRight 0.3s ease-out forwards;
+  }
+  
+  /* Modern Inline Validation */
+  .validation-message {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    padding: 10px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    animation: fadeIn 0.3s ease;
+  }
+  
+  .validation-message.error {
+    background: #fff5f5;
+    color: #dc3545;
+    border: 1px solid #fecaca;
+  }
+  
+  .validation-message.warning {
+    background: #fff8f0;
+    color: #ff9800;
+    border: 1px solid #ffe0b2;
+  }
+  
+  .validation-message.info {
+    background: #f0f9ff;
+    color: #17a2b8;
+    border: 1px solid #b3e5fc;
+  }
+  
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(-5px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  
+  /* Enhanced Test Checkbox Styling for Already Submitted */
+  .test-checkbox[data-already-submitted="true"] {
+    position: relative;
+    cursor: not-allowed !important;
+  }
+  
+  /* Modern Badge for Already Submitted Tests */
+  .already-submitted-badge {
+    display: inline-flex !important;
+    align-items: center;
+    gap: 4px;
+    background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%);
+    color: #991b1b;
+    padding: 3px 8px;
+    border-radius: 10px;
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    margin-left: 0;
+    border: 1px solid #fca5a5;
+    box-shadow: 0 2px 4px rgba(220, 53, 69, 0.1);
+    white-space: nowrap;
+    flex-shrink: 0;
+    line-height: 1.2;
+  }
+  
+  .already-submitted-badge i {
+    font-size: 11px;
+  }
+  
+  /* Enhanced Label Styling for Disabled Tests */
+  label:has(.test-checkbox[data-already-submitted="true"]),
+  label.disabled-test-label {
+    background: linear-gradient(135deg, #f9fafb 0%, #f3f4f6 100%) !important;
+    border: 2px solid #e5e7eb !important;
+    border-left: 4px solid #dc3545 !important;
+    position: relative;
+    opacity: 0.85;
+    transition: all 0.3s ease;
+    display: flex !important;
+    align-items: center !important;
+    flex-wrap: nowrap !important;
+    gap: 8px !important;
+    width: 100% !important;
+    margin-bottom: 5px !important;
+  }
+  
+  label:has(.test-checkbox[data-already-submitted="true"]):hover,
+  label.disabled-test-label:hover {
+    background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%) !important;
+    border-color: #fca5a5 !important;
+    transform: translateX(-2px);
+    box-shadow: 0 4px 8px rgba(220, 53, 69, 0.15);
+  }
+  
+  /* Checkbox Styling for Disabled State */
+  .test-checkbox[data-already-submitted="true"] {
+    appearance: none;
+    width: 20px;
+    height: 20px;
+    border: 2px solid #dc3545;
+    border-radius: 4px;
+    background: #fee2e2;
+    position: relative;
+    cursor: not-allowed;
+    opacity: 0.7;
+  }
+  
+  .test-checkbox[data-already-submitted="true"]::before {
+    content: '✓';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: #dc3545;
+    font-size: 14px;
+    font-weight: bold;
+    line-height: 1;
+  }
+  
+  /* Method Text Styling for Disabled Tests */
+  label:has(.test-checkbox[data-already-submitted="true"]) span,
+  label.disabled-test-label span:first-of-type {
+    color: #6b7280 !important;
+    text-decoration: line-through;
+    text-decoration-color: #dc3545;
+    text-decoration-thickness: 2px;
+    position: relative;
+  }
+  
+  /* Tooltip for More Information */
+  .test-info-tooltip {
+    position: relative;
+    display: inline-block !important;
+    margin-left: 0;
+    flex-shrink: 0;
+  }
+  
+  .test-info-tooltip .tooltip-icon {
+    color: #9ca3af;
+    font-size: 12px;
+    cursor: help;
+    transition: color 0.2s;
+  }
+  
+  .test-info-tooltip:hover .tooltip-icon {
+    color: #dc3545;
+  }
+  
+  .test-info-tooltip .tooltip-content {
+    visibility: hidden;
+    position: absolute;
+    bottom: 125%;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #1f2937;
+    color: #fff;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 11px;
+    white-space: nowrap;
+    z-index: 1000;
+    opacity: 0;
+    transition: opacity 0.3s, visibility 0.3s;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  }
+  
+  .test-info-tooltip .tooltip-content::after {
+    content: '';
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    border: 5px solid transparent;
+    border-top-color: #1f2937;
+  }
+  
+  .test-info-tooltip:hover .tooltip-content {
+    visibility: visible;
+    opacity: 1;
+  }
+  
+  /* Pulse animation for blocked items */
+  @keyframes pulse {
+    0%, 100% { opacity: 0.85; }
+    50% { opacity: 0.6; }
+  }
+  
+  label:has(.test-checkbox[data-already-submitted="true"]):hover {
+    animation: pulse 1.5s infinite;
+  }
+  
+  /* Modern Card-like Appearance */
+  .test-item:has(.test-checkbox[data-already-submitted="true"]),
+  .test-item.has-disabled-test {
+    background: #fef2f2;
+    border-left: 4px solid #dc3545;
+  }
+  
+  /* Shake animation for form validation errors */
+  @keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    10%, 30%, 50%, 70%, 90% { transform: translateX(-5px); }
+    20%, 40%, 60%, 80% { transform: translateX(5px); }
+  }
   .form-row { 
     display:flex; 
     flex-wrap:wrap;
@@ -1745,6 +2595,9 @@ function generateExternalReference() {
     </style>
 </head>
 <body>
+<!-- Modern Toast Notification Container -->
+<div class="toast-container" id="toastContainer"></div>
+
 <div class="container">
   
   <?php if (!$is_checker || $is_admin): ?>
@@ -1783,7 +2636,7 @@ function generateExternalReference() {
     <!-- Back Button -->
     <div style="margin-bottom:10px;">
       <a href="../index.php" style="display:inline-block; padding:10px 20px; background:#6c757d; color:#fff; text-decoration:none; border-radius:6px; font-size:14px; transition:background 0.3s;">
-        <i class="fas fa-arrow-left"></i> ← Back to Dashboard
+        <i class="fas fa-arrow-left"></i> Back to Dashboard
       </a>
     </div>
     
@@ -1795,16 +2648,217 @@ function generateExternalReference() {
       </div>
       
       <?php 
-        // Group reports by reference
+        // Group reports by reference (handle bulk references)
         $grouped_checker_reports = [];
-        foreach ($pending_for_checker as $report) {
-          $reference = $report['sample_reference_id'] ?: 'No Reference';
+        $bulk_reference_groups = []; // Track bulk reference groups
+        $processed_reports = []; // Track which reports have been processed
+        
+        // First pass: Process reports with explicit bulk reference metadata
+        foreach ($pending_for_checker as $idx => $report) {
+          $test_data = json_decode($report['test_data'] ?? '{}', true);
+          
+          // Check if this is a bulk reference submission
+          if (isset($test_data['is_bulk_reference']) && $test_data['is_bulk_reference'] && 
+              isset($test_data['bulk_from_reference']) && isset($test_data['bulk_to_reference'])) {
+            $from_ref = $test_data['bulk_from_reference'];
+            $to_ref = $test_data['bulk_to_reference'];
+            $bulk_count = $test_data['bulk_reference_count'] ?? 0;
+            $bulk_key = $from_ref . '|' . $to_ref; // Use pipe separator for grouping key
+            
+            if (!isset($bulk_reference_groups[$bulk_key])) {
+              $bulk_reference_groups[$bulk_key] = [
+                'from' => $from_ref,
+                'to' => $to_ref,
+                'count' => $bulk_count,
+                'reports' => []
+              ];
+            }
+            $bulk_reference_groups[$bulk_key]['reports'][] = $report;
+            $processed_reports[] = $idx;
+          }
+        }
+        
+        // Second pass: Detect sequential references that might be from bulk submissions
+        // Look for references with the same base but sequential numbers (e.g., -1, -2, -3)
+        $remaining_reports = [];
+        foreach ($pending_for_checker as $idx => $report) {
+          if (!in_array($idx, $processed_reports)) {
+            $remaining_reports[] = $report;
+          }
+        }
+        
+        // Group remaining reports by base reference pattern
+        $base_reference_groups = [];
+        foreach ($remaining_reports as $report) {
+          $sample_ref = $report['sample_reference_id'] ?? '';
+          
+          // Extract base reference (everything before the last dash and number)
+          // Pattern: matches references ending with -N where N is a number
+          // Examples: "4.0L226JAN05-R01-H0.1-1" -> base: "4.0L226JAN05-R01-H0.1", num: 1
+          if (preg_match('/^(.+)-(\d+)$/', $sample_ref, $matches)) {
+            $base_ref = $matches[1];
+            $roll_num = (int)$matches[2];
+            
+            if (!isset($base_reference_groups[$base_ref])) {
+              $base_reference_groups[$base_ref] = [
+                'base' => $base_ref,
+                'references' => [],
+                'reports' => []
+              ];
+            }
+            $base_reference_groups[$base_ref]['references'][$roll_num] = $sample_ref;
+            $base_reference_groups[$base_ref]['reports'][] = $report;
+          } else {
+            // No pattern match, treat as single reference
+            $reference = $sample_ref ?: 'No Reference';
           if (!isset($grouped_checker_reports[$reference])) {
             $grouped_checker_reports[$reference] = [];
           }
           $grouped_checker_reports[$reference][] = $report;
         }
+        }
+        
+        // Check if base reference groups have sequential references (likely bulk)
+        foreach ($base_reference_groups as $base_ref => $group) {
+          $refs = $group['references'];
+          ksort($refs); // Sort by roll number
+          $roll_nums = array_keys($refs);
+          
+          // If we have 2+ sequential references, treat as bulk
+          if (count($roll_nums) >= 2) {
+            $min_roll = min($roll_nums);
+            $max_roll = max($roll_nums);
+            $from_ref = $base_ref . '-' . $min_roll;
+            $to_ref = $base_ref . '-' . $max_roll;
+            $bulk_key = $from_ref . '|' . $to_ref;
+            
+            // Check if this bulk group already exists (from explicit metadata)
+            if (!isset($bulk_reference_groups[$bulk_key])) {
+              $bulk_reference_groups[$bulk_key] = [
+                'from' => $from_ref,
+                'to' => $to_ref,
+                'count' => count($refs),
+                'reports' => $group['reports']
+              ];
+            } else {
+              // Merge reports if group already exists
+              $bulk_reference_groups[$bulk_key]['reports'] = array_merge(
+                $bulk_reference_groups[$bulk_key]['reports'],
+                $group['reports']
+              );
+              // Update count if needed
+              if (count($refs) > $bulk_reference_groups[$bulk_key]['count']) {
+                $bulk_reference_groups[$bulk_key]['count'] = count($refs);
+              }
+            }
+          } else {
+            // Single reference, add to regular grouping
+            $reference = reset($refs); // Get the only reference
+            if (!isset($grouped_checker_reports[$reference])) {
+              $grouped_checker_reports[$reference] = [];
+            }
+            $grouped_checker_reports[$reference] = array_merge(
+              $grouped_checker_reports[$reference],
+              $group['reports']
+            );
+          }
+        }
       ?>
+      
+      <?php 
+        // Display bulk reference groups first
+        foreach ($bulk_reference_groups as $bulk_key => $bulk_group): 
+          // Group reports by test name within this bulk reference group
+          $test_groups = [];
+          foreach ($bulk_group['reports'] as $report) {
+            $test_name = $report['test_name'] ?? 'Unknown Test';
+            $test_key = $test_name . '|' . ($report['chosen_method'] ?? '');
+            if (!isset($test_groups[$test_key])) {
+              $test_groups[$test_key] = [
+                'test_name' => $test_name,
+                'method' => $report['chosen_method'] ?? '',
+                'reports' => []
+              ];
+            }
+            $test_groups[$test_key]['reports'][] = $report;
+          }
+      ?>
+      <div style="margin-bottom: 30px; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden;">
+        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px 20px; font-weight: 600; font-size: 16px;">
+          <i class="fas fa-tag"></i> Reference Range: <?php echo htmlspecialchars($bulk_group['from']); ?> to <?php echo htmlspecialchars($bulk_group['to']); ?>
+          <span style="float: right; font-size: 14px; opacity: 0.9;"><?php echo count($bulk_group['reports']); ?> report(s) | <?php echo $bulk_group['count']; ?> reference(s)</span>
+        </div>
+        <div style="overflow-x:auto;">
+          <table style="width:100%; border-collapse:collapse; min-width:900px;">
+            <thead>
+              <tr style="background:#f8f9fa; border-bottom:2px solid #dee2e6;">
+                <th style="padding:12px 15px; text-align:left; font-weight:600; color:#495057; font-size:14px;">Test Name</th>
+                <th style="padding:12px 15px; text-align:left; font-weight:600; color:#495057; font-size:14px;">Reference Range</th>
+                <th style="padding:12px 15px; text-align:left; font-weight:600; color:#495057; font-size:14px;">Customer Ref</th>
+                <th style="padding:12px 15px; text-align:left; font-weight:600; color:#495057; font-size:14px;">Tested By</th>
+                <th style="padding:12px 15px; text-align:left; font-weight:600; color:#495057; font-size:14px;">Submitted At</th>
+                <th style="padding:12px 15px; text-align:center; font-weight:600; color:#495057; font-size:14px;">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              <?php foreach ($test_groups as $test_key => $test_group): 
+                $first_report = $test_group['reports'][0];
+                $test_data = json_decode($first_report['test_data'], true);
+                $customer_ref = $test_data['customer_reference'] ?? $test_data['product_reference'] ?? 'N/A';
+                $report_numbers = array_column($test_group['reports'], 'report_number');
+                $report_numbers_str = implode(',', $report_numbers);
+                $report_count = count($test_group['reports']);
+                $earliest_date = min(array_map(function($r) { return strtotime($r['updated_at']); }, $test_group['reports']));
+                $latest_date = max(array_map(function($r) { return strtotime($r['updated_at']); }, $test_group['reports']));
+              ?>
+              <tr style="border-bottom:1px solid #dee2e6; transition:background 0.2s;" onmouseover="this.style.background='#f8f9fa'" onmouseout="this.style.background='#fff'">
+                <td style="padding:12px 15px; font-weight:500; color:#333;">
+                  <?php echo htmlspecialchars($test_group['test_name']); ?>
+                  <?php if (!empty($test_group['method'])): ?>
+                    <br><span style="font-size:12px; color:#6c757d;">Method: <?php echo htmlspecialchars($test_group['method']); ?></span>
+                  <?php endif; ?>
+                  <br><span style="font-size:11px; color:#999;"><?php echo $report_count; ?> report(s)</span>
+                </td>
+                <td style="padding:12px 15px; color:#495057; font-size:14px;">
+                  <?php echo htmlspecialchars($bulk_group['from']); ?> to <?php echo htmlspecialchars($bulk_group['to']); ?>
+                  <br><span style="font-size:12px; color:#6c757d;">(<?php echo $bulk_group['count']; ?> references)</span>
+                </td>
+                <td style="padding:12px 15px; color:#495057; font-size:14px;">
+                  <?php echo htmlspecialchars($customer_ref); ?>
+                </td>
+                <td style="padding:12px 15px; color:#495057; font-size:14px;">
+                  <?php echo htmlspecialchars($first_report['inspector_name'] ?? 'N/A'); ?>
+                </td>
+                <td style="padding:12px 15px; color:#495057; font-size:14px;">
+                  <?php 
+                    if ($earliest_date == $latest_date) {
+                      echo date('M d, Y - g:i A', $earliest_date);
+                    } else {
+                      echo date('M d, Y - g:i A', $earliest_date) . '<br><span style="font-size:11px; color:#999;">to ' . date('M d, Y - g:i A', $latest_date) . '</span>';
+                    }
+                  ?>
+                </td>
+                <td style="padding:12px 15px; text-align:center; white-space:nowrap;">
+                  <button type="button" onclick="viewBulkReports(['<?php echo implode("','", $report_numbers); ?>'])" style="display:inline-block; padding:8px 16px; background:#17a2b8; color:#fff; text-decoration:none; border:none; border-radius:4px; font-size:13px; font-weight:500; margin-right:5px; transition:background 0.3s; cursor:pointer;" onmouseover="this.style.background='#138496'" onmouseout="this.style.background='#17a2b8'">
+                    <i class="fas fa-eye"></i> View (<?php echo $report_count; ?>)
+                  </button>
+                  <form method="POST" style="display:inline; margin-right:5px;" onsubmit="return confirmBulkApproval(<?php echo $report_count; ?>)">
+                    <input type="hidden" name="checker_report_numbers" value="<?php echo htmlspecialchars($report_numbers_str); ?>">
+                    <button type="submit" name="checker_action" value="approved" style="padding:8px 16px; background:#28a745; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:13px; font-weight:500; transition:background 0.3s;" onmouseover="this.style.background='#218838'" onmouseout="this.style.background='#28a745'">
+                      <i class="fas fa-check"></i> Approve All
+                    </button>
+                  </form>
+                  <button type="button" onclick="openBulkCheckerRejectModal('<?php echo htmlspecialchars($report_numbers_str); ?>', <?php echo $report_count; ?>)" style="padding:8px 16px; background:#dc3545; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:13px; font-weight:500; transition:background 0.3s;" onmouseover="this.style.background='#c82333'" onmouseout="this.style.background='#dc3545'">
+                      <i class="fas fa-times"></i> Reject All
+                    </button>
+                </td>
+              </tr>
+              <?php endforeach; ?>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <?php endforeach; ?>
       
       <?php foreach ($grouped_checker_reports as $reference => $reports): ?>
       <div style="margin-bottom: 30px; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden;">
@@ -1881,7 +2935,7 @@ function generateExternalReference() {
     <!-- Back Button -->
     <div style="margin-bottom:20px;">
       <a href="../index.php" style="display:inline-block; padding:10px 20px; background:#6c757d; color:#fff; text-decoration:none; border-radius:6px; font-size:14px; transition:background 0.3s;">
-        <i class="fas fa-arrow-left"></i> ← Back to Dashboard
+        <i class="fas fa-arrow-left"></i> Back to Dashboard
       </a>
     </div>
     
@@ -1893,16 +2947,214 @@ function generateExternalReference() {
       </div>
       
       <?php 
-        // Group reports by reference
+        // Group reports by reference (handle bulk references)
         $grouped_admin_reports = [];
-        foreach ($pending_for_admin as $report) {
-          $reference = $report['sample_reference_id'] ?: 'No Reference';
+        $bulk_admin_reference_groups = []; // Track bulk reference groups
+        $processed_admin_reports = []; // Track which reports have been processed
+        
+        // First pass: Process reports with explicit bulk reference metadata
+        foreach ($pending_for_admin as $idx => $report) {
+          $test_data = json_decode($report['test_data'] ?? '{}', true);
+          
+          // Check if this is a bulk reference submission
+          if (isset($test_data['is_bulk_reference']) && $test_data['is_bulk_reference'] && 
+              isset($test_data['bulk_from_reference']) && isset($test_data['bulk_to_reference'])) {
+            $from_ref = $test_data['bulk_from_reference'];
+            $to_ref = $test_data['bulk_to_reference'];
+            $bulk_count = $test_data['bulk_reference_count'] ?? 0;
+            $bulk_key = $from_ref . '|' . $to_ref; // Use pipe separator for grouping key
+            
+            if (!isset($bulk_admin_reference_groups[$bulk_key])) {
+              $bulk_admin_reference_groups[$bulk_key] = [
+                'from' => $from_ref,
+                'to' => $to_ref,
+                'count' => $bulk_count,
+                'reports' => []
+              ];
+            }
+            $bulk_admin_reference_groups[$bulk_key]['reports'][] = $report;
+            $processed_admin_reports[] = $idx;
+          }
+        }
+        
+        // Second pass: Detect sequential references that might be from bulk submissions
+        $remaining_admin_reports = [];
+        foreach ($pending_for_admin as $idx => $report) {
+          if (!in_array($idx, $processed_admin_reports)) {
+            $remaining_admin_reports[] = $report;
+          }
+        }
+        
+        // Group remaining reports by base reference pattern
+        $base_admin_reference_groups = [];
+        foreach ($remaining_admin_reports as $report) {
+          $sample_ref = $report['sample_reference_id'] ?? '';
+          
+          // Extract base reference (everything before the last dash and number)
+          if (preg_match('/^(.+)-(\d+)$/', $sample_ref, $matches)) {
+            $base_ref = $matches[1];
+            $roll_num = (int)$matches[2];
+            
+            if (!isset($base_admin_reference_groups[$base_ref])) {
+              $base_admin_reference_groups[$base_ref] = [
+                'base' => $base_ref,
+                'references' => [],
+                'reports' => []
+              ];
+            }
+            $base_admin_reference_groups[$base_ref]['references'][$roll_num] = $sample_ref;
+            $base_admin_reference_groups[$base_ref]['reports'][] = $report;
+          } else {
+            // No pattern match, treat as single reference
+            $reference = $sample_ref ?: 'No Reference';
           if (!isset($grouped_admin_reports[$reference])) {
             $grouped_admin_reports[$reference] = [];
           }
           $grouped_admin_reports[$reference][] = $report;
         }
+        }
+        
+        // Check if base reference groups have sequential references (likely bulk)
+        foreach ($base_admin_reference_groups as $base_ref => $group) {
+          $refs = $group['references'];
+          ksort($refs); // Sort by roll number
+          $roll_nums = array_keys($refs);
+          
+          // If we have 2+ sequential references, treat as bulk
+          if (count($roll_nums) >= 2) {
+            $min_roll = min($roll_nums);
+            $max_roll = max($roll_nums);
+            $from_ref = $base_ref . '-' . $min_roll;
+            $to_ref = $base_ref . '-' . $max_roll;
+            $bulk_key = $from_ref . '|' . $to_ref;
+            
+            // Check if this bulk group already exists (from explicit metadata)
+            if (!isset($bulk_admin_reference_groups[$bulk_key])) {
+              $bulk_admin_reference_groups[$bulk_key] = [
+                'from' => $from_ref,
+                'to' => $to_ref,
+                'count' => count($refs),
+                'reports' => $group['reports']
+              ];
+            } else {
+              // Merge reports if group already exists
+              $bulk_admin_reference_groups[$bulk_key]['reports'] = array_merge(
+                $bulk_admin_reference_groups[$bulk_key]['reports'],
+                $group['reports']
+              );
+              // Update count if needed
+              if (count($refs) > $bulk_admin_reference_groups[$bulk_key]['count']) {
+                $bulk_admin_reference_groups[$bulk_key]['count'] = count($refs);
+              }
+            }
+          } else {
+            // Single reference, add to regular grouping
+            $reference = reset($refs); // Get the only reference
+            if (!isset($grouped_admin_reports[$reference])) {
+              $grouped_admin_reports[$reference] = [];
+            }
+            $grouped_admin_reports[$reference] = array_merge(
+              $grouped_admin_reports[$reference],
+              $group['reports']
+            );
+          }
+        }
       ?>
+      
+      <?php 
+        // Display bulk reference groups first
+        foreach ($bulk_admin_reference_groups as $bulk_key => $bulk_group): 
+          // Group reports by test name within this bulk reference group
+          $admin_test_groups = [];
+          foreach ($bulk_group['reports'] as $report) {
+            $test_name = $report['test_name'] ?? 'Unknown Test';
+            $test_key = $test_name . '|' . ($report['chosen_method'] ?? '');
+            if (!isset($admin_test_groups[$test_key])) {
+              $admin_test_groups[$test_key] = [
+                'test_name' => $test_name,
+                'method' => $report['chosen_method'] ?? '',
+                'reports' => []
+              ];
+            }
+            $admin_test_groups[$test_key]['reports'][] = $report;
+          }
+      ?>
+      <div style="margin-bottom: 30px; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden;">
+        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px 20px; font-weight: 600; font-size: 16px;">
+          <i class="fas fa-tag"></i> Reference Range: <?php echo htmlspecialchars($bulk_group['from']); ?> to <?php echo htmlspecialchars($bulk_group['to']); ?>
+          <span style="float: right; font-size: 14px; opacity: 0.9;"><?php echo count($bulk_group['reports']); ?> report(s) | <?php echo $bulk_group['count']; ?> reference(s)</span>
+        </div>
+        <div style="overflow-x:auto;">
+          <table style="width:100%; border-collapse:collapse; min-width:900px;">
+            <thead>
+              <tr style="background:#f8f9fa; border-bottom:2px solid #dee2e6;">
+                <th style="padding:12px 15px; text-align:left; font-weight:600; color:#495057; font-size:14px;">Test Name</th>
+                <th style="padding:12px 15px; text-align:left; font-weight:600; color:#495057; font-size:14px;">Reference Range</th>
+                <th style="padding:12px 15px; text-align:left; font-weight:600; color:#495057; font-size:14px;">Customer Ref</th>
+                <th style="padding:12px 15px; text-align:left; font-weight:600; color:#495057; font-size:14px;">Tested By</th>
+                <th style="padding:12px 15px; text-align:left; font-weight:600; color:#495057; font-size:14px;">Submitted At</th>
+                <th style="padding:12px 15px; text-align:center; font-weight:600; color:#495057; font-size:14px;">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              <?php foreach ($admin_test_groups as $test_key => $test_group): 
+                $first_report = $test_group['reports'][0];
+                $test_data = json_decode($first_report['test_data'], true);
+                $customer_ref = $test_data['customer_reference'] ?? $test_data['product_reference'] ?? 'N/A';
+                $report_numbers = array_column($test_group['reports'], 'report_number');
+                $report_numbers_str = implode(',', $report_numbers);
+                $report_count = count($test_group['reports']);
+                $earliest_date = min(array_map(function($r) { return strtotime($r['updated_at']); }, $test_group['reports']));
+                $latest_date = max(array_map(function($r) { return strtotime($r['updated_at']); }, $test_group['reports']));
+              ?>
+              <tr style="border-bottom:1px solid #dee2e6; transition:background 0.2s;" onmouseover="this.style.background='#f8f9fa'" onmouseout="this.style.background='#fff'">
+                <td style="padding:12px 15px; font-weight:500; color:#333;">
+                  <?php echo htmlspecialchars($test_group['test_name']); ?>
+                  <?php if (!empty($test_group['method'])): ?>
+                    <br><span style="font-size:12px; color:#6c757d;">Method: <?php echo htmlspecialchars($test_group['method']); ?></span>
+                  <?php endif; ?>
+                  <br><span style="font-size:11px; color:#999;"><?php echo $report_count; ?> report(s)</span>
+                </td>
+                <td style="padding:12px 15px; color:#495057; font-size:14px;">
+                  <?php echo htmlspecialchars($bulk_group['from']); ?> to <?php echo htmlspecialchars($bulk_group['to']); ?>
+                  <br><span style="font-size:12px; color:#6c757d;">(<?php echo $bulk_group['count']; ?> references)</span>
+                </td>
+                <td style="padding:12px 15px; color:#495057; font-size:14px;">
+                  <?php echo htmlspecialchars($customer_ref); ?>
+                </td>
+                <td style="padding:12px 15px; color:#495057; font-size:14px;">
+                  <?php echo htmlspecialchars($first_report['inspector_name'] ?? 'N/A'); ?>
+                </td>
+                <td style="padding:12px 15px; color:#495057; font-size:14px;">
+                  <?php 
+                    if ($earliest_date == $latest_date) {
+                      echo date('M d, Y - g:i A', $earliest_date);
+                    } else {
+                      echo date('M d, Y - g:i A', $earliest_date) . '<br><span style="font-size:11px; color:#999;">to ' . date('M d, Y - g:i A', $latest_date) . '</span>';
+                    }
+                  ?>
+                </td>
+                <td style="padding:12px 15px; text-align:center; white-space:nowrap;">
+                  <button type="button" onclick="viewBulkReports(['<?php echo implode("','", $report_numbers); ?>'])" style="display:inline-block; padding:8px 16px; background:#17a2b8; color:#fff; text-decoration:none; border:none; border-radius:4px; font-size:13px; font-weight:500; margin-right:5px; transition:background 0.3s; cursor:pointer;" onmouseover="this.style.background='#138496'" onmouseout="this.style.background='#17a2b8'">
+                    <i class="fas fa-eye"></i> View (<?php echo $report_count; ?>)
+                    </button>
+                  <form method="POST" style="display:inline; margin-right:5px;" onsubmit="return confirmBulkAdminApproval(<?php echo $report_count; ?>)">
+                    <input type="hidden" name="admin_report_numbers" value="<?php echo htmlspecialchars($report_numbers_str); ?>">
+                    <button type="submit" name="admin_action" value="approved" style="padding:8px 16px; background:#28a745; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:13px; font-weight:500; transition:background 0.3s;" onmouseover="this.style.background='#218838'" onmouseout="this.style.background='#28a745'">
+                      <i class="fas fa-check"></i> Approve All
+                    </button>
+                  </form>
+                  <button type="button" onclick="openBulkAdminRejectModal('<?php echo htmlspecialchars($report_numbers_str); ?>', <?php echo $report_count; ?>)" style="padding:8px 16px; background:#dc3545; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:13px; font-weight:500; transition:background 0.3s;" onmouseover="this.style.background='#c82333'" onmouseout="this.style.background='#dc3545'">
+                      <i class="fas fa-times"></i> Reject All
+                    </button>
+                </td>
+              </tr>
+              <?php endforeach; ?>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <?php endforeach; ?>
       
       <?php foreach ($grouped_admin_reports as $reference => $reports): ?>
       <div style="margin-bottom: 30px; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden;">
@@ -1972,94 +3224,6 @@ function generateExternalReference() {
   </div>
   <?php endif; ?>
 
-  <!-- Tester Rejected Reports Section -->
-  <?php if ($is_tester && !empty($rejected_reports) && !$edit_mode): ?>
-  <div style="margin-bottom:30px;">
-    <div style="background:#fff; padding:25px; border-radius:8px; box-shadow:0 2px 10px rgba(0,0,0,0.1); border-left:4px solid #dc3545;">
-      <div style="border-bottom:2px solid #dc3545; padding-bottom:15px; margin-bottom:20px;">
-        <h2 style="color:#333; margin:0; font-size:24px; font-weight:600;">Your Rejected QC Test Orders</h2>
-        <p style="color:#666; margin:5px 0 0 0; font-size:14px;">Please review the rejection reasons and resubmit after making corrections (<?php echo count($rejected_reports); ?> rejected)</p>
-      </div>
-      
-      <?php 
-        // Group reports by reference
-        $grouped_rejected_reports = [];
-        foreach ($rejected_reports as $report) {
-          $reference = $report['sample_reference_id'] ?: 'No Reference';
-          if (!isset($grouped_rejected_reports[$reference])) {
-            $grouped_rejected_reports[$reference] = [];
-          }
-          $grouped_rejected_reports[$reference][] = $report;
-        }
-      ?>
-      
-      <?php foreach ($grouped_rejected_reports as $reference => $reports): ?>
-      <div style="margin-bottom: 30px; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden;">
-        <div style="background: linear-gradient(135deg, #dc3545 0%, #c82333 100%); color: white; padding: 15px 20px; font-weight: 600; font-size: 16px;">
-          <i class="fas fa-tag"></i> Reference: <?php echo htmlspecialchars($reference); ?>
-          <span style="float: right; font-size: 14px; opacity: 0.9;"><?php echo count($reports); ?> report(s)</span>
-        </div>
-        <div style="overflow-x:auto;">
-          <table style="width:100%; border-collapse:collapse; min-width:900px;">
-            <thead>
-              <tr style="background:#f8f9fa; border-bottom:2px solid #dee2e6;">
-                <th style="padding:12px 15px; text-align:left; font-weight:600; color:#495057; font-size:14px;">Report No</th>
-                <th style="padding:12px 15px; text-align:left; font-weight:600; color:#495057; font-size:14px;">Sample</th>
-                <th style="padding:12px 15px; text-align:left; font-weight:600; color:#495057; font-size:14px;">Status</th>
-                <th style="padding:12px 15px; text-align:left; font-weight:600; color:#495057; font-size:14px;">Rejected By</th>
-                <th style="padding:12px 15px; text-align:left; font-weight:600; color:#495057; font-size:14px;">Rejection Reason</th>
-                <th style="padding:12px 15px; text-align:left; font-weight:600; color:#495057; font-size:14px;">Rejected At</th>
-                <th style="padding:12px 15px; text-align:center; font-weight:600; color:#495057; font-size:14px;">Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              <?php foreach ($reports as $report): 
-                $test_data = json_decode($report['test_data'], true);
-                $sample_ref = $report['sample_reference_id'] ?? 'N/A';
-                $rejected_by = ($report['status'] === 'rejected_by_checker') ? $report['checked_by'] : $report['approved_by'];
-                $rejection_reason = ($report['status'] === 'rejected_by_checker') ? $report['checker_remarks'] : $report['admin_remarks'];
-              ?>
-              <tr style="border-bottom:1px solid #dee2e6; transition:background 0.2s;" onmouseover="this.style.background='#fff5f5'" onmouseout="this.style.background='#fff'">
-                <td style="padding:12px 15px; font-weight:500; color:#333;">
-                  <?php echo htmlspecialchars($report['report_number']); ?>
-                  <br>
-                  <span style="font-size:12px; color:#6c757d;"><?php echo htmlspecialchars($report['chosen_method'] ?? 'N/A'); ?></span>
-                </td>
-                <td style="padding:12px 15px; color:#495057; font-size:14px;">
-                  <?php echo htmlspecialchars($sample_ref); ?>
-                </td>
-                <td style="padding:12px 15px;">
-                  <span style="display:inline-block; background:#dc3545; color:#fff; padding:5px 10px; border-radius:4px; font-size:12px; font-weight:500;">
-                    <?php echo ($report['status'] === 'rejected_by_checker') ? 'Rejected by Checker' : 'Rejected by Admin'; ?>
-                  </span>
-                </td>
-                <td style="padding:12px 15px; color:#495057; font-size:14px;">
-                  <?php echo htmlspecialchars($rejected_by ?? 'N/A'); ?>
-                </td>
-                <td style="padding:12px 15px; color:#495057; font-size:13px; max-width:300px;">
-                  <div style="background:#fff3cd; padding:10px; border-radius:4px; border-left:3px solid #ffc107;">
-                    <?php echo nl2br(htmlspecialchars($rejection_reason ?? 'No reason provided')); ?>
-                  </div>
-                </td>
-                <td style="padding:12px 15px; color:#495057; font-size:14px;">
-                  <?php echo date('M d, Y - g:i A', strtotime($report['updated_at'])); ?>
-                </td>
-                <td style="padding:12px 15px; text-align:center;">
-                  <a href="qc_test_order.php?edit=<?php echo $report['id']; ?>" style="display:inline-block; padding:8px 16px; background:#ff9800; color:#fff; text-decoration:none; border-radius:4px; font-size:13px; font-weight:500; transition:background 0.3s;" onmouseover="this.style.background='#e68900'" onmouseout="this.style.background='#ff9800'">
-                    <i class="fas fa-edit"></i> Edit & Resubmit
-                  </a>
-                </td>
-              </tr>
-              <?php endforeach; ?>
-            </tbody>
-          </table>
-        </div>
-      </div>
-      <?php endforeach; ?>
-    </div>
-  </div>
-  <?php endif; ?>
-
   <?php if (!$is_checker || $is_admin): ?>
   <!-- Hide form from pure checkers, show only to testers and admin -->
   
@@ -2070,7 +3234,7 @@ function generateExternalReference() {
       </a>
                                 </div>
   
-                <form method="POST" action="" id="qc_test_form" onsubmit="return validateQCFormBeforeSubmit(event)">
+                <form method="POST" action="" id="qc_test_form" novalidate>
     
     <!-- Hidden edit ID for resubmission -->
     <?php if ($edit_mode && !$edit_external_forward): ?>
@@ -2252,24 +3416,86 @@ function generateExternalReference() {
             <input type="text" value="<?php echo htmlspecialchars($external_reference_display); ?>" readonly class="readonly" style="width:100%; padding:10px; border:2px solid #FF9800; border-radius:6px; background:#fffacd; font-weight:600; color:#F57C00;">
             <input type="hidden" id="external_reference" name="external_reference" value="<?php echo htmlspecialchars($external_reference_display); ?>">
           <?php else: ?>
-            <!-- Production Product Reference Dropdown -->
-            <select name="product_reference" id="product_reference" onchange="handleReferenceSelection(this.value)" style="display:<?php echo ($product_type_default === 'external') ? 'none' : 'block'; ?>;" <?php echo ($product_type_default === 'external' || $lock_general_fields) ? 'disabled' : ''; ?> <?php echo $lock_general_fields ? 'class="readonly"' : ''; ?>>
+            <?php 
+            // Disable reference fields only when editing rejected QC test orders (not external forwarded tests)
+            $disable_refs_in_edit = ($edit_mode && !$edit_external_forward && isset($existing_report) && in_array($existing_report['status'], ['rejected_by_checker', 'rejected_by_approver']));
+            ?>
+            <!-- Line Selection Buttons -->
+            <div id="line_selection_buttons" style="display:<?php echo ($product_type_default === 'external') ? 'none' : 'flex'; ?>; gap:10px; margin-bottom:10px;">
+              <button type="button" id="line1_btn" class="line-btn" onclick="filterByLine('L1')" style="padding:8px 16px; border:2px solid #3498db; border-radius:6px; background:#e3f2fd; color:#1565C0; font-weight:600; cursor:pointer;" <?php echo $disable_refs_in_edit ? 'disabled' : ''; ?>>
+                Line 1
+              </button>
+              <button type="button" id="line2_btn" class="line-btn" onclick="filterByLine('L2')" style="padding:8px 16px; border:2px solid #3498db; border-radius:6px; background:#e3f2fd; color:#1565C0; font-weight:600; cursor:pointer;" <?php echo $disable_refs_in_edit ? 'disabled' : ''; ?>>
+                Line 2
+              </button>
+              <button type="button" id="line_all_btn" class="line-btn active" onclick="filterByLine('all')" style="padding:8px 16px; border:2px solid #3498db; border-radius:6px; background:#2196F3; color:#ffffff; font-weight:600; cursor:pointer;" <?php echo $disable_refs_in_edit ? 'disabled' : ''; ?>>
+                All Lines
+              </button>
+            </div>
+            
+            <!-- From/To Reference Selection (shown when line is selected) -->
+            <div id="bulk_reference_selection" style="display:none; margin-bottom:10px; padding:10px; background:#f8f9fa; border:1px solid #ddd; border-radius:6px;">
+              <?php if ($disable_refs_in_edit && !empty($bulk_from_ref) && !empty($bulk_to_ref)): ?>
+                <!-- Display read-only reference range in edit mode -->
+                <div style="padding:10px; background:#fff3cd; border:2px solid #ffc107; border-radius:6px; margin-bottom:10px;">
+                  <div style="display:flex; align-items:center; gap:10px;">
+                    <i class="fas fa-info-circle" style="color:#856404; font-size:18px;"></i>
+                    <div>
+                      <strong style="color:#856404;">Original Reference Range (Cannot be changed):</strong>
+                      <div style="margin-top:5px; font-size:16px; color:#333;">
+                        <strong><?php echo htmlspecialchars($bulk_from_ref); ?></strong> to <strong><?php echo htmlspecialchars($bulk_to_ref); ?></strong>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              <?php endif; ?>
+              <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                <label style="font-weight:600; margin:0;">From Reference:</label>
+                <select id="from_reference" name="from_reference" style="min-width:250px; padding:5px; border:1px solid #ccc; border-radius:4px; <?php echo $disable_refs_in_edit ? 'background:#f5f5f5; cursor:not-allowed;' : ''; ?>" onchange="updateReferenceRange(); handleFromToReferenceChange();" <?php echo $disable_refs_in_edit ? 'disabled readonly' : ''; ?> required>
+                  <option value="">-- Select From Reference --</option>
+                </select>
+                <label style="font-weight:600; margin:0;">To Reference:</label>
+                <select id="to_reference" name="to_reference" style="min-width:250px; padding:5px; border:1px solid #ccc; border-radius:4px; <?php echo $disable_refs_in_edit ? 'background:#f5f5f5; cursor:not-allowed;' : ''; ?>" onchange="updateReferenceRange(); handleFromToReferenceChange();" <?php echo $disable_refs_in_edit ? 'disabled readonly' : ''; ?> required>
+                  <option value="">-- Select To Reference --</option>
+                </select>
+                <button type="button" onclick="applyBulkReferenceSelection()" style="padding:6px 12px; background:#3498db; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:600; <?php echo $disable_refs_in_edit ? 'opacity:0.5; cursor:not-allowed;' : ''; ?>" <?php echo $disable_refs_in_edit ? 'disabled' : ''; ?>>
+                  Apply
+                </button>
+                <?php if (!$disable_refs_in_edit): ?>
+                <button type="button" onclick="clearBulkReferenceSelection()" style="padding:6px 12px; background:#6c757d; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:600;">
+                  Clear
+                </button>
+                <?php endif; ?>
+              </div>
+              <!-- Hidden input to store the selected product_reference when line-based selection is used -->
+              <input type="hidden" id="line_based_product_reference" name="product_reference" value="">
+            </div>
+            
+            <!-- Production Product Reference Dropdown (shown when "All Lines" is selected) -->
+            <select name="product_reference" id="product_reference" onchange="handleReferenceSelection(this.value)" style="display:<?php echo ($product_type_default === 'external') ? 'none' : 'block'; ?>;" <?php echo ($product_type_default === 'external' || $lock_general_fields || $disable_refs_in_edit) ? 'disabled' : ''; ?> <?php echo ($lock_general_fields || $disable_refs_in_edit) ? 'class="readonly"' : ''; ?>>
               <option value="">-- Select Reference --</option>
               <?php foreach($bundleReferences as $bundle): ?>
-                <option value="<?php echo htmlspecialchars($bundle['reference']); ?>" data-is-bundle="true" data-base-ref="<?php echo htmlspecialchars($bundle['base_reference']); ?>" data-roll-count="<?php echo $bundle['roll_count']; ?>" <?php echo ($current_reference_selection === $bundle['reference']) ? 'selected' : ''; ?>>
+                <option value="<?php echo htmlspecialchars($bundle['reference']); ?>" data-is-bundle="true" data-base-ref="<?php echo htmlspecialchars($bundle['base_reference']); ?>" data-roll-count="<?php echo $bundle['roll_count']; ?>" data-line="<?php echo (strpos($bundle['reference'], 'L1') !== false) ? 'L1' : ((strpos($bundle['reference'], 'L2') !== false) ? 'L2' : ''); ?>" <?php echo ($current_reference_selection === $bundle['reference']) ? 'selected' : ''; ?>>
                   <?php echo htmlspecialchars($bundle['reference']); ?> (Bundle - <?php echo $bundle['roll_count']; ?> rolls)
                 </option>
               <?php endforeach; ?>
               <?php foreach($references as $ref): 
-                  if (!isset($ref['is_individual']) || !$ref['is_individual']): ?>
-                <option value="<?php echo htmlspecialchars($ref['reference']); ?>" data-is-bundle="false" <?php echo ($current_reference_selection === $ref['reference']) ? 'selected' : ''; ?>>
+                  if (!isset($ref['is_individual']) || !$ref['is_individual']): 
+                    $lineIndicator = '';
+                    if (strpos($ref['reference'], 'L1') !== false) {
+                        $lineIndicator = 'L1';
+                    } elseif (strpos($ref['reference'], 'L2') !== false) {
+                        $lineIndicator = 'L2';
+                    }
+                ?>
+                <option value="<?php echo htmlspecialchars($ref['reference']); ?>" data-is-bundle="false" data-line="<?php echo $lineIndicator; ?>" <?php echo ($current_reference_selection === $ref['reference']) ? 'selected' : ''; ?>>
                   <?php echo htmlspecialchars($ref['reference']); ?>
                 </option>
               <?php endif; endforeach; ?>
             </select>
             
             <!-- Individual Roll Selector (shown when bundle is selected) -->
-            <select name="individual_roll_reference" id="individual_roll_reference" onchange="handleIndividualRollSelection(this.value)" style="display:none; margin-top:10px; padding:10px; border:2px solid #3498db; border-radius:6px; background:#f8f9fa;" <?php echo $lock_general_fields ? 'disabled class="readonly"' : ''; ?>>
+            <select name="individual_roll_reference" id="individual_roll_reference" onchange="handleIndividualRollSelection(this.value)" style="display:none; margin-top:10px; padding:10px; border:2px solid #3498db; border-radius:6px; background:#f8f9fa;" <?php echo ($lock_general_fields || $disable_refs_in_edit) ? 'disabled class="readonly"' : ''; ?>>
               <option value="">-- Select Individual Roll for Testing --</option>
             </select>
             <div id="bundle_info" style="display:none; margin-top:8px; padding:10px; background:#e3f2fd; border-left:4px solid #2196F3; border-radius:4px; font-size:13px; color:#1565C0;">
@@ -2281,8 +3507,8 @@ function generateExternalReference() {
               <input type="text" name="external_reference" id="external_reference" 
                      placeholder="Enter external reference" 
                      value="<?php echo htmlspecialchars($external_reference_value); ?>"
-                     <?php echo $lock_general_fields ? 'readonly class="readonly"' : ''; ?>
-                     <?php echo (!$lock_general_fields && $product_type_default === 'external') ? 'required' : ''; ?>
+                     <?php echo ($lock_general_fields || $disable_refs_in_edit) ? 'readonly class="readonly" disabled' : 'onchange="checkAndDisableSubmittedTests(this.value)" onblur="checkAndDisableSubmittedTests(this.value)"'; ?>
+                     <?php echo (!$lock_general_fields && !$disable_refs_in_edit && $product_type_default === 'external') ? 'required' : ''; ?>
                      style="background:#fffacd; border:2px solid #FF9800; font-weight:600; color:#F57C00; width:100%;">
             </div>
           <?php endif; ?>
@@ -2331,7 +3557,7 @@ function generateExternalReference() {
         
         <div class="form-group">
           <label>Reference No: <span style="color: red;">*</span></label>
-          <select name="fiber_reference_no" id="fiber_reference_no" onchange="loadFiberReferenceData(this.value)">
+          <select name="fiber_reference_no" id="fiber_reference_no" onchange="loadFiberReferenceData(this.value)" <?php echo $disable_refs_in_edit ? 'disabled readonly' : ''; ?>>
             <option value="">-- Select Reference --</option>
             <?php foreach($references as $ref): ?>
               <option value="<?php echo htmlspecialchars($ref['reference']); ?>">
@@ -2378,7 +3604,7 @@ function generateExternalReference() {
       <div class="form-row">
         <div class="form-group">
           <label>Reference: <span style="color: red;">*</span></label>
-          <select name="yarn_reference_no" id="yarn_reference_no" onchange="loadYarnReferenceData(this.value)">
+          <select name="yarn_reference_no" id="yarn_reference_no" onchange="loadYarnReferenceData(this.value)" <?php echo $disable_refs_in_edit ? 'disabled readonly' : ''; ?>>
             <option value="">-- Select Reference --</option>
             <?php foreach($references as $ref): ?>
               <option value="<?php echo htmlspecialchars($ref['reference']); ?>">
@@ -2437,32 +3663,159 @@ function generateExternalReference() {
                             </div>
                                         
       <div class="test-section">
-        <?php foreach ($display_test_methods as $test_name => $methods): ?>
-          <div class="test-item" style="margin-bottom: 15px; padding: 15px; border: 1px solid #ddd; border-radius: 6px;">
-            <div style="display: flex; align-items: center; gap: 20px; flex-wrap: wrap;">
-              <div style="min-width: 250px; font-weight: bold;">
+        <?php
+        // Get already submitted tests for the current reference to disable checkboxes
+        $submitted_tests = [];
+        if (!$edit_mode) {
+            // Determine the reference being used
+            $current_reference = '';
+            if (isset($_POST['external_reference']) && !empty($_POST['external_reference'])) {
+                $current_reference = $_POST['external_reference'];
+            } elseif (isset($_POST['product_reference']) && !empty($_POST['product_reference'])) {
+                $current_reference = $_POST['product_reference'];
+            } elseif (isset($_POST['from_reference']) && !empty($_POST['from_reference'])) {
+                // For bulk selection, check the from_reference
+                $current_reference = $_POST['from_reference'];
+            } elseif (isset($_POST['individual_roll_reference']) && !empty($_POST['individual_roll_reference'])) {
+                $current_reference = $_POST['individual_roll_reference'];
+            }
+            
+            // If we have a reference, query for already submitted tests
+            if (!empty($current_reference)) {
+                $stmt_submitted = $conn->prepare("
+                    SELECT ts.test_name, ts.standard_code
+                    FROM qc_test_orders qto
+                    INNER JOIN test_standards ts ON qto.test_standard_id = ts.id
+                    WHERE qto.sample_reference_id = ?
+                ");
+                if ($stmt_submitted) {
+                    $stmt_submitted->bind_param("s", $current_reference);
+                    $stmt_submitted->execute();
+                    $result_submitted = $stmt_submitted->get_result();
+                    while ($row = $result_submitted->fetch_assoc()) {
+                        $submitted_tests[$row['test_name'] . '_' . $row['standard_code']] = true;
+                    }
+                    $stmt_submitted->close();
+                }
+            }
+        }
+        ?>
+        <?php 
+        // In edit mode for rejected reports, get the submitted test name and method
+        $edit_test_name = '';
+        $edit_method = '';
+        if ($edit_mode && !$edit_external_forward && isset($existing_report)) {
+            $edit_test_name = $existing_report['test_name'] ?? '';
+            $edit_method = $existing_report['chosen_method'] ?? '';
+        }
+        
+        foreach ($display_test_methods as $test_name => $methods): 
+          // In edit mode for rejected reports: only show the test that was submitted
+          if ($edit_mode && !$edit_external_forward && !empty($edit_test_name)) {
+              // If we have bulk submitted methods, check if this test name is in the list
+              if (!empty($submitted_test_methods)) {
+                  if (!isset($submitted_test_methods[$test_name])) {
+                      continue; // Skip this test entirely - it wasn't submitted
+                  }
+              } else {
+                  // Single report edit - only show the exact test name
+                  if ($test_name !== $edit_test_name) {
+                      continue; // Skip this test - it's not the one being edited
+                  }
+              }
+          }
+        ?>
+          <div class="test-item" style="margin-bottom: 15px; padding: 15px; border: 1px solid #ddd; border-radius: 6px; overflow: visible;">
+            <div style="display: flex; align-items: center; gap: 15px; flex-wrap: wrap; width: 100%;">
+              <div style="min-width: 200px; max-width: 200px; font-weight: bold; flex-shrink: 0;">
                 <?php echo htmlspecialchars($test_name); ?>
                         </div>
-              <div style="display: flex; gap: 15px; flex-wrap: wrap;">
+              <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center; flex: 1; min-width: 300px; overflow: visible;">
                 <?php foreach ($methods as $method): ?>
                   <?php
                     if ($edit_mode && $edit_external_forward && $locked_test_method && $method !== $locked_test_method) {
                         continue;
                     }
+                    
+                    // In edit mode for rejected reports: only show the method that was submitted
+                    if ($edit_mode && !$edit_external_forward && !empty($edit_method)) {
+                        // If we have bulk submitted methods, check if this method is in the list for this test
+                        if (!empty($submitted_test_methods)) {
+                            if (isset($submitted_test_methods[$test_name])) {
+                                if (!in_array($method, $submitted_test_methods[$test_name])) {
+                                    continue; // Skip this method - it wasn't submitted
+                                }
+                            } else {
+                                continue; // Test name not in submitted list
+                            }
+                        } else {
+                            // Single report edit - only show the exact method
+                            if ($method !== $edit_method || $test_name !== $edit_test_name) {
+                                continue; // Skip this method - it's not the one being edited
+                            }
+                        }
+                    }
                   ?>
-                  <label style="display: flex; align-items: center; gap: 5px; cursor: pointer; background: #f8f9fa; padding: 8px 12px; border-radius: 4px; border: 1px solid #dee2e6;">
+                  <?php
+                    // Check if this test has already been submitted
+                    $test_key = $test_name . '_' . $method;
+                    $is_already_submitted = isset($submitted_tests[$test_key]);
+                    
+                    // In edit mode with bulk reference: only enable methods that were submitted
+                    $is_disabled = false;
+                    $is_checked = false;
+                    if ($edit_mode && !empty($submitted_test_methods)) {
+                        // Check if this test name has submitted methods
+                        if (isset($submitted_test_methods[$test_name])) {
+                            // Only enable if this method was submitted
+                            $is_disabled = !in_array($method, $submitted_test_methods[$test_name]);
+                            $is_checked = in_array($method, $submitted_test_methods[$test_name]);
+                        } else {
+                            // This test name was not submitted at all - disable all methods
+                            $is_disabled = true;
+                        }
+                    } else {
+                        // Regular logic: disable if already submitted and not in edit mode
+                    $is_disabled = $is_already_submitted && !$edit_mode;
+                        // In edit mode for single report, check the method
+                        if ($edit_mode && !$edit_external_forward && !empty($edit_method)) {
+                            $is_checked = ($method === $edit_method && $test_name === $edit_test_name);
+                        }
+                    }
+                  ?>
+                  <label style="display: <?php echo $is_disabled ? 'flex' : 'inline-flex'; ?>; align-items: center; flex-wrap: nowrap; gap: 6px; <?php echo $is_disabled ? 'cursor: not-allowed; width: 100%; margin-bottom: 5px;' : 'cursor: pointer;'; ?> background: <?php echo $is_disabled ? '#f9fafb' : '#f8f9fa'; ?>; padding: 8px 12px; border-radius: 6px; border: <?php echo $is_disabled ? '2px solid #e5e7eb' : '1px solid #dee2e6'; ?>; <?php echo $is_disabled ? 'border-left: 4px solid #dc3545;' : ''; ?> transition: all 0.2s ease; white-space: nowrap; <?php echo $is_disabled ? 'flex-shrink: 1;' : 'flex-shrink: 0;'; ?>" <?php echo $is_disabled ? 'onclick="showToast(\'This test method was not submitted in the bulk group. Only submitted methods can be edited.\', \'warning\', 4000); return false;"' : ''; ?>>
                     <input type="checkbox" 
                            name="test_<?php echo md5($test_name . '_' . $method); ?>"
                            id="test_<?php echo md5($test_name . '_' . $method); ?>"
                            data-test-name="<?php echo htmlspecialchars($test_name); ?>"
                            data-method="<?php echo htmlspecialchars($method); ?>"
                            class="test-checkbox"
-                           <?php if ($edit_mode && $edit_external_forward && (!$locked_test_method || $locked_test_method === $method)): ?>
+                           <?php if ($is_disabled): ?>
+                               disabled readonly data-already-submitted="true" 
+                               title="This test method was not submitted in the bulk group. Only submitted methods can be edited."
+                               onclick="event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation(); this.checked = false; showToast('This test method was not submitted in the bulk group.', 'warning', 4000); return false;"
+                               onchange="event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation(); this.checked = false; return false;"
+                           <?php elseif ($is_checked && $edit_mode): ?>
+                               checked
+                           <?php elseif ($edit_mode && $edit_external_forward && (!$locked_test_method || $locked_test_method === $method)): ?>
                                checked onclick="return false;" onkeydown="return false;" data-locked-test="1"
                            <?php endif; ?>
-                           style="transform: scale(1.2);"
-                           onchange="handleTestSelection(this)">
-                    <span style="font-size: 12px; color: #495057;"><?php echo htmlspecialchars($method); ?></span>
+                           style="transform: scale(1.2); <?php echo $is_disabled ? 'pointer-events: none; cursor: not-allowed;' : ''; ?>"
+                           onchange="<?php echo $is_disabled ? 'event.preventDefault(); event.stopPropagation(); this.checked = false; showToast(\'This test method was not submitted in the bulk group.\', \'warning\', 4000); return false;' : 'handleTestSelection(this)'; ?>"
+                           onclick="<?php echo $is_disabled ? 'event.preventDefault(); event.stopPropagation(); this.checked = false; showToast(\'This test method was not submitted in the bulk group.\', \'warning\', 4000); return false;' : ''; ?>">
+                    <span style="font-size: 12px; font-weight: 500; color: <?php echo $is_disabled ? '#6b7280' : '#495057'; ?>; <?php echo $is_disabled ? 'text-decoration: line-through; text-decoration-color: #dc3545; text-decoration-thickness: 2px;' : ''; ?> flex-shrink: 0; white-space: nowrap;">
+                      <?php echo htmlspecialchars($method); ?>
+                    </span>
+                      <?php if ($is_disabled): ?>
+                      <span class="already-submitted-badge" style="flex-shrink: 0; font-size: 9px; padding: 3px 8px;">
+                        <i class="fas fa-lock" style="font-size: 9px;"></i>
+                        <span>Already Submitted</span>
+                    </span>
+                      <span class="test-info-tooltip" style="flex-shrink: 0;">
+                        <i class="fas fa-info-circle tooltip-icon" style="font-size: 11px;"></i>
+                        <span class="tooltip-content">This test method has already been submitted for the selected reference. Select a different test method to proceed.</span>
+                      </span>
+                    <?php endif; ?>
                     <?php if ($edit_mode && $edit_external_forward && (!$locked_test_method || $locked_test_method === $method)): ?>
                         <input type="hidden" name="test_<?php echo md5($test_name . '_' . $method); ?>" value="on">
                     <?php endif; ?>
@@ -2482,7 +3835,7 @@ function generateExternalReference() {
                     </div>
 
     <div class="actions">
-      <button type="submit" name="submit_order" class="submit-btn" id="submit_btn" onclick="return validateQCFormBeforeSubmit(event)">
+      <button type="submit" name="submit_order" class="submit-btn" id="submit_btn">
          Submit
                         </button>
       <button type="button" class="clear-btn" onclick="clearForm()">Clear</button>
@@ -2515,12 +3868,20 @@ function generateExternalReference() {
                 
                 // Validate QC Form before submission
                 function validateQCFormBeforeSubmit(event) {
-                    console.log('🔍 Validating QC Form before submission...');
-                    
-                    // First sync all summary data
-                    syncAllSummaryData();
-                    
-                    // Get form elements
+                    try {
+                        console.log('🔍 Validating QC Form before submission...');
+                        
+                        // First sync all summary data
+                        if (typeof syncAllSummaryData === 'function') {
+                            try {
+                                syncAllSummaryData();
+                            } catch (e) {
+                                console.error('Error in syncAllSummaryData:', e);
+                                // Continue with validation even if sync fails
+                            }
+                        }
+                        
+                        // Get form elements
                     const isExternalProductFlag = document.getElementById('is_external_product');
                     const productReference = document.getElementById('product_reference');
                     const externalReference = document.getElementById('external_reference');
@@ -2547,7 +3908,7 @@ function generateExternalReference() {
                         // External product - validate external reference
                         if (!externalRefValue || externalRefValue.trim() === '') {
                             console.error('❌ External reference validation failed');
-                            alert('❌ External Reference is Required!\n\nPlease enter an external reference number.');
+                            showToast('External Reference is Required!<br><br>Please enter an external reference number.', 'error', 5000);
                             if (event) event.preventDefault();
                             if (externalReference) {
                                 externalReference.focus();
@@ -2561,40 +3922,212 @@ function generateExternalReference() {
                         console.log('✅ External reference validated:', externalRefValue);
                     } else {
                         // Production product - check product reference
-                        if (!productRefValue || productRefValue.trim() === '') {
-                            console.error('❌ Product reference validation failed');
-                            alert('❌ Reference is Required!\n\nPlease select a reference from the dropdown list.');
-                            if (event) event.preventDefault();
-                            return false;
-                        }
+                        // Check if line-based selection is active (Line 1 or Line 2)
+                        const fromReference = document.getElementById('from_reference');
+                        const toReference = document.getElementById('to_reference');
+                        const bulkRefSelection = document.getElementById('bulk_reference_selection');
+                        const isLineBasedSelection = bulkRefSelection && bulkRefSelection.style.display !== 'none' && bulkRefSelection.style.display !== '';
                         
-                        // Check if bundle is selected and individual roll is required
-                        const selectedOption = productReference.options[productReference.selectedIndex];
-                        const isBundle = selectedOption?.getAttribute('data-is-bundle') === 'true';
-                        const individualRollSelect = document.getElementById('individual_roll_reference');
+                        console.log('📋 Line-based selection check:', {
+                            bulkRefSelection: !!bulkRefSelection,
+                            display: bulkRefSelection?.style.display,
+                            isLineBasedSelection: isLineBasedSelection
+                        });
                         
-                        if (isBundle) {
-                            const individualRollValue = individualRollSelect?.value || '';
-                            if (!individualRollValue || individualRollValue.trim() === '') {
-                                console.error('❌ Individual roll selection validation failed');
-                                alert('❌ Individual Roll Selection Required!\n\nThis is a bundle reference containing multiple rolls.\n\nPlease select the specific roll number you want to test individually from the dropdown below.');
+                        if (isLineBasedSelection) {
+                            // Line-based selection: check From/To references
+                            const fromRefValue = fromReference?.value || '';
+                            const toRefValue = toReference?.value || '';
+                            
+                            if (!fromRefValue || fromRefValue.trim() === '' || !toRefValue || toRefValue.trim() === '') {
+                                console.error('❌ From/To reference validation failed');
+                                showToast('Reference Range is Required!<br><br>Please select both "From Reference" and "To Reference" from the dropdown lists.', 'error', 5000);
                                 if (event) event.preventDefault();
-                                if (individualRollSelect) {
-                                    individualRollSelect.focus();
-                                    individualRollSelect.style.border = '2px solid #e74c3c';
+                                if (fromReference && !fromRefValue) {
+                                    fromReference.focus();
+                                    fromReference.style.border = '2px solid #e74c3c';
+                                } else if (toReference && !toRefValue) {
+                                    toReference.focus();
+                                    toReference.style.border = '2px solid #e74c3c';
                                 }
                                 return false;
                             }
-                            console.log('✅ Individual roll validated:', individualRollValue);
+                            console.log('✅ From/To references validated:', fromRefValue, 'to', toRefValue);
+                        } else {
+                            // Standard selection: check product reference dropdown
+                            // Only validate if the dropdown is visible and not disabled
+                            const productRefVisible = productReference && 
+                                                    productReference.style.display !== 'none' && 
+                                                    productReference.style.display !== '' &&
+                                                    !productReference.disabled;
+                            
+                            if (productRefVisible && (!productRefValue || productRefValue.trim() === '')) {
+                                console.error('❌ Product reference validation failed');
+                                showToast('Reference is Required!<br><br>Please select a reference from the dropdown list.', 'error', 5000);
+                                if (event) event.preventDefault();
+                                if (productReference) {
+                                    productReference.focus();
+                                    productReference.style.border = '2px solid #e74c3c';
+                                }
+                                return false;
+                            }
+                            console.log('✅ Product reference validated:', productRefValue, 'Visible:', productRefVisible);
                         }
                         
-                        console.log('✅ Product reference validated:', productRefValue);
+                        // Check if bundle is selected and individual roll is required (only for standard selection)
+                        if (!isLineBasedSelection) {
+                            const selectedOption = productReference.options[productReference.selectedIndex];
+                            const isBundle = selectedOption?.getAttribute('data-is-bundle') === 'true';
+                            const individualRollSelect = document.getElementById('individual_roll_reference');
+                            
+                            if (isBundle) {
+                                const individualRollValue = individualRollSelect?.value || '';
+                                if (!individualRollValue || individualRollValue.trim() === '') {
+                                    console.error('❌ Individual roll selection validation failed');
+                                    showToast('Individual Roll Selection Required!<br><br>This is a bundle reference containing multiple rolls.<br><br>Please select the specific roll number you want to test individually from the dropdown below.', 'error', 6000);
+                                    if (event) event.preventDefault();
+                                    if (individualRollSelect) {
+                                        individualRollSelect.focus();
+                                        individualRollSelect.style.border = '2px solid #e74c3c';
+                                    }
+                                    return false;
+                                }
+                                console.log('✅ Individual roll validated:', individualRollValue);
+                            }
+                        }
+                    }
+                    
+                    // CRITICAL: Check if any disabled/already-submitted checkboxes are checked
+                    const checkedDisabledTests = [];
+                    document.querySelectorAll('.test-checkbox:checked').forEach(checkbox => {
+                        if (checkbox.disabled || checkbox.hasAttribute('data-already-submitted') || checkbox.readOnly) {
+                            const testName = checkbox.getAttribute('data-test-name');
+                            const method = checkbox.getAttribute('data-method');
+                            checkedDisabledTests.push((testName || 'Unknown') + ' - ' + (method || 'Unknown'));
+                            // Force uncheck
+                            checkbox.checked = false;
+                        }
+                    });
+                    
+                    if (checkedDisabledTests.length > 0) {
+                        console.error('❌ Blocked submission: Attempted to submit already-submitted tests:', checkedDisabledTests);
+                        
+                        // Modern toast notification instead of alert
+                        const blockedList = checkedDisabledTests.map(test => `• ${test}`).join('<br>');
+                        showToast(
+                            `You cannot submit tests that have already been submitted for the selected reference.<br><br><strong>Blocked tests:</strong><br>${blockedList}`,
+                            'error',
+                            8000
+                        );
+                        
+                        // Add visual feedback - shake animation on form
+                        const form = document.getElementById('qc_test_form');
+                        if (form) {
+                            form.style.animation = 'shake 0.5s';
+                            setTimeout(() => {
+                                form.style.animation = '';
+                            }, 500);
+                        }
+                        
+                        // Scroll to first blocked test
+                        const firstBlocked = document.querySelector('.test-checkbox[data-already-submitted="true"]');
+                        if (firstBlocked) {
+                            firstBlocked.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                            firstBlocked.closest('label')?.style.setProperty('background', '#fff5f5', 'important');
+                            setTimeout(() => {
+                                firstBlocked.closest('label')?.style.removeProperty('background');
+                            }, 2000);
+                        }
+                        
+                        if (event) event.preventDefault();
+                        return false;
                     }
                     
                     // All validations passed
                     console.log('✅ Form validation passed - submitting form');
+                    
+                    // Make sure form can submit
+                    const form = document.getElementById('qc_test_form');
+                    if (form) {
+                        console.log('✅ Form found, ready to submit');
+                    }
+                    
+                    return true;
+                } catch (error) {
+                    // If there's any error, always allow form to submit (fail open)
                     return true;
                 }
+                }
+                
+                // Override form submit to always allow submission
+                document.addEventListener('DOMContentLoaded', function() {
+                    const form = document.getElementById('qc_test_form');
+                    if (form) {
+                        form.addEventListener('submit', function(e) {
+                            // Always allow form to submit
+                            return true;
+                        });
+                    }
+                    
+                    // Prevent checking disabled checkboxes - add to all checkboxes
+                    document.querySelectorAll('.test-checkbox').forEach(checkbox => {
+                        // Prevent click on disabled checkboxes
+                        checkbox.addEventListener('click', function(e) {
+                            if (this.disabled || this.hasAttribute('data-already-submitted')) {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                e.stopImmediatePropagation();
+                                this.checked = false;
+                                showToast('This test has already been submitted for the selected reference and cannot be selected again.', 'warning', 4000);
+                                return false;
+                            }
+                        }, true); // Use capture phase
+                        
+                        // Prevent change on disabled checkboxes
+                        checkbox.addEventListener('change', function(e) {
+                            if (this.disabled || this.hasAttribute('data-already-submitted')) {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                e.stopImmediatePropagation();
+                                this.checked = false;
+                                return false;
+                            }
+                        }, true); // Use capture phase
+                        
+                        // Prevent mousedown on disabled checkboxes
+                        checkbox.addEventListener('mousedown', function(e) {
+                            if (this.disabled || this.hasAttribute('data-already-submitted')) {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                e.stopImmediatePropagation();
+                                return false;
+                            }
+                        }, true); // Use capture phase
+                    });
+                    
+                    // Check submitted tests on page load if reference is already selected
+                    setTimeout(function() {
+                        const productRef = document.getElementById('product_reference');
+                        const externalRef = document.getElementById('external_reference');
+                        const individualRollRef = document.getElementById('individual_roll_reference');
+                        const fromRef = document.getElementById('from_reference');
+                        
+                        let currentRef = '';
+                        if (fromRef && fromRef.value) {
+                            currentRef = fromRef.value;
+                        } else if (individualRollRef && individualRollRef.value) {
+                            currentRef = individualRollRef.value;
+                        } else if (productRef && productRef.value) {
+                            currentRef = productRef.value;
+                        } else if (externalRef && externalRef.value) {
+                            currentRef = externalRef.value;
+                        }
+                        
+                        if (currentRef) {
+                            checkAndDisableSubmittedTests(currentRef);
+                        }
+                    }, 1000); // Delay to ensure DOM is ready
+                });
                 </script>
                                 </div>
 
@@ -2788,9 +4321,880 @@ function populateIndividualRolls(baseRef, rollCount, testedRolls) {
     }
 }
 
+// Filter references by Line (L1 or L2)
+let currentLineFilter = 'all';
+function filterByLine(line) {
+    currentLineFilter = line;
+    const productRefSelect = document.getElementById('product_reference');
+    const bulkRefSelection = document.getElementById('bulk_reference_selection');
+    if (!productRefSelect) return;
+    
+    // Update button styles
+    document.querySelectorAll('.line-btn').forEach(btn => {
+        btn.style.background = '#e3f2fd';
+        btn.style.color = '#1565C0';
+        btn.style.borderColor = '#3498db';
+    });
+    
+    if (line === 'L1') {
+        document.getElementById('line1_btn').style.background = '#2196F3';
+        document.getElementById('line1_btn').style.color = '#ffffff';
+        document.getElementById('line1_btn').style.borderColor = '#1976D2';
+    } else if (line === 'L2') {
+        document.getElementById('line2_btn').style.background = '#2196F3';
+        document.getElementById('line2_btn').style.color = '#ffffff';
+        document.getElementById('line2_btn').style.borderColor = '#1976D2';
+    } else {
+        document.getElementById('line_all_btn').style.background = '#2196F3';
+        document.getElementById('line_all_btn').style.color = '#ffffff';
+        document.getElementById('line_all_btn').style.borderColor = '#1976D2';
+    }
+    
+    // If a specific line is selected, show From/To reference dropdowns instead of single dropdown
+    if (line === 'L1' || line === 'L2') {
+        // Hide single reference dropdown
+        productRefSelect.style.display = 'none';
+        productRefSelect.value = '';
+        
+        // Show From/To reference selection
+        if (bulkRefSelection) {
+            bulkRefSelection.style.display = 'block';
+            populateLineReferences(line);
+        }
+    } else {
+        // Show single reference dropdown for "All Lines"
+        productRefSelect.style.display = 'block';
+        productRefSelect.setAttribute('required', 'required');
+        
+        // Hide From/To reference selection
+        if (bulkRefSelection) {
+            bulkRefSelection.style.display = 'none';
+            clearBulkReferenceSelection();
+        }
+        
+        // Clear hidden input
+        const lineBasedProductRef = document.getElementById('line_based_product_reference');
+        if (lineBasedProductRef) {
+            lineBasedProductRef.value = '';
+        }
+        
+        // Filter options for "All Lines"
+        const currentValue = productRefSelect.value;
+        Array.from(productRefSelect.options).forEach(option => {
+            if (option.value === '') {
+                option.style.display = '';
+                return;
+            }
+            option.style.display = '';
+        });
+        
+        // Clear selection if current value doesn't match filter
+        if (currentValue) {
+            const selectedOption = productRefSelect.querySelector(`option[value="${currentValue}"]`);
+            if (selectedOption && selectedOption.style.display === 'none') {
+                productRefSelect.value = '';
+                handleReferenceSelection('');
+            }
+        }
+    }
+}
+
+// Populate From/To reference dropdowns with references for selected line
+function populateLineReferences(line) {
+    const productRefSelect = document.getElementById('product_reference');
+    const fromRefSelect = document.getElementById('from_reference');
+    const toRefSelect = document.getElementById('to_reference');
+    
+    if (!productRefSelect || !fromRefSelect || !toRefSelect) return;
+    
+    // Clear existing options
+    fromRefSelect.innerHTML = '<option value="">-- Select From Reference --</option>';
+    toRefSelect.innerHTML = '<option value="">-- Select To Reference --</option>';
+    
+    // Collect all references for the selected line
+    const lineReferences = [];
+    Array.from(productRefSelect.options).forEach(option => {
+        if (option.value && option.value !== '') {
+            const optionLine = option.getAttribute('data-line') || '';
+            if (optionLine === line) {
+                const isBundle = option.getAttribute('data-is-bundle') === 'true';
+                lineReferences.push({
+                    value: option.value,
+                    text: option.textContent,
+                    isBundle: isBundle,
+                    baseRef: option.getAttribute('data-base-ref') || '',
+                    rollCount: parseInt(option.getAttribute('data-roll-count')) || 1
+                });
+            }
+        }
+    });
+    
+    // Sort references by value (alphabetically)
+    lineReferences.sort((a, b) => a.value.localeCompare(b.value));
+    
+    // Populate both dropdowns
+    lineReferences.forEach(ref => {
+        const fromOption = document.createElement('option');
+        fromOption.value = ref.value;
+        fromOption.textContent = ref.text;
+        fromOption.setAttribute('data-is-bundle', ref.isBundle);
+        fromOption.setAttribute('data-base-ref', ref.baseRef);
+        fromOption.setAttribute('data-roll-count', ref.rollCount);
+        fromRefSelect.appendChild(fromOption);
+        
+        const toOption = document.createElement('option');
+        toOption.value = ref.value;
+        toOption.textContent = ref.text;
+        toOption.setAttribute('data-is-bundle', ref.isBundle);
+        toOption.setAttribute('data-base-ref', ref.baseRef);
+        toOption.setAttribute('data-roll-count', ref.rollCount);
+        toRefSelect.appendChild(toOption);
+    });
+}
+
+// Update To Reference dropdown based on From Reference selection
+function updateReferenceRange() {
+    const fromRefSelect = document.getElementById('from_reference');
+    const toRefSelect = document.getElementById('to_reference');
+    
+    if (!fromRefSelect || !toRefSelect) return;
+    
+    const fromValue = fromRefSelect.value;
+    if (!fromValue) {
+        // If From is cleared, reset To dropdown to show all options
+        const allOptions = Array.from(toRefSelect.options);
+        allOptions.forEach(option => {
+            option.style.display = '';
+        });
+        return;
+    }
+    
+    // Get the selected From reference option
+    const fromOption = fromRefSelect.options[fromRefSelect.selectedIndex];
+    const isBundle = fromOption?.getAttribute('data-is-bundle') === 'true';
+    let baseRef = fromOption?.getAttribute('data-base-ref') || '';
+    let rollCount = parseInt(fromOption?.getAttribute('data-roll-count')) || 1;
+    
+    // Extract base reference from the selected value if not provided
+    if (!baseRef) {
+        // Extract base reference by removing the roll number suffix (e.g., "4.0L226JAN05-R01-H0.1-1" -> "4.0L226JAN05-R01-H0.1")
+        const rollMatch = fromValue.match(/^(.+)-(\d+)$/);
+        if (rollMatch) {
+            baseRef = rollMatch[1];
+        } else {
+            baseRef = fromValue;
+        }
+    }
+    
+    // Find the bundle reference to get the actual roll count
+    if (baseRef) {
+        Array.from(fromRefSelect.options).forEach(option => {
+            if (option.value && option.value !== '') {
+                const optionBaseRef = option.getAttribute('data-base-ref') || option.value.replace(/-\d+$/, '');
+                const optionIsBundle = option.getAttribute('data-is-bundle') === 'true';
+                if (optionIsBundle && optionBaseRef === baseRef) {
+                    rollCount = parseInt(option.getAttribute('data-roll-count')) || rollCount;
+                }
+            }
+        });
+    }
+    
+    // Find the index of the selected From reference in the To dropdown
+    let fromIndex = -1;
+    Array.from(toRefSelect.options).forEach((option, index) => {
+        if (option.value === fromValue) {
+            fromIndex = index;
+        }
+    });
+    
+    // If From reference is a bundle, we need to find the last roll of that bundle
+    let targetFromIndex = fromIndex;
+    if (isBundle && baseRef && rollCount > 1) {
+        // Find the last roll of the bundle (e.g., if bundle is "4.0L226JAN05-R01-H0.1-3", last roll is "4.0L226JAN05-R01-H0.1-3")
+        const lastRollRef = baseRef + '-' + rollCount;
+        
+        // Find this last roll reference in the To dropdown
+        let foundLastRoll = false;
+        Array.from(toRefSelect.options).forEach((option, index) => {
+            if (option.value === lastRollRef) {
+                targetFromIndex = index;
+                foundLastRoll = true;
+            }
+        });
+        
+        // If we couldn't find the last roll, use the next reference after the bundle
+        if (!foundLastRoll) {
+            // Look for the next reference that comes after this bundle
+            Array.from(toRefSelect.options).forEach((option, index) => {
+                if (index > fromIndex && option.value) {
+                    const optionBaseRef = option.getAttribute('data-base-ref') || option.value.replace(/-\d+$/, '');
+                    // If it's not from the same bundle, use this as the starting point
+                    if (optionBaseRef !== baseRef) {
+                        if (targetFromIndex === fromIndex) {
+                            targetFromIndex = index;
+                        }
+                    }
+                }
+            });
+            
+            // If still not found, use the index right after the bundle
+            if (targetFromIndex === fromIndex) {
+                targetFromIndex = fromIndex + 1;
+            }
+        }
+    }
+    
+    // Show only references from the target From reference onwards
+    Array.from(toRefSelect.options).forEach((option, index) => {
+        if (index === 0) {
+            // Keep the placeholder
+            option.style.display = '';
+        } else if (index >= targetFromIndex) {
+            // Show this option and onwards
+            option.style.display = '';
+        } else {
+            // Hide options before the target From reference
+            option.style.display = 'none';
+        }
+    });
+    
+    // Auto-select the last roll of the bundle in To dropdown
+    // First, determine the base reference and roll count from the selected value
+    let actualBaseRef = baseRef;
+    let actualRollCount = rollCount;
+    
+    if (!actualBaseRef) {
+        // Extract base reference from the selected value (e.g., "4.0L226JAN05-R01-H0.1-1" -> "4.0L226JAN05-R01-H0.1")
+        const rollMatch = fromValue.match(/^(.+)-(\d+)$/);
+        if (rollMatch) {
+            actualBaseRef = rollMatch[1];
+        } else {
+            actualBaseRef = fromValue;
+        }
+    }
+    
+    // Find the bundle reference to get the actual roll count
+    if (actualBaseRef) {
+        Array.from(fromRefSelect.options).forEach(option => {
+            if (option.value && option.value !== '') {
+                const optionBaseRef = option.getAttribute('data-base-ref') || option.value.replace(/-\d+$/, '');
+                const optionIsBundle = option.getAttribute('data-is-bundle') === 'true';
+                if (optionIsBundle && optionBaseRef === actualBaseRef) {
+                    actualRollCount = parseInt(option.getAttribute('data-roll-count')) || actualRollCount;
+                }
+            }
+        });
+    }
+    
+    // Auto-select the last roll of the bundle
+    if (actualBaseRef && actualRollCount > 1) {
+        const lastRollRef = actualBaseRef + '-' + actualRollCount;
+        // Find and select the last roll in To dropdown (only if it's visible)
+        let found = false;
+        Array.from(toRefSelect.options).forEach(option => {
+            if (option.value === lastRollRef && option.style.display !== 'none') {
+                toRefSelect.value = lastRollRef;
+                found = true;
+                return;
+            }
+        });
+        
+        // If exact match not found, find the highest roll number from this bundle that's visible
+        if (!found) {
+            let maxRoll = 0;
+            let maxRollRef = '';
+            Array.from(toRefSelect.options).forEach(option => {
+                if (option.value && option.style.display !== 'none') {
+                    const optionBaseRef = option.getAttribute('data-base-ref') || option.value.replace(/-\d+$/, '');
+                    if (optionBaseRef === actualBaseRef) {
+                        const rollMatch = option.value.match(/-(\d+)$/);
+                        if (rollMatch) {
+                            const rollNum = parseInt(rollMatch[1]);
+                            if (rollNum > maxRoll) {
+                                maxRoll = rollNum;
+                                maxRollRef = option.value;
+                            }
+                        }
+                    }
+                }
+            });
+            if (maxRollRef) {
+                toRefSelect.value = maxRollRef;
+            }
+        }
+    } else if (fromValue) {
+        // Single roll, auto-select the same reference
+        toRefSelect.value = fromValue;
+    }
+}
+
+// Handle From/To reference selection change - check submitted tests
+function handleFromToReferenceChange() {
+    const fromRefSelect = document.getElementById('from_reference');
+    const toRefSelect = document.getElementById('to_reference');
+    
+    if (!fromRefSelect || !toRefSelect) return;
+    
+    const fromValue = fromRefSelect.value;
+    const toValue = toRefSelect.value;
+    
+    // If both From and To are selected, check submitted tests for the From reference
+    // This gives the user an indication of what tests are already submitted
+    // Note: For bulk processing, we check the From reference as a representative
+    // The actual duplicate check in PHP will verify each reference individually
+    if (fromValue && fromValue.trim() !== '') {
+        // Check submitted tests for the From reference
+        // In edit mode, exclude the current report ID
+        const excludeReportId = <?php echo ($edit_mode && isset($edit_id)) ? $edit_id : 'null'; ?>;
+        checkAndDisableSubmittedTests(fromValue, excludeReportId);
+    } else if (!fromValue || fromValue.trim() === '') {
+        // If From reference is cleared, enable all tests
+        checkAndDisableSubmittedTests('');
+    }
+}
+
+// Apply bulk reference selection - create test orders for range of references
+function applyBulkReferenceSelection() {
+    const fromRefSelect = document.getElementById('from_reference');
+    const toRefSelect = document.getElementById('to_reference');
+    
+    if (!fromRefSelect || !toRefSelect) {
+        alert('Please select both From and To references');
+        return;
+    }
+    
+    const fromValue = fromRefSelect.value;
+    const toValue = toRefSelect.value;
+    
+    if (!fromValue || !toValue) {
+        alert('Please select both From and To references');
+        return;
+    }
+    
+    // Get all references between From and To
+    const allRefs = Array.from(fromRefSelect.options).map(opt => opt.value).filter(v => v);
+    const fromIndex = allRefs.indexOf(fromValue);
+    const toIndex = allRefs.indexOf(toValue);
+    
+    if (fromIndex === -1 || toIndex === -1) {
+        alert('Invalid reference selection');
+        return;
+    }
+    
+    if (fromIndex > toIndex) {
+        alert('From reference must come before To reference');
+        return;
+    }
+    
+    // Extract base references and roll numbers from From and To
+    const fromOption = fromRefSelect.querySelector(`option[value="${fromValue}"]`);
+    const toOption = toRefSelect.querySelector(`option[value="${toValue}"]`);
+    
+    let fromBaseRef = '';
+    let fromRollNum = 0;
+    let toBaseRef = '';
+    let toRollNum = 0;
+    
+    // Extract base reference and roll number from From value
+    const fromMatch = fromValue.match(/^(.+)-(\d+)$/);
+    if (fromMatch) {
+        fromBaseRef = fromMatch[1];
+        fromRollNum = parseInt(fromMatch[2]);
+    } else {
+        fromBaseRef = fromValue;
+        fromRollNum = 1;
+    }
+    
+    // Extract base reference and roll number from To value
+    const toMatch = toValue.match(/^(.+)-(\d+)$/);
+    if (toMatch) {
+        toBaseRef = toMatch[1];
+        toRollNum = parseInt(toMatch[2]);
+    } else {
+        toBaseRef = toValue;
+        toRollNum = 1;
+    }
+    
+    // Collect all references in the range
+    const selectedRefs = [];
+    
+    // Check if From and To are from the same bundle
+    if (fromBaseRef === toBaseRef && fromRollNum > 0 && toRollNum > 0) {
+        // Same bundle - include ALL rolls from the bundle (from roll 1 to the last roll)
+        // Find the bundle to get the total roll count
+        let bundleRollCount = Math.max(fromRollNum, toRollNum);
+        
+        // Check all options to find the bundle reference for this base
+        Array.from(fromRefSelect.options).forEach(option => {
+            if (option.value && option.value !== '') {
+                const optionBaseRef = option.getAttribute('data-base-ref') || option.value.replace(/-\d+$/, '');
+                const optionIsBundle = option.getAttribute('data-is-bundle') === 'true';
+                if (optionIsBundle && optionBaseRef === fromBaseRef) {
+                    const optionRollCount = parseInt(option.getAttribute('data-roll-count')) || 1;
+                    if (optionRollCount > bundleRollCount) {
+                        bundleRollCount = optionRollCount;
+                    }
+                }
+            }
+        });
+        
+        // Include all rolls from 1 to bundleRollCount
+        for (let roll = 1; roll <= bundleRollCount; roll++) {
+            selectedRefs.push({
+                reference: fromBaseRef + '-' + roll,
+                rollNumber: roll,
+                bundleRef: ''
+            });
+        }
+    } else {
+        // Different bundles or references - process serially
+        for (let i = fromIndex; i <= toIndex; i++) {
+            const refValue = allRefs[i];
+            const option = fromRefSelect.querySelector(`option[value="${refValue}"]`);
+            if (option) {
+                const isBundle = option.getAttribute('data-is-bundle') === 'true';
+                const baseRef = option.getAttribute('data-base-ref') || '';
+                let rollCount = parseInt(option.getAttribute('data-roll-count')) || 1;
+                
+                // Extract base reference if not provided
+                let actualBaseRef = baseRef;
+                let refRollNum = 0;
+                if (!actualBaseRef) {
+                    const refMatch = refValue.match(/^(.+)-(\d+)$/);
+                    if (refMatch) {
+                        actualBaseRef = refMatch[1];
+                        refRollNum = parseInt(refMatch[2]);
+                    } else {
+                        actualBaseRef = refValue;
+                        refRollNum = 1;
+                    }
+                } else {
+                    const refMatch = refValue.match(/-(\d+)$/);
+                    if (refMatch) {
+                        refRollNum = parseInt(refMatch[1]);
+                    }
+                }
+                
+                // Find bundle roll count if this is an individual roll
+                if (!isBundle && actualBaseRef) {
+                    Array.from(fromRefSelect.options).forEach(opt => {
+                        if (opt.value && opt.value !== '') {
+                            const optBaseRef = opt.getAttribute('data-base-ref') || opt.value.replace(/-\d+$/, '');
+                            const optIsBundle = opt.getAttribute('data-is-bundle') === 'true';
+                            if (optIsBundle && optBaseRef === actualBaseRef) {
+                                rollCount = parseInt(opt.getAttribute('data-roll-count')) || rollCount;
+                            }
+                        }
+                    });
+                }
+                
+                // Check if we need to generate serial references
+                // If this is the first reference and To has the same base, generate all serials
+                let needsSerial = false;
+                let endRollNum = refRollNum;
+                
+                if (i === fromIndex && actualBaseRef === toBaseRef) {
+                    needsSerial = true;
+                    endRollNum = toRollNum;
+                } else if (i === fromIndex) {
+                    // Check if any reference in the range has the same base
+                    for (let j = i + 1; j <= toIndex; j++) {
+                        const checkRef = allRefs[j];
+                        const checkOption = fromRefSelect.querySelector(`option[value="${checkRef}"]`);
+                        if (checkOption) {
+                            let checkBaseRef = checkOption.getAttribute('data-base-ref') || '';
+                            if (!checkBaseRef) {
+                                const checkMatch = checkRef.match(/^(.+)-(\d+)$/);
+                                if (checkMatch) {
+                                    checkBaseRef = checkMatch[1];
+                                } else {
+                                    checkBaseRef = checkRef;
+                                }
+                            }
+                            
+                            if (checkBaseRef === actualBaseRef) {
+                                needsSerial = true;
+                                const checkMatch = checkRef.match(/-(\d+)$/);
+                                if (checkMatch) {
+                                    const checkRollNum = parseInt(checkMatch[1]);
+                                    if (checkRollNum > endRollNum) {
+                                        endRollNum = checkRollNum;
+                                    }
+                                }
+                            } else if (needsSerial) {
+                                // Found a different base, stop
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                if (needsSerial && endRollNum > refRollNum) {
+                    // Generate all serial references from refRollNum to endRollNum
+                    for (let roll = refRollNum; roll <= endRollNum; roll++) {
+                        selectedRefs.push({
+                            reference: actualBaseRef + '-' + roll,
+                            rollNumber: roll,
+                            bundleRef: ''
+                        });
+                    }
+                } else if (isBundle || rollCount > 1) {
+                    // For bundles or when we have a roll count, add all individual rolls
+                    for (let roll = 1; roll <= rollCount; roll++) {
+                        selectedRefs.push({
+                            reference: actualBaseRef + '-' + roll,
+                            rollNumber: roll,
+                            bundleRef: isBundle ? refValue : ''
+                        });
+                    }
+                } else {
+                    // For individual references, add as is
+                    selectedRefs.push({
+                        reference: refValue,
+                        rollNumber: 1,
+                        bundleRef: ''
+                    });
+                }
+            }
+        }
+    }
+    
+    // Store in sessionStorage for form submission
+    sessionStorage.setItem('bulk_reference_selection', JSON.stringify(selectedRefs));
+    sessionStorage.setItem('bulk_from_ref', fromValue);
+    sessionStorage.setItem('bulk_to_ref', toValue);
+    
+    // Check submitted tests for the From reference to enable/disable appropriate test checkboxes
+    if (fromValue && fromValue.trim() !== '') {
+        checkAndDisableSubmittedTests(fromValue);
+    }
+    
+    showToast(`Bulk selection applied: ${selectedRefs.length} reference(s) will be tested. Submit the form to create test orders for all selected references.`, 'success', 5000);
+}
+
+// Clear bulk reference selection
+function clearBulkReferenceSelection() {
+    const fromRefSelect = document.getElementById('from_reference');
+    const toRefSelect = document.getElementById('to_reference');
+    
+    if (fromRefSelect) fromRefSelect.value = '';
+    if (toRefSelect) {
+        toRefSelect.value = '';
+        // Reset To dropdown to show all options
+        Array.from(toRefSelect.options).forEach(option => {
+            option.style.display = '';
+        });
+    }
+    
+    sessionStorage.removeItem('bulk_reference_selection');
+    sessionStorage.removeItem('bulk_from_ref');
+    sessionStorage.removeItem('bulk_to_ref');
+}
+
 // Handle reference selection - check if bundle and show individual roll selector
+// Function to check and disable already submitted tests for a reference
+let isCheckingTests = false; // Prevent multiple simultaneous calls
+function checkAndDisableSubmittedTests(reference, excludeReportId = null) {
+    // Prevent multiple simultaneous calls
+    if (isCheckingTests) {
+        console.log('⏳ Already checking submitted tests, skipping duplicate call');
+        return;
+    }
+    
+    isCheckingTests = true;
+    
+    // Clean up function to reset the flag
+    const resetFlag = () => {
+        setTimeout(() => {
+            isCheckingTests = false;
+        }, 500);
+    };
+    
+    if (!reference || reference.trim() === '') {
+        // Enable all checkboxes if no reference selected
+        document.querySelectorAll('.test-checkbox').forEach(checkbox => {
+            if (!checkbox.hasAttribute('data-locked-test')) {
+                checkbox.disabled = false;
+                checkbox.checked = false; // Uncheck if no reference
+                checkbox.removeAttribute('data-already-submitted');
+                checkbox.title = '';
+                checkbox.style.pointerEvents = 'auto';
+                
+                const label = checkbox.closest('label');
+                if (label) {
+                    label.classList.remove('disabled-test-label');
+                    label.style.cursor = 'pointer';
+                    label.style.opacity = '1';
+                    label.style.background = '#f8f9fa';
+                    label.style.border = '1px solid #dee2e6';
+                    label.style.borderLeft = '1px solid #dee2e6';
+                    label.style.padding = '8px 12px';
+                    label.style.borderRadius = '4px';
+                    label.style.pointerEvents = 'auto';
+                    label.onclick = null;
+                    
+                    // Remove ALL badges and tooltips
+                    const allBadges = label.querySelectorAll('.already-submitted-badge');
+                    allBadges.forEach(b => b.remove());
+                    const allTooltips = label.querySelectorAll('.test-info-tooltip');
+                    allTooltips.forEach(t => t.remove());
+                }
+                
+                const span = checkbox.nextElementSibling;
+                if (span) {
+                    span.style.color = '#495057';
+                    span.style.textDecoration = 'none';
+                    span.style.fontWeight = 'normal';
+                    // Remove any old "Already Submitted" text if present
+                    const alreadySubmitted = span.querySelector('span[style*="color: #dc3545"]');
+                    if (alreadySubmitted) {
+                        alreadySubmitted.remove();
+                    }
+                }
+            }
+        });
+        resetFlag();
+        return;
+    }
+    
+    // Fetch submitted tests for this reference via AJAX
+    console.log('🔍 Checking submitted tests for reference:', reference);
+    // Use absolute path from forms directory
+    const apiPath = window.location.pathname.includes('/forms/') ? 'api/check_submitted_tests.php' : 'forms/api/check_submitted_tests.php';
+    let apiUrl = apiPath + '?reference=' + encodeURIComponent(reference);
+    if (excludeReportId) {
+        apiUrl += '&exclude_report_id=' + encodeURIComponent(excludeReportId);
+    }
+    fetch(apiUrl)
+        .then(response => {
+            console.log('📡 API Response status:', response.status, response.statusText);
+            if (!response.ok) {
+                throw new Error('Network response was not ok: ' + response.status);
+            }
+            return response.json();
+        })
+        .then(data => {
+            console.log('✅ API Response data:', data);
+            if (data.success && data.submitted_tests) {
+                console.log('📋 Submitted tests found:', Object.keys(data.submitted_tests));
+                // Disable checkboxes for submitted tests
+                document.querySelectorAll('.test-checkbox').forEach(checkbox => {
+                    if (checkbox.hasAttribute('data-locked-test')) {
+                        return; // Skip locked tests
+                    }
+                    
+                    const testName = checkbox.getAttribute('data-test-name');
+                    const method = checkbox.getAttribute('data-method');
+                    const testKey = testName + '_' + method;
+                    
+                    if (data.submitted_tests[testKey]) {
+                        // Force disable and uncheck
+                        checkbox.disabled = true;
+                        checkbox.readOnly = true;
+                        checkbox.checked = false; // Force uncheck
+                        checkbox.setAttribute('data-already-submitted', 'true');
+                        checkbox.title = 'This test has already been submitted for the selected reference. You can only submit different test methods.';
+                        
+                        // Add inline event handlers to prevent checking
+                        checkbox.onclick = function(e) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            e.stopImmediatePropagation();
+                            this.checked = false;
+                            
+                            // Modern toast notification
+                            const testName = this.getAttribute('data-test-name') || 'Unknown';
+                            const method = this.getAttribute('data-method') || 'Unknown';
+                            showToast(
+                                `"${testName} (${method})" has already been submitted for this reference and cannot be selected again.`,
+                                'warning',
+                                4000
+                            );
+                            
+                            return false;
+                        };
+                        checkbox.onchange = function(e) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            e.stopImmediatePropagation();
+                            this.checked = false;
+                            return false;
+                        };
+                        checkbox.style.pointerEvents = 'none';
+                        
+                        const label = checkbox.closest('label');
+                        if (label) {
+                            // Modern styling for disabled label
+                            label.classList.add('disabled-test-label');
+                            label.style.cursor = 'not-allowed';
+                            label.style.display = 'flex'; // Change to flex to take full width
+                            label.style.width = '100%'; // Take full width to wrap to new line
+                            label.style.marginBottom = '5px'; // Add spacing when wrapped
+                            label.style.background = 'linear-gradient(135deg, #f9fafb 0%, #f3f4f6 100%)';
+                            label.style.border = '2px solid #e5e7eb';
+                            label.style.borderLeft = '4px solid #dc3545';
+                            label.style.padding = '8px 12px';
+                            label.style.borderRadius = '6px';
+                            label.style.opacity = '0.85';
+                            label.style.pointerEvents = 'auto'; // Allow hover effects
+                            
+                            label.onclick = function(e) {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                
+                                // Modern toast notification
+                                const checkbox = label.querySelector('.test-checkbox');
+                                if (checkbox) {
+                                    const testName = checkbox.getAttribute('data-test-name') || 'Unknown';
+                                    const method = checkbox.getAttribute('data-method') || 'Unknown';
+                                    showToast(
+                                        `"${testName} (${method})" has already been submitted for this reference and cannot be selected again.`,
+                                        'warning',
+                                        4000
+                                    );
+                                }
+                                
+                                return false;
+                            };
+                        }
+                        
+                        const span = checkbox.nextElementSibling;
+                        if (span) {
+                            // Update span styling
+                            span.style.color = '#6b7280';
+                            span.style.textDecoration = 'line-through';
+                            span.style.textDecorationColor = '#dc3545';
+                            span.style.textDecorationThickness = '2px';
+                            span.style.fontWeight = '500';
+                        }
+                        
+                        // CRITICAL: Always remove ALL existing badges and tooltips first to prevent duplicates
+                        if (label) {
+                            // Remove ALL badges (in case there are multiple)
+                            const allBadges = label.querySelectorAll('.already-submitted-badge');
+                            allBadges.forEach(b => b.remove());
+                            
+                            // Remove ALL tooltips (in case there are multiple)
+                            const allTooltips = label.querySelectorAll('.test-info-tooltip');
+                            allTooltips.forEach(t => t.remove());
+                            
+                            // Only add badge if it doesn't already exist
+                            if (!label.querySelector('.already-submitted-badge')) {
+                                const badge = document.createElement('span');
+                                badge.className = 'already-submitted-badge';
+                                badge.style.fontSize = '9px';
+                                badge.style.padding = '3px 8px';
+                                badge.innerHTML = '<i class="fas fa-lock" style="font-size: 9px;"></i><span>Already Submitted</span>';
+                                label.appendChild(badge);
+                            }
+                            
+                            // Only add tooltip if it doesn't already exist
+                            if (!label.querySelector('.test-info-tooltip')) {
+                                const tooltip = document.createElement('span');
+                                tooltip.className = 'test-info-tooltip';
+                                tooltip.style.flexShrink = '0';
+                                tooltip.innerHTML = '<i class="fas fa-info-circle tooltip-icon"></i><span class="tooltip-content">This test method has already been submitted for the selected reference. Select a different test method to proceed.</span>';
+                                label.appendChild(tooltip);
+                            }
+                        }
+                    } else {
+                        checkbox.disabled = false;
+                        checkbox.removeAttribute('data-already-submitted');
+                        checkbox.title = '';
+                        checkbox.style.pointerEvents = 'auto';
+                        
+                        const label = checkbox.closest('label');
+                        if (label) {
+                            // Reset label styling
+                            label.classList.remove('disabled-test-label');
+                            label.style.cursor = 'pointer';
+                            label.style.opacity = '1';
+                            label.style.background = '#f8f9fa';
+                            label.style.border = '1px solid #dee2e6';
+                            label.style.borderLeft = '1px solid #dee2e6';
+                            label.style.padding = '8px 12px';
+                            label.style.borderRadius = '4px';
+                            label.style.pointerEvents = 'auto';
+                            label.onclick = null; // Remove click handler
+                            
+                            // Remove badge and tooltip
+                            const badge = label.querySelector('.already-submitted-badge');
+                            if (badge) badge.remove();
+                            const tooltip = label.querySelector('.test-info-tooltip');
+                            if (tooltip) tooltip.remove();
+                        }
+                        
+                        const span = checkbox.nextElementSibling;
+                        if (span) {
+                            // Reset span styling
+                            span.style.color = '#495057';
+                            span.style.textDecoration = 'none';
+                            span.style.fontWeight = 'normal';
+                        }
+                    }
+                });
+            }
+        })
+        .catch(error => {
+            console.error('Error checking submitted tests:', error);
+        })
+        .finally(() => {
+            resetFlag();
+        });
+}
+
+// Prevent checking disabled checkboxes
+document.addEventListener('DOMContentLoaded', function() {
+    // Add click prevention for disabled checkboxes
+    document.querySelectorAll('.test-checkbox').forEach(checkbox => {
+        checkbox.addEventListener('click', function(e) {
+            if (this.disabled || this.hasAttribute('data-already-submitted')) {
+                e.preventDefault();
+                e.stopPropagation();
+                alert('This test has already been submitted for the selected reference and cannot be selected again.');
+                return false;
+            }
+        });
+        
+        checkbox.addEventListener('change', function(e) {
+            if (this.disabled || this.hasAttribute('data-already-submitted')) {
+                e.preventDefault();
+                e.stopPropagation();
+                this.checked = false;
+                return false;
+            }
+        });
+    });
+    
+    // Check submitted tests on page load if reference is already selected
+    const productRef = document.getElementById('product_reference');
+    const externalRef = document.getElementById('external_reference');
+    const individualRollRef = document.getElementById('individual_roll_reference');
+    const fromRef = document.getElementById('from_reference');
+    
+    let currentRef = '';
+    if (fromRef && fromRef.value) {
+        currentRef = fromRef.value;
+    } else if (individualRollRef && individualRollRef.value) {
+        currentRef = individualRollRef.value;
+    } else if (productRef && productRef.value) {
+        currentRef = productRef.value;
+    } else if (externalRef && externalRef.value) {
+        currentRef = externalRef.value;
+    }
+    
+    if (currentRef) {
+        setTimeout(function() {
+            checkAndDisableSubmittedTests(currentRef);
+        }, 500); // Small delay to ensure DOM is ready
+    }
+});
+
 function handleReferenceSelection(selectedValue) {
     const productRefSelect = document.getElementById('product_reference');
+    
+    // Check and disable submitted tests for the selected reference
+    checkAndDisableSubmittedTests(selectedValue);
     
     // Check if fields are locked (read-only mode for resubmitted external reports)
     <?php if ($lock_general_fields): ?>
@@ -2803,6 +5207,9 @@ function handleReferenceSelection(selectedValue) {
     const bundleInfo = document.getElementById('bundle_info');
     
     if (!selectedValue || selectedValue === '') {
+        // Hide bulk roll selection when no reference is selected
+        const bulkSelection = document.getElementById('bulk_roll_selection');
+        if (bulkSelection) bulkSelection.style.display = 'none';
         // Hide individual roll selector
         if (individualRollSelect) {
             individualRollSelect.style.display = 'none';
@@ -2845,6 +5252,9 @@ function handleReferenceSelection(selectedValue) {
         
         // Load reference data for single roll
         loadQCReferenceData(selectedValue);
+        
+        // Check and disable submitted tests for this reference
+        checkAndDisableSubmittedTests(selectedValue);
     }
 }
 
@@ -2860,6 +5270,8 @@ function handleIndividualRollSelection(selectedValue) {
     <?php endif; ?>
     
     if (selectedValue && selectedValue !== '') {
+        // Check and disable submitted tests for the selected individual roll
+        checkAndDisableSubmittedTests(selectedValue);
         // Check if this is from a bundle and get first test data to pre-fill
         const productRefSelect = document.getElementById('product_reference');
         const selectedOption = productRefSelect.options[productRefSelect.selectedIndex];
@@ -4247,6 +6659,20 @@ function updateSampleReferenceId() {
 
         // Handle test selection - only one test at a time
         function handleTestSelection(checkbox) {
+            // CRITICAL CHECK: Prevent if checkbox is disabled or already submitted
+            if (checkbox.disabled || checkbox.hasAttribute('data-already-submitted') || checkbox.readOnly) {
+                console.warn('⚠️ BLOCKED: Attempted to select disabled/already-submitted test:', checkbox.getAttribute('data-test-name'), checkbox.getAttribute('data-method'));
+                checkbox.checked = false;
+                alert('This test has already been submitted for the selected reference and cannot be selected again.');
+                // Hide any test parameters that might have been shown
+                const testItem = checkbox.closest('.test-item');
+                if (testItem) {
+                    const params = testItem.querySelector('.test-parameters');
+                    if (params) params.style.display = 'none';
+                }
+                return false;
+            }
+            
             const isExternalProduct = document.getElementById('is_external_product')?.value === '1';
             
             // AGM should not see test parameters - only test selection
@@ -4308,6 +6734,50 @@ function updateSampleReferenceId() {
         
         // Existing tests data (reference => [methods])
         const existingTests = <?php echo json_encode($existing_tests); ?>;
+        
+        // Modern Toast Notification System
+        function showToast(message, type = 'info', duration = 5000) {
+            const container = document.getElementById('toastContainer');
+            if (!container) return;
+            
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            
+            const icons = {
+                error: 'fas fa-exclamation-circle',
+                warning: 'fas fa-exclamation-triangle',
+                success: 'fas fa-check-circle',
+                info: 'fas fa-info-circle'
+            };
+            
+            const titles = {
+                error: 'Error',
+                warning: 'Warning',
+                success: 'Success',
+                info: 'Information'
+            };
+            
+            toast.innerHTML = `
+                <i class="${icons[type] || icons.info} toast-icon"></i>
+                <div class="toast-content">
+                    <div class="toast-title">${titles[type] || 'Information'}</div>
+                    <div class="toast-message">${message}</div>
+                </div>
+                <button class="toast-close" onclick="this.parentElement.remove()" aria-label="Close">
+                    <i class="fas fa-times"></i>
+                </button>
+            `;
+            
+            container.appendChild(toast);
+            
+            // Auto-remove after duration
+            setTimeout(() => {
+                toast.classList.add('hiding');
+                setTimeout(() => toast.remove(), 300);
+            }, duration);
+            
+            return toast;
+        }
         
         // Filter reference dropdowns to hide already-submitted references for the selected test method
         function filterReferencesByTestMethod(checkbox) {
@@ -7607,6 +10077,19 @@ function updateSampleReferenceId() {
     if (productRef && productRef.value) {
         console.log('🔄 Auto-loading reference data for:', productRef.value);
         loadQCReferenceData(productRef.value);
+        // Also check for submitted tests
+        setTimeout(() => {
+            checkAndDisableSubmittedTests(productRef.value);
+        }, 500);
+    }
+    
+    // Check for individual roll reference
+    const individualRollRef = document.getElementById('individual_roll_reference');
+    if (individualRollRef && individualRollRef.value) {
+        console.log('🔄 Auto-checking submitted tests for individual roll:', individualRollRef.value);
+        setTimeout(() => {
+            checkAndDisableSubmittedTests(individualRollRef.value);
+        }, 500);
     }
     
     // Initialize general info visibility to set proper required attributes
@@ -8118,6 +10601,147 @@ function updateSampleReferenceId() {
                 }
             });
             
+            // Pre-fill bulk reference fields if this is a bulk submission
+            <?php if ($edit_mode && !empty($bulk_from_ref) && !empty($bulk_to_ref)): ?>
+            const bulkFromRef = <?php echo json_encode($bulk_from_ref); ?>;
+            const bulkToRef = <?php echo json_encode($bulk_to_ref); ?>;
+            const submittedMethods = <?php echo json_encode($submitted_test_methods); ?>;
+            const currentReportId = <?php echo $edit_id; ?>;
+            
+            console.log('🔍 Pre-populating bulk references:', { bulkFromRef, bulkToRef });
+            
+            // Pre-populate and disable From/To reference fields
+            setTimeout(() => {
+                // Determine which line was used based on the reference format
+                const lineMatch = bulkFromRef.match(/L(\d+)/);
+                if (lineMatch) {
+                    const lineNum = lineMatch[1];
+                    const lineValue = 'L' + lineNum;
+                    console.log('📍 Detected line:', lineValue);
+                    
+                    const lineRadio = document.querySelector(`input[name="line"][value="${lineValue}"]`);
+                    if (lineRadio) {
+                        console.log('✅ Found line radio button, selecting it');
+                        lineRadio.checked = true;
+                        
+                        // Trigger filterByLine function to populate dropdowns
+                        if (typeof filterByLine === 'function') {
+                            console.log('📋 Calling filterByLine function');
+                            filterByLine(lineValue);
+                        } else {
+                            console.log('⚠️ filterByLine not found, dispatching change event');
+                            const changeEvent = new Event('change', { bubbles: true });
+                            lineRadio.dispatchEvent(changeEvent);
+                        }
+                        
+                        // Wait for dropdowns to populate, then set values - try multiple times
+                        let attempts = 0;
+                        const maxAttempts = 20;
+                        const trySetValues = () => {
+                            attempts++;
+                            console.log(`🔄 Attempt ${attempts} to set bulk reference values`);
+                            
+                            const fromRefSelect = document.getElementById('from_reference');
+                            const toRefSelect = document.getElementById('to_reference');
+                            const bulkRefSelection = document.getElementById('bulk_reference_selection');
+                            
+                            // Make sure bulk reference selection is visible
+                            if (bulkRefSelection) {
+                                bulkRefSelection.style.display = 'block';
+                                console.log('✅ Bulk reference selection div is visible');
+                            }
+                            
+                            // Check if options are populated
+                            const fromHasOptions = fromRefSelect && fromRefSelect.options.length > 1;
+                            const toHasOptions = toRefSelect && toRefSelect.options.length > 1;
+                            
+                            console.log('📊 Dropdown status:', {
+                                fromHasOptions,
+                                fromOptionsCount: fromRefSelect ? fromRefSelect.options.length : 0,
+                                toHasOptions,
+                                toOptionsCount: toRefSelect ? toRefSelect.options.length : 0
+                            });
+                            
+                            if (fromHasOptions && toHasOptions) {
+                                // Options are populated, set values
+                                let foundFrom = false;
+                                let foundTo = false;
+                                
+                                if (fromRefSelect) {
+                                    // Find the option that matches bulkFromRef
+                                    for (let i = 0; i < fromRefSelect.options.length; i++) {
+                                        const option = fromRefSelect.options[i];
+                                        if (option.value === bulkFromRef) {
+                                            fromRefSelect.selectedIndex = i;
+                                            foundFrom = true;
+                                            console.log('✅ Found and selected From reference:', bulkFromRef);
+                                            break;
+                                        }
+                                    }
+                                    
+                                    if (foundFrom) {
+                                        fromRefSelect.disabled = true;
+                                        fromRefSelect.style.background = '#f5f5f5';
+                                        fromRefSelect.style.cursor = 'not-allowed';
+                                        fromRefSelect.setAttribute('readonly', 'readonly');
+                                    } else {
+                                        console.warn('⚠️ From reference not found in dropdown:', bulkFromRef);
+                                        // Log all available options for debugging
+                                        console.log('Available From options:', Array.from(fromRefSelect.options).map(opt => opt.value));
+                                    }
+                                }
+                                
+                                if (toRefSelect) {
+                                    // Find the option that matches bulkToRef
+                                    for (let i = 0; i < toRefSelect.options.length; i++) {
+                                        const option = toRefSelect.options[i];
+                                        if (option.value === bulkToRef) {
+                                            toRefSelect.selectedIndex = i;
+                                            foundTo = true;
+                                            console.log('✅ Found and selected To reference:', bulkToRef);
+                                            break;
+                                        }
+                                    }
+                                    
+                                    if (foundTo) {
+                                        toRefSelect.disabled = true;
+                                        toRefSelect.style.background = '#f5f5f5';
+                                        toRefSelect.style.cursor = 'not-allowed';
+                                        toRefSelect.setAttribute('readonly', 'readonly');
+                                    } else {
+                                        console.warn('⚠️ To reference not found in dropdown:', bulkToRef);
+                                        // Log all available options for debugging
+                                        console.log('Available To options:', Array.from(toRefSelect.options).map(opt => opt.value));
+                                    }
+                                }
+                                
+                                if (foundFrom && foundTo) {
+                                    console.log('✅ Successfully set both From and To references');
+                                    // Don't check for already submitted tests since we're in edit mode
+                                    // The test methods are already filtered in PHP to only show submitted ones
+                                } else if (attempts < maxAttempts) {
+                                    // Values not found yet, try again
+                                    setTimeout(trySetValues, 500);
+                                }
+                            } else if (attempts < maxAttempts) {
+                                // Options not ready yet, try again
+                                setTimeout(trySetValues, 500);
+                            } else {
+                                console.error('❌ Failed to populate dropdowns after', maxAttempts, 'attempts');
+                            }
+                        };
+                        
+                        // Start trying after initial delay to allow filterByLine to complete
+                        setTimeout(trySetValues, 1000);
+                    } else {
+                        console.error('❌ Line radio button not found for:', lineValue);
+                    }
+                } else {
+                    console.error('❌ Could not extract line number from reference:', bulkFromRef);
+                }
+            }, 1000);
+            <?php endif; ?>
+            
             // Pre-fill reference fields and trigger data loading
             if (existingData.product_reference) {
                 const productRef = document.getElementById('product_reference');
@@ -8175,9 +10799,63 @@ function updateSampleReferenceId() {
                 }
             }
             
-            // Auto-select the test method checkbox
+            // Auto-select the test method checkbox for the current report
             const selectedMethod = reportData.chosen_method;
             const selectedTestName = reportData.test_name;
+            
+            <?php if ($edit_mode && !empty($submitted_test_methods)): ?>
+            // In bulk edit mode, only check methods that were submitted
+            const submittedMethods = <?php echo json_encode($submitted_test_methods); ?>;
+            
+            // Try multiple times to ensure checkboxes are found
+            let checkboxAttempts = 0;
+            const maxCheckboxAttempts = 10;
+            const tryCheckCheckboxes = () => {
+                checkboxAttempts++;
+                let foundAny = false;
+                
+                Object.keys(submittedMethods).forEach(testName => {
+                    const submittedMethodsForTest = submittedMethods[testName];
+                    const testCheckboxes = document.querySelectorAll(`input.test-checkbox[data-test-name="${testName}"]`);
+                    
+                    testCheckboxes.forEach(checkbox => {
+                        const method = checkbox.getAttribute('data-method');
+                        if (submittedMethodsForTest.includes(method)) {
+                            foundAny = true;
+                            checkbox.checked = true;
+                            // Trigger change event first
+                            checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+                            // Then trigger test selection to load parameters
+                            if (typeof handleTestSelection === 'function') {
+                                setTimeout(() => {
+                                    handleTestSelection(checkbox);
+                                }, 100);
+                            }
+                        }
+                    });
+                });
+                
+                if (!foundAny && checkboxAttempts < maxCheckboxAttempts) {
+                    setTimeout(tryCheckCheckboxes, 300);
+                } else if (foundAny) {
+                    // Pre-fill test data for all checked methods
+                    setTimeout(() => {
+                        Object.keys(submittedMethods).forEach(testName => {
+                            const submittedMethodsForTest = submittedMethods[testName];
+                            submittedMethodsForTest.forEach(method => {
+                                if (typeof prefillTestData === 'function') {
+                                    prefillTestData(existingData, testName, method);
+                                }
+                            });
+                        });
+                    }, 1500);
+                }
+            };
+            
+            setTimeout(tryCheckCheckboxes, 2000);
+            <?php else: ?>
+            // Single report edit mode
+            setTimeout(() => {
             const testCheckboxes = document.querySelectorAll('.test-checkbox');
             
             testCheckboxes.forEach(cb => {
@@ -8185,14 +10863,23 @@ function updateSampleReferenceId() {
                 const testName = cb.getAttribute('data-test-name');
                 if (method === selectedMethod && testName === selectedTestName) {
                     cb.checked = true;
+                        // Trigger change event first
+                        cb.dispatchEvent(new Event('change', { bubbles: true }));
+                        // Then trigger test selection
+                        if (typeof handleTestSelection === 'function') {
+                            setTimeout(() => {
                     handleTestSelection(cb);
+                            }, 100);
+                        }
                     
                     // Wait for parameters to be generated, then pre-fill them
                     setTimeout(function() {
                         prefillTestData(existingData, selectedTestName, selectedMethod);
-                    }, 800);
+                        }, 1500);
                 }
             });
+            }, 1000);
+            <?php endif; ?>
             
         }, 300);
         
@@ -8740,6 +11427,7 @@ function updateSampleReferenceId() {
         <h2 style="margin-top:0; color:#f44336; margin-bottom:20px;"><i class="fas fa-exclamation-triangle"></i> Reject QC Test Order</h2>
         <form method="POST" id="checkerRejectForm">
           <input type="hidden" name="checker_report_number" id="checkerRejectReportNumber">
+          <input type="hidden" name="checker_report_numbers" id="checkerRejectReportNumbers">
           <input type="hidden" name="checker_action" value="rejected">
           
           <div class="form-group" style="margin-bottom:25px;">
@@ -8788,9 +11476,10 @@ function updateSampleReferenceId() {
     <!-- Admin Rejection Modal -->
     <div id="adminRejectModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:10000; overflow-y:auto;">
       <div style="background:#fff; max-width:550px; margin:50px auto; padding:35px; border-radius:12px; box-shadow:0 4px 20px rgba(0,0,0,0.3);">
-        <h2 style="margin-top:0; color:#f44336; margin-bottom:20px;"><i class="fas fa-exclamation-triangle"></i> Reject QC Test Order</h2>
+        <h2 class="modal-title" style="margin-top:0; color:#f44336; margin-bottom:20px;"><i class="fas fa-exclamation-triangle"></i> Reject Report</h2>
         <form method="POST" id="adminRejectForm">
           <input type="hidden" name="admin_report_number" id="adminRejectReportNumber">
+          <input type="hidden" name="admin_report_numbers" id="adminRejectReportNumbers">
           <input type="hidden" name="admin_action" value="rejected">
           
           <div class="form-group" style="margin-bottom:25px;">
@@ -8818,12 +11507,41 @@ function updateSampleReferenceId() {
 
     function openCheckerRejectModal(reportNumber) {
       document.getElementById('checkerRejectReportNumber').value = reportNumber;
+      document.getElementById('checkerRejectReportNumbers').value = ''; // Clear bulk field
       document.getElementById('checkerRejectModal').style.display = 'block';
+    }
+
+    function openBulkCheckerRejectModal(reportNumbersStr, count) {
+      document.getElementById('checkerRejectReportNumbers').value = reportNumbersStr;
+      document.getElementById('checkerRejectReportNumber').value = ''; // Clear single field
+      document.getElementById('checkerRejectModal').style.display = 'block';
+      // Update modal title to show bulk action
+      var modalTitle = document.querySelector('#checkerRejectModal .modal-title');
+      if (modalTitle) {
+        modalTitle.textContent = 'Reject ' + count + ' Report(s)';
+      }
     }
 
     function closeCheckerRejectModal() {
       document.getElementById('checkerRejectModal').style.display = 'none';
       document.getElementById('checkerRejectForm').reset();
+      document.getElementById('checkerRejectReportNumbers').value = '';
+      // Reset modal title
+      var modalTitle = document.querySelector('#checkerRejectModal .modal-title');
+      if (modalTitle) {
+        modalTitle.textContent = 'Reject Report';
+      }
+    }
+
+    function viewBulkReports(reportNumbers) {
+      // Open each report in a new tab
+      reportNumbers.forEach(function(reportNumber) {
+        window.open('../admin/view_qc_test_order.php?report_number=' + encodeURIComponent(reportNumber), '_blank');
+      });
+    }
+
+    function confirmBulkApproval(count) {
+      return confirm('Are you sure you want to approve all ' + count + ' report(s)? This action will forward them to AGM/Admin for final approval.');
     }
 
     function openApprovalModal(reportNumber) {
@@ -8838,12 +11556,34 @@ function updateSampleReferenceId() {
 
     function openAdminRejectModal(reportNumber) {
       document.getElementById('adminRejectReportNumber').value = reportNumber;
+      document.getElementById('adminRejectReportNumbers').value = ''; // Clear bulk field
       document.getElementById('adminRejectModal').style.display = 'block';
+    }
+
+    function openBulkAdminRejectModal(reportNumbersStr, count) {
+      document.getElementById('adminRejectReportNumbers').value = reportNumbersStr;
+      document.getElementById('adminRejectReportNumber').value = ''; // Clear single field
+      document.getElementById('adminRejectModal').style.display = 'block';
+      // Update modal title to show bulk action
+      var modalTitle = document.querySelector('#adminRejectModal .modal-title');
+      if (modalTitle) {
+        modalTitle.textContent = 'Reject ' + count + ' Report(s)';
+      }
     }
 
     function closeAdminRejectModal() {
       document.getElementById('adminRejectModal').style.display = 'none';
       document.getElementById('adminRejectForm').reset();
+      document.getElementById('adminRejectReportNumbers').value = '';
+      // Reset modal title
+      var modalTitle = document.querySelector('#adminRejectModal .modal-title');
+      if (modalTitle) {
+        modalTitle.textContent = 'Reject Report';
+      }
+    }
+
+    function confirmBulkAdminApproval(count) {
+      return confirm('Are you sure you want to approve all ' + count + ' report(s)? This action will finalize the approval.');
     }
 
     // Close modal when clicking outside

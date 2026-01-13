@@ -37,8 +37,8 @@ $printQty = (int)($_POST['printQty'] ?? 0);
 $reporterId = $_SESSION['user_id'] ?? 0;
 $reporterName = $_SESSION['username'] ?? 'Unknown';
 
-// Validate required fields
-$required = ['brandingId', 'dateTime', 'shiftIncharge', 'referenceNumber', 'cncCuttingBatch', 'projectId', 'printMachine', 'bagSize', 'printQty'];
+// Validate required fields (referenceNumber is now optional)
+$required = ['brandingId', 'dateTime', 'shiftIncharge', 'cncCuttingBatch', 'projectId', 'printMachine', 'bagSize', 'printQty'];
 foreach ($required as $field) {
     if (empty($$field)) {
         header("Location: ../forms/branding_entry.php?error=" . urlencode("Missing required field: $field"));
@@ -80,10 +80,15 @@ try {
     $conn->query("ALTER TABLE branding_entries DROP COLUMN IF EXISTS machine_id");
     $conn->query("ALTER TABLE branding_entries DROP COLUMN IF EXISTS ncp_pcs");
 
-    // Insert the branding entry
+    // Insert the branding entry (reference_number is optional, can be NULL)
     $stmt = $conn->prepare("INSERT INTO branding_entries (branding_id, date_time, shift_incharge, reference_number, cnc_cutting_batch, project_id, print_machine, bag_size, print_qty, reporter_id, reporter_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
     if (!$stmt) {
         throw new Exception('Prepare failed: ' . $conn->error);
+    }
+
+    // Set reference_number to empty string if not provided (will be stored as NULL in DB)
+    if (empty($referenceNumber)) {
+        $referenceNumber = '';
     }
 
     $stmt->bind_param(

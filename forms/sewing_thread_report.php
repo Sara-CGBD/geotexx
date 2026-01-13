@@ -47,26 +47,96 @@ try {
     $reporter_full_name = $reporter_name;
 }
 
-// Fetch store received entries for reference dropdown (exclude only if sewing test already done)
+// Fetch store received entries for reference dropdown (exclude only if sewing test already approved)
 $storeEntries = [];
 try {
-    $storeQuery = $conn->query("SELECT sre.entry_number, sre.material_type, sre.amount_kg, sre.date_time as received_date 
-                                 FROM store_received_entries sre
-                                 WHERE sre.entry_number NOT IN (
-                                     SELECT DISTINCT store_entry_reference 
-                                     FROM sewing_thread_reports 
-                                     WHERE store_entry_reference IS NOT NULL
-                                 )
-                                 ORDER BY sre.date_time DESC, sre.created_at DESC 
-                                 LIMIT 100");
+    // First check if sewing_thread_reports table exists
+    $tableExists = $conn->query("SHOW TABLES LIKE 'sewing_thread_reports'");
+    $hasSewingTestTable = ($tableExists && $tableExists->num_rows > 0);
+    
+    if ($hasSewingTestTable) {
+        // Exclude entries that have been approved (only approved reports block re-submission)
+        // First, get all approved entry references
+        $submittedRefs = [];
+        $refQuery = $conn->query("SELECT DISTINCT store_entry_reference 
+                                  FROM sewing_thread_reports 
+                                  WHERE store_entry_reference IS NOT NULL 
+                                  AND store_entry_reference != ''
+                                  AND status = 'approved'");
+        if ($refQuery) {
+            while ($refRow = $refQuery->fetch_assoc()) {
+                $submittedRefs[] = trim($refRow['store_entry_reference']);
+            }
+        }
+        
+        // Now get store entries excluding the approved ones
+        $stmt = null;
+        if (!empty($submittedRefs)) {
+            // Use prepared statement to avoid SQL injection
+            $placeholders = str_repeat('?,', count($submittedRefs) - 1) . '?';
+            $stmt = $conn->prepare("SELECT entry_number, material_type, amount_kg, date_time as received_date, manufacturer_name 
+                                     FROM store_received_entries 
+                                     WHERE entry_number NOT IN ($placeholders)
+                                     ORDER BY date_time DESC, created_at DESC 
+                                     LIMIT 100");
+            $stmt->bind_param(str_repeat('s', count($submittedRefs)), ...$submittedRefs);
+            $stmt->execute();
+            $storeQuery = $stmt->get_result();
+        } else {
+            // No approved entries, show all
+            $storeQuery = $conn->query("SELECT entry_number, material_type, amount_kg, date_time as received_date, manufacturer_name 
+                                        FROM store_received_entries 
+                                        ORDER BY date_time DESC, created_at DESC 
+                                        LIMIT 100");
+        }
+    } else {
+        // If table doesn't exist, show all entries
+        $storeQuery = $conn->query("SELECT sre.entry_number, sre.material_type, sre.amount_kg, sre.date_time as received_date, sre.manufacturer_name 
+                                     FROM store_received_entries sre
+                                     ORDER BY sre.date_time DESC, sre.created_at DESC 
+                                     LIMIT 100");
+    }
+    
     if ($storeQuery) {
-        while ($row = $storeQuery->fetch_assoc()) {
-            $storeEntries[] = $row;
+        // Handle both mysqli_result and mysqli_stmt result
+        if (is_object($storeQuery) && method_exists($storeQuery, 'fetch_assoc')) {
+            while ($row = $storeQuery->fetch_assoc()) {
+                $storeEntries[] = $row;
+            }
+        }
+        // Close statement if it was a prepared statement
+        if (isset($stmt) && $stmt instanceof mysqli_stmt) {
+            $stmt->close();
+        }
+    } else {
+        // If query failed, try simple query without exclusions
+        error_log("Store entries query returned false, trying simple query");
+        $simpleQuery = $conn->query("SELECT entry_number, material_type, amount_kg, date_time as received_date, manufacturer_name 
+                                      FROM store_received_entries 
+                                      ORDER BY date_time DESC 
+                                      LIMIT 100");
+        if ($simpleQuery) {
+            while ($row = $simpleQuery->fetch_assoc()) {
+                $storeEntries[] = $row;
+            }
         }
     }
 } catch (Exception $e) {
-    // Silently fail if table doesn't exist yet
+    // Log error but try to fetch all entries as fallback
     error_log("Error fetching store entries for sewing test: " . $e->getMessage());
+    try {
+        $fallbackQuery = $conn->query("SELECT entry_number, material_type, amount_kg, date_time as received_date, manufacturer_name 
+                                        FROM store_received_entries 
+                                        ORDER BY date_time DESC 
+                                        LIMIT 100");
+        if ($fallbackQuery) {
+            while ($row = $fallbackQuery->fetch_assoc()) {
+                $storeEntries[] = $row;
+            }
+        }
+    } catch (Exception $e2) {
+        error_log("Fallback query also failed: " . $e2->getMessage());
+    }
 }
 
 $message = '';
@@ -1155,9 +1225,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_report'])) {
     if ($result['success']) {
         $user_role = strtolower(trim($_SESSION['role'] ?? ''));
         if (in_array($user_role, ['admin', 'agm ops', 'agm operations'])) {
-            $message = "✅ Sewing Thread Report saved and auto-approved! Report Number: " . $actual_report_number;
+            $message = "Sewing Thread Report saved and auto-approved! Report Number: " . $actual_report_number;
         } else {
-            $message = "✅ Sewing Thread Report submitted successfully! Report Number: " . $actual_report_number . " - Status: Pending Approval";
+            $message = "Sewing Thread Report submitted successfully! Report Number: " . $actual_report_number . " - Status: Pending Approval";
         }
         
         // Store success message in session and redirect to refresh dropdown
@@ -1277,7 +1347,7 @@ $unit_options = ['dTex', 'cN/dTex', '%'];
   
   <?php if ($message): ?>
     <div class="alert alert-success" style="background:#d4edda;color:#155724;padding:12px;border-radius:6px;border:1px solid #c3e6cb;margin-bottom:15px;">
-      ✅ <?php echo htmlspecialchars($message); ?>
+      <?php echo htmlspecialchars($message); ?>
     </div>
   <?php endif; ?>
 
@@ -1449,18 +1519,28 @@ $unit_options = ['dTex', 'cN/dTex', '%'];
       </div>
       <div class="form-group">
         <label>Store Entry Reference: <span style="color: #e74c3c;">*</span></label>
-        <select name="store_entry_reference" required>
+        <select name="store_entry_reference" required style="width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 6px; background: #fff; font-family: inherit;">
           <option value="">-- Select Store Entry --</option>
-          <?php foreach ($storeEntries as $entry): ?>
-            <option value="<?php echo htmlspecialchars($entry['entry_number']); ?>" <?php 
-              echo ($lastSubmittedData && $lastSubmittedData['store_entry_reference'] === $entry['entry_number']) ? 'selected' : '';
-            ?>>
-              <?php echo htmlspecialchars($entry['entry_number']); ?> - 
-              <?php echo htmlspecialchars($entry['material_type']); ?> 
-              (<?php echo number_format($entry['amount_kg'], 2); ?> kg) - 
-              <?php echo date('d M Y', strtotime($entry['received_date'])); ?>
-            </option>
-          <?php endforeach; ?>
+          <?php if (empty($storeEntries)): ?>
+            <option value="" disabled>No store entries available</option>
+          <?php else: ?>
+            <?php foreach ($storeEntries as $entry): ?>
+              <option value="<?php echo htmlspecialchars($entry['entry_number']); ?>" 
+                data-manufacturer="<?php echo htmlspecialchars($entry['manufacturer_name'] ?? ''); ?>"
+                <?php 
+                  $storeSelected = false;
+                  if ($lastSubmittedData && ($lastSubmittedData['store_entry_reference'] ?? '') === $entry['entry_number']) {
+                      $storeSelected = true;
+                  }
+                  echo $storeSelected ? 'selected' : '';
+                ?>>
+                <?php echo htmlspecialchars($entry['entry_number']); ?> - 
+                <?php echo htmlspecialchars($entry['material_type']); ?> 
+                (<?php echo number_format($entry['amount_kg'], 2); ?> kg) - 
+                <?php echo date('d M Y', strtotime($entry['received_date'])); ?>
+              </option>
+            <?php endforeach; ?>
+          <?php endif; ?>
         </select>
         <small style="color: #7f8c8d; font-size: 0.85em;">Select the material from store that you are testing</small>
       </div>

@@ -11,6 +11,16 @@ if (!isset($_SESSION['user_id']) || !isset($_SESSION['username'])) {
 date_default_timezone_set('Asia/Dhaka');
 $conn = SecurityConfig::getConnection();
 
+// Detect sewing table name (sewing_machine_entry or swing_machine_entry)
+$sewingTable = 'sewing_machine_entry';
+$tableCheck = $conn->query("SHOW TABLES LIKE 'sewing_machine_entry'");
+if (!$tableCheck || $tableCheck->num_rows == 0) {
+    $tableCheck = $conn->query("SHOW TABLES LIKE 'swing_machine_entry'");
+    if ($tableCheck && $tableCheck->num_rows > 0) {
+        $sewingTable = 'swing_machine_entry';
+    }
+}
+
 // Detect optional columns used in queries
 $fgHasProductType = false;
 $fgColCheck = $conn->query("SHOW COLUMNS FROM fg_entry LIKE 'product_type'");
@@ -77,7 +87,7 @@ $stmt->close();
 $sewingQuery = "SELECT 
     COUNT(*) as total_sewing_operations,
     COALESCE(SUM(sewing_qty), 0) as total_sewing_qty
-FROM swing_machine_entry 
+FROM {$sewingTable} 
 WHERE DATE(date_time) BETWEEN ? AND ?";
 $stmt = $conn->prepare($sewingQuery);
 $stmt->bind_param('ss', $dateFrom, $dateTo);
@@ -1090,22 +1100,22 @@ if (!empty($moduleTargetFullList)) {
                 </div>
                 <div>
                     <div class="kpi-title">Bag Production</div>
-                    <div class="kpi-value"><?php echo number_format($bagProduction['total_bags']); ?></div>
-                    <div class="kpi-subtitle">Total Bags</div>
+                    <div class="kpi-value"><?php echo number_format($bagProduction['total_bag_qty']); ?></div>
+                    <div class="kpi-subtitle">Total Quantity (pcs)</div>
                 </div>
             </div>
             <div class="kpi-details">
                 <div class="kpi-detail-row">
-                    <span class="kpi-detail-label">CNC Batches Cut</span>
-                    <span class="kpi-detail-value"><?php echo number_format($bagProduction['total_cnc_batches']); ?></span>
+                    <span class="kpi-detail-label">Rolls Received</span>
+                    <span class="kpi-detail-value"><?php echo number_format($sheetProduction['total_sheets']); ?> rolls</span>
                 </div>
                 <div class="kpi-detail-row">
-                    <span class="kpi-detail-label">Sewing Operations</span>
-                    <span class="kpi-detail-value"><?php echo number_format($sewingStats['total_sewing_operations']); ?></span>
+                    <span class="kpi-detail-label">Sewing Quantity</span>
+                    <span class="kpi-detail-value"><?php echo number_format($sewingStats['total_sewing_qty']); ?> pcs</span>
                 </div>
                 <div class="kpi-detail-row">
-                    <span class="kpi-detail-label">Branding Operations</span>
-                    <span class="kpi-detail-value"><?php echo number_format($brandingStats['total_branding_operations']); ?></span>
+                    <span class="kpi-detail-label">Branding Quantity</span>
+                    <span class="kpi-detail-value"><?php echo number_format($brandingStats['total_branding_qty']); ?> pcs</span>
                 </div>
             </div>
         </div>
@@ -1184,6 +1194,10 @@ if (!empty($moduleTargetFullList)) {
             </div>
             <div class="kpi-details">
                 <div class="kpi-detail-row">
+                    <span class="kpi-detail-label">Scrap Quantity</span>
+                    <span class="kpi-detail-value"><?php echo number_format($scrapTotals['total_scrap_qty'], 2); ?> kg</span>
+                </div>
+                <div class="kpi-detail-row">
                     <span class="kpi-detail-label">Scrap Records</span>
                     <span class="kpi-detail-value"><?php echo number_format($scrapTotals['total_scrap_records']); ?></span>
                 </div>
@@ -1222,6 +1236,10 @@ if (!empty($moduleTargetFullList)) {
                 </div>
             <?php endif; ?>
             <div class="kpi-details">
+                <div class="kpi-detail-row">
+                    <span class="kpi-detail-label">Recycle Quantity</span>
+                    <span class="kpi-detail-value"><?php echo number_format($recycleStats['total_recycled_qty'], 2); ?> kg</span>
+                </div>
                 <div class="kpi-detail-row">
                     <span class="kpi-detail-label">Recycle Records</span>
                     <span class="kpi-detail-value"><?php echo number_format($recycleStats['total_recycle_records']); ?></span>

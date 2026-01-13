@@ -87,6 +87,170 @@ $operator_name = $_SESSION['username'];
     .submit-btn { background:#2ecc71; color:white; }
     .clear-btn { background:#e74c3c; color:white; }
     .readonly { background:#ecf0f1; }
+    
+    /* Quantity Limit Popup Styles */
+    .qty-limit-popup-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(15, 23, 42, 0.75);
+      backdrop-filter: blur(8px);
+      z-index: 9999;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0;
+      visibility: hidden;
+      transition: all 0.3s ease;
+    }
+    
+    .qty-limit-popup-overlay.show {
+      opacity: 1;
+      visibility: visible;
+    }
+    
+    .qty-limit-popup {
+      background: white;
+      border-radius: 16px;
+      max-width: 400px;
+      width: 90%;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+      position: relative;
+      transform: scale(0.9) translateY(20px);
+      transition: all 0.3s ease;
+      overflow: hidden;
+    }
+    
+    .qty-limit-popup.show {
+      transform: scale(1) translateY(0);
+    }
+    
+    .qty-limit-popup-header {
+      background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+      padding: 16px 20px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      color: white;
+    }
+    
+    .qty-limit-popup-icon {
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.2);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 28px;
+      flex-shrink: 0;
+    }
+    
+    .qty-limit-popup-title {
+      font-size: 18px;
+      font-weight: 700;
+      margin: 0;
+      text-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    }
+    
+    .qty-limit-popup-body {
+      padding: 20px 24px 24px;
+    }
+    
+    .qty-limit-popup-message {
+      font-size: 14px;
+      color: #64748b;
+      margin-bottom: 16px;
+      line-height: 1.5;
+    }
+    
+    .qty-limit-popup-details {
+      background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+      border: 1px solid #fbbf24;
+      border-radius: 12px;
+      padding: 14px 16px;
+      margin-bottom: 20px;
+      font-size: 13px;
+      color: #78350f;
+    }
+    
+    .qty-limit-popup-details strong {
+      color: #92400e;
+      font-weight: 600;
+      display: inline-block;
+      min-width: 70px;
+    }
+    
+    .qty-limit-popup-details-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 0;
+    }
+    
+    .qty-limit-popup-details-row:last-child {
+      padding-bottom: 0;
+    }
+    
+    .qty-limit-popup-details-row:first-child {
+      padding-top: 0;
+    }
+    
+    .qty-limit-popup-button {
+      background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+      color: white;
+      border: none;
+      padding: 12px 32px;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+      width: 100%;
+    }
+    
+    .qty-limit-popup-button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 16px rgba(239, 68, 68, 0.4);
+    }
+    
+    .qty-limit-popup-button:active {
+      transform: translateY(0);
+      box-shadow: 0 2px 8px rgba(239, 68, 68, 0.3);
+    }
+    
+    .qty-limit-popup-close {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.2);
+      border: none;
+      color: #ffffff;
+      font-size: 18px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s ease;
+      z-index: 10;
+      backdrop-filter: blur(10px);
+      line-height: 1;
+    }
+    
+    .qty-limit-popup-close:hover {
+      background: rgba(255, 255, 255, 0.3);
+      transform: scale(1.1);
+    }
+    
+    .qty-limit-popup-close:active {
+      transform: scale(0.95);
+    }
   </style>
 </head>
 <body>
@@ -290,24 +454,24 @@ $operator_name = $_SESSION['username'];
     const warning = document.getElementById('weight_warning');
     
     // Show loading indicator
-    availableText.textContent = 'â³ Loading available quantity...';
+    availableText.textContent = ' Loading available quantity...';
     availableText.style.color = '#3498db';
     availableText.style.display = 'block';
     warning.style.display = 'none';
     
-    console.log('ðŸ” Fetching available material for:', materialType);
-    console.log('ðŸ“¡ API URL:', `api/get_available_material.php?material_type=${encodeURIComponent(materialType)}`);
+    console.log('Fetching available material for:', materialType);
+    console.log('API URL:', `api/get_fiber_available_material.php?material_type=${encodeURIComponent(materialType)}`);
     
     try {
-      const response = await fetch(`api/get_available_material.php?material_type=${encodeURIComponent(materialType)}`);
-      console.log('ðŸ“¥ Response status:', response.status);
+      const response = await fetch(`api/get_fiber_available_material.php?material_type=${encodeURIComponent(materialType)}`);
+      console.log('Response status:', response.status);
       
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
       
       const data = await response.json();
-      console.log('ðŸ“¦ API Response:', data);
+      console.log('API Response:', data);
       
       if (data.success) {
         const availableQty = parseFloat(data.available_quantity) || 0;
@@ -332,13 +496,15 @@ $operator_name = $_SESSION['username'];
         throw new Error(data.error || 'Unknown error');
       }
     } catch (error) {
-      console.error('âŒ Error fetching available material:', error);
-      availableText.textContent = `âš ï¸ Error: ${error.message} (Check console)`;
+      console.error(' Error fetching available material:', error);
+      availableText.textContent = `Error: ${error.message} (Check console)`;
       availableText.style.color = '#e74c3c';
       availableText.style.display = 'block';
       availableText.style.fontWeight = '600';
     }
   }
+
+  let lastPopupWeight = null; // Track last weight that triggered popup to avoid repeated popups
 
   // Validate total weight against available quantity
   function validateTotalWeight() {
@@ -352,32 +518,107 @@ $operator_name = $_SESSION['username'];
     
     if (maxWeight > 0 && totalWeight > maxWeight) {
       // Exceeds available - show red warning
-      console.log('âŒ Weight exceeds available!');
-      warning.textContent = `âš ï¸ Total weight (${totalWeight} kg) exceeds available quantity (${maxWeight.toFixed(2)} kg)`;
+      console.log(' Weight exceeds available!');
+      warning.textContent = `Total weight (${totalWeight} kg) exceeds available quantity (${maxWeight.toFixed(2)} kg)`;
       warning.style.display = 'block';
       warning.style.fontWeight = '600';
       totalWeightInput.style.borderColor = '#e74c3c';
       totalWeightInput.style.border = '2px solid #e74c3c';
-    } else if (maxWeight > 0) {
-      // Within limit - keep available text green, hide warning
-      console.log('Weight is within available quantity');
-      warning.style.display = 'none';
-      totalWeightInput.style.borderColor = '#ccc';
-      totalWeightInput.style.border = '1px solid #ccc';
       
-      // Make sure available text is green
-      if (availableText) {
-        availableText.style.color = '#27ae60';
-        availableText.style.display = 'block';
+      // Show popup notification (only once per weight value to avoid spam)
+      if (lastPopupWeight !== totalWeight) {
+        showQtyLimitPopup(totalWeight, maxWeight);
+        lastPopupWeight = totalWeight;
       }
     } else {
-      // No max weight set yet
-      console.log('â„¹ï¸ No max weight set yet');
-      warning.style.display = 'none';
-      totalWeightInput.style.borderColor = '#ccc';
-      totalWeightInput.style.border = '1px solid #ccc';
+      // Reset popup tracking when weight is valid
+      if (totalWeight <= maxWeight) {
+        lastPopupWeight = null;
+      }
+      
+      if (maxWeight > 0) {
+        // Within limit - keep available text green, hide warning
+        console.log('Weight is within available quantity');
+        warning.style.display = 'none';
+        totalWeightInput.style.borderColor = '#ccc';
+        totalWeightInput.style.border = '1px solid #ccc';
+        
+        // Make sure available text is green
+        if (availableText) {
+          availableText.style.color = '#27ae60';
+          availableText.style.display = 'block';
+        }
+      } else {
+        // No max weight set yet
+        console.log('No max weight set yet');
+        warning.style.display = 'none';
+        totalWeightInput.style.borderColor = '#ccc';
+        totalWeightInput.style.border = '1px solid #ccc';
+      }
     }
   }
+
+  function showQtyLimitPopup(enteredWeight, maxWeight) {
+    const popup = document.getElementById('qtyLimitPopup');
+    const overlay = document.getElementById('qtyLimitPopupOverlay');
+    const message = document.getElementById('qtyLimitPopupMessage');
+    const details = document.getElementById('qtyLimitPopupDetails');
+    
+    // Shorter, more user-friendly message
+    message.textContent = `Only ${maxWeight.toFixed(2)} kg available. You entered ${enteredWeight.toFixed(2)} kg.`;
+    
+    // Simplified details structure
+    const excess = (enteredWeight - maxWeight).toFixed(2);
+    details.innerHTML = `
+      <div class="qty-limit-popup-details-row">
+        <strong>Available:</strong>
+        <span>${maxWeight.toFixed(2)} kg</span>
+      </div>
+      <div class="qty-limit-popup-details-row">
+        <strong>Excess:</strong>
+        <span style="color: #dc2626; font-weight: 700;">${excess} kg</span>
+      </div>
+    `;
+    
+    overlay.classList.add('show');
+    // Small delay to ensure overlay is rendered first
+    setTimeout(() => {
+        popup.classList.add('show');
+    }, 10);
+  }
+
+  function closeQtyLimitPopup() {
+    try {
+        const popup = document.getElementById('qtyLimitPopup');
+        const overlay = document.getElementById('qtyLimitPopupOverlay');
+        
+        if (popup && overlay) {
+            popup.classList.remove('show');
+            overlay.classList.remove('show');
+            
+            // Focus back on total weight input field
+            setTimeout(() => {
+                const totalWeightInput = document.getElementById('total_weight');
+                if (totalWeightInput) {
+                    totalWeightInput.focus();
+                    totalWeightInput.select();
+                }
+            }, 100);
+        }
+    } catch (error) {
+        console.error('Error closing popup:', error);
+    }
+  }
+
+  // Close popup on ESC key
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+        const popup = document.getElementById('qtyLimitPopup');
+        if (popup && popup.classList.contains('show')) {
+            closeQtyLimitPopup();
+        }
+    }
+  });
 
   function clearForm(){
     document.querySelectorAll('#projectGroup .btn,#materialTypeGroup .btn,#lineNumberGroup .btn,#baleOpenerGroup .btn').forEach(b=>b.classList.remove('selected'));
@@ -518,6 +759,22 @@ $operator_name = $_SESSION['username'];
     return true;
   }
 </script>
+
+<!-- Quantity Limit Popup -->
+<div id="qtyLimitPopupOverlay" class="qty-limit-popup-overlay" onclick="closeQtyLimitPopup()">
+  <div id="qtyLimitPopup" class="qty-limit-popup" onclick="event.stopPropagation()">
+    <button type="button" class="qty-limit-popup-close" onclick="closeQtyLimitPopup()" aria-label="Close">×</button>
+    <div class="qty-limit-popup-header">
+      <div class="qty-limit-popup-icon">⚠️</div>
+      <h3 class="qty-limit-popup-title">Weight Limit Exceeded</h3>
+    </div>
+    <div class="qty-limit-popup-body">
+      <p class="qty-limit-popup-message" id="qtyLimitPopupMessage"></p>
+      <div class="qty-limit-popup-details" id="qtyLimitPopupDetails"></div>
+      <button type="button" class="qty-limit-popup-button" onclick="closeQtyLimitPopup()">Got It</button>
+    </div>
+  </div>
+</div>
 </body>
 </html>
 

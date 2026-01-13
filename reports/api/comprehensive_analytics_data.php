@@ -16,6 +16,10 @@ try {
 
     date_default_timezone_set('Asia/Dhaka');
     $conn = SecurityConfig::getConnection();
+    
+    // Determine which sewing table exists
+    $sewingTableCheck = $conn->query("SHOW TABLES LIKE 'sewing_machine_entry'");
+    $sewingTable = ($sewingTableCheck && $sewingTableCheck->num_rows > 0) ? 'sewing_machine_entry' : 'swing_machine_entry';
 } catch (Throwable $e) {
     echo json_encode(['status' => 'error', 'message' => 'Connection error: ' . $e->getMessage()]);
     exit();
@@ -78,7 +82,7 @@ $swingTypes = 'ss';
 $swingQuery = "SELECT 
     p.project_name,
     COALESCE(SUM(sme.sewing_qty), 0) as total_produced
-FROM swing_machine_entry sme
+FROM $sewingTable sme
 LEFT JOIN projects p ON sme.project_id = p.id
 WHERE DATE(sme.date_time) BETWEEN ? AND ?
     AND (p.status = 'active' OR p.status IS NULL)";
@@ -416,7 +420,7 @@ $swingTrendTypes = 'ss';
 $swingTrendQuery = "SELECT 
     DATE(sme.date_time) as entry_date,
     COALESCE(SUM(sme.sewing_qty), 0) as daily_sewing
-FROM swing_machine_entry sme
+FROM $sewingTable sme
 LEFT JOIN projects p ON sme.project_id = p.id
 WHERE DATE(sme.date_time) BETWEEN ? AND ?
     AND (p.status = 'active' OR p.status IS NULL)";

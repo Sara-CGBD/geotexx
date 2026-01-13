@@ -8,7 +8,7 @@ if (!isset($_SESSION['user_id']) || !isset($_SESSION['username'])) {
 }
 
 $user_role = strtolower(trim($_SESSION['role'] ?? ''));
-$allowed_roles = ['admin', 'production_user', 'management', 'agm ops'];
+$allowed_roles = ['admin', 'production_user', 'production', 'prod_test', 'management', 'agm ops', 'sewing_test'];
 if (!in_array($user_role, $allowed_roles)) {
     http_response_code(403);
     die("Access Denied");
@@ -16,6 +16,20 @@ if (!in_array($user_role, $allowed_roles)) {
 
 date_default_timezone_set('Asia/Dhaka');
 $conn = SecurityConfig::getConnection();
+
+// Determine which sewing table exists
+$sewingTableCheck = $conn->query("SHOW TABLES LIKE 'sewing_machine_entry'");
+$sewingTable = ($sewingTableCheck && $sewingTableCheck->num_rows > 0) ? 'sewing_machine_entry' : 'swing_machine_entry';
+
+// Check which ID column exists in the table
+$idColumn = 'sewing_id';
+$colCheck = $conn->query("SHOW COLUMNS FROM $sewingTable LIKE 'sewing_id'");
+if (!$colCheck || $colCheck->num_rows == 0) {
+    $colCheck2 = $conn->query("SHOW COLUMNS FROM $sewingTable LIKE 'swing_id'");
+    if ($colCheck2 && $colCheck2->num_rows > 0) {
+        $idColumn = 'swing_id';
+    }
+}
 
 $dateFrom = $_GET['date_from'] ?? '';
 $dateTo = $_GET['date_to'] ?? '';
@@ -31,26 +45,15 @@ if (!$hasDateFilter) {
 
 $query = "SELECT 
     s.*,
+    s.$idColumn as entry_id,
     p.project_name,
     COALESCE(
         (SELECT full_name FROM new_user WHERE id = s.reporter_id LIMIT 1),
         (SELECT username FROM new_user WHERE id = s.reporter_id LIMIT 1),
         (SELECT username FROM users WHERE id = s.reporter_id LIMIT 1),
         'Admin'
-    ) as reporter_name,
-    COALESCE(
-        (SELECT full_name FROM new_user WHERE id = s.operator_id LIMIT 1),
-        (SELECT username FROM new_user WHERE id = s.operator_id LIMIT 1),
-        (SELECT username FROM users WHERE id = s.operator_id LIMIT 1),
-        'Unknown'
-    ) as operator_name,
-    COALESCE(
-        (SELECT full_name FROM new_user WHERE id = s.helper_id LIMIT 1),
-        (SELECT username FROM new_user WHERE id = s.helper_id LIMIT 1),
-        (SELECT username FROM users WHERE id = s.helper_id LIMIT 1),
-        'Unknown'
-    ) as helper_name
-FROM swing_machine_entry s
+    ) as reporter_name
+FROM $sewingTable s
 LEFT JOIN projects p ON s.project_id = p.id
 WHERE 1=1";
 
@@ -106,7 +109,7 @@ $hourlyQuery = "SELECT
         WHEN HOUR(s.date_time) >= 8 AND HOUR(s.date_time) < 20 THEN 'Day'
         ELSE 'Night'
     END as calculated_shift
-FROM swing_machine_entry s
+FROM $sewingTable s
 WHERE 1=1";
 
 if ($dateFrom) {
@@ -177,9 +180,7 @@ $hourlyData = $hourlyResult ? $hourlyResult->fetch_all(MYSQLI_ASSOC) : [];
         table th:nth-child(6), table td:nth-child(6) { min-width: 120px; } /* Project */
         table th:nth-child(7), table td:nth-child(7) { min-width: 100px; } /* Sewing Qty */
         table th:nth-child(8), table td:nth-child(8) { min-width: 100px; } /* NCP Pieces */
-        table th:nth-child(9), table td:nth-child(9) { min-width: 120px; } /* Operator */
-        table th:nth-child(10), table td:nth-child(10) { min-width: 120px; } /* Helper */
-        table th:nth-child(11), table td:nth-child(11) { min-width: 120px; } /* Reporter */
+        table th:nth-child(9), table td:nth-child(9) { min-width: 120px; } /* Reporter */
         
         .export-btn { background: #27ae60; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-weight: 600; margin-bottom: 20px; margin-right: 10px; }
         .export-btn:hover { background: #229954; }
@@ -196,9 +197,84 @@ $hourlyData = $hourlyResult ? $hourlyResult->fetch_all(MYSQLI_ASSOC) : [];
         .badge-night { background: #e8eaf6; color: #3f51b5; }
         
         @media print {
-            .filters, .export-btn, .tabs { display: none; }
-            body { background: white; padding: 0; }
+            * { box-sizing: border-box; }
+            body { 
+                background: white; 
+                padding: 10px !important; 
+                margin: 0 !important;
+                font-size: 10px !important;
+            }
+            .container { 
+                box-shadow: none; 
+                padding: 10px !important;
+                margin: 0 !important;
+                max-width: 100% !important;
+            }
+            .filters, .export-btn, .tabs { display: none !important; }
             .tab-content { display: block !important; }
+            h1 { 
+                font-size: 14px !important; 
+                margin: 3px 0 !important; 
+                padding: 0 !important;
+                page-break-after: avoid;
+            }
+            .subtitle { 
+                font-size: 9px !important; 
+                margin: 2px 0 8px !important; 
+                padding: 0 !important;
+            }
+            .section-title { 
+                font-size: 11px !important; 
+                margin: 8px 0 3px !important; 
+                padding: 3px 0 !important; 
+                page-break-after: avoid;
+            }
+            .section { 
+                margin-bottom: 10px !important;
+                page-break-inside: avoid;
+                overflow: visible !important;
+            }
+            table { 
+                font-size: 7px !important; 
+                width: 100% !important;
+                page-break-inside: auto;
+                border-collapse: collapse !important;
+                margin-bottom: 8px !important;
+            }
+            th, td { 
+                padding: 3px 2px !important; 
+                font-size: 7px !important;
+                line-height: 1.1 !important;
+                border: 1px solid #ddd !important;
+            }
+            th { 
+                font-size: 8px !important; 
+                font-weight: 600 !important;
+            }
+            .stats-grid { 
+                grid-template-columns: repeat(3, 1fr) !important;
+                gap: 5px !important;
+                margin-bottom: 10px !important;
+            }
+            .stat-card { 
+                padding: 8px 5px !important;
+                page-break-inside: avoid;
+                margin-bottom: 0 !important;
+            }
+            .stat-value { 
+                font-size: 1.2em !important; 
+                margin-bottom: 2px !important;
+            }
+            .stat-label { 
+                font-size: 0.75em !important; 
+            }
+            tr { page-break-inside: avoid; }
+            thead { display: table-header-group !important; }
+            tfoot { display: table-footer-group !important; }
+            @page {
+                size: A4 landscape;
+                margin: 0.3cm;
+            }
         }
     </style>
 </head>
@@ -285,8 +361,6 @@ $hourlyData = $hourlyResult ? $hourlyResult->fetch_all(MYSQLI_ASSOC) : [];
                 <th>Project</th>
                 <th>Sewing Qty</th>
                 <th>NCP Pieces</th>
-                <th>Operator</th>
-                <th>Helper</th>
                 <th>Reporter</th>
             </tr>
         </thead>
@@ -297,15 +371,21 @@ $hourlyData = $hourlyResult ? $hourlyResult->fetch_all(MYSQLI_ASSOC) : [];
             ?>
                 <tr>
                     <td><?php echo $counter++; ?></td>
-                    <td><strong><?php echo htmlspecialchars($entry['swing_id']); ?></strong></td>
+                    <td><strong><?php echo htmlspecialchars($entry['entry_id'] ?? $entry['sewing_id'] ?? $entry['swing_id'] ?? 'N/A'); ?></strong></td>
                     <td><?php echo date('M d, Y g:i A', strtotime($entry['date_time'])); ?></td>
-                    <td><?php echo htmlspecialchars($entry['shift']); ?></td>
+                    <td><?php 
+                        // Calculate shift from date_time if shift is empty, 0, or invalid
+                        $shiftValue = $entry['shift'] ?? '';
+                        if (empty($shiftValue) || $shiftValue === '0' || !in_array($shiftValue, ['Day', 'Night'])) {
+                            $hour = (int)date('H', strtotime($entry['date_time']));
+                            $shiftValue = ($hour >= 8 && $hour < 20) ? 'Day' : 'Night';
+                        }
+                        echo htmlspecialchars($shiftValue);
+                    ?></td>
                     <td><?php echo htmlspecialchars($entry['line_no']); ?></td>
                     <td><?php echo htmlspecialchars($entry['project_name'] ?? 'N/A'); ?></td>
                     <td><?php echo number_format($entry['sewing_qty']); ?></td>
                     <td><?php echo number_format($entry['ncp_piece']); ?></td>
-                    <td><?php echo htmlspecialchars($entry['operator_name'] ?? 'Unknown'); ?></td>
-                    <td><?php echo htmlspecialchars($entry['helper_name'] ?? 'Unknown'); ?></td>
                     <td><?php echo htmlspecialchars($entry['reporter_name'] ?? 'Unknown'); ?></td>
                 </tr>
             <?php endforeach; ?>
