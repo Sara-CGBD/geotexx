@@ -60,6 +60,53 @@ if (!$report) {
 // Decode test data JSON
 $test_data = json_decode($report['test_results'], true);
 
+// Filter out empty experimental data rows - only include rows with actual data
+if (isset($test_data['experimental_data']) && is_array($test_data['experimental_data'])) {
+    $filtered_experimental_data = [];
+    foreach ($test_data['experimental_data'] as $row) {
+        // Only include rows that have at least one meaningful value (not empty, not zero)
+        $has_h0 = isset($row['h0']) && trim($row['h0']) !== '' && floatval($row['h0']) != 0;
+        $has_t1 = isset($row['t1']) && trim($row['t1']) !== '' && floatval($row['t1']) != 0;
+        $has_h1 = isset($row['h1']) && trim($row['h1']) !== '' && floatval($row['h1']) != 0;
+        $has_t2 = isset($row['t2']) && trim($row['t2']) !== '' && floatval($row['t2']) != 0;
+        $has_thickness = isset($row['thickness']) && trim($row['thickness']) !== '' && floatval($row['thickness']) != 0;
+        $has_water_level = isset($row['water_level']) && trim($row['water_level']) !== '' && floatval($row['water_level']) != 0;
+        $has_temp = isset($row['temp']) && trim($row['temp']) !== '' && floatval($row['temp']) != 0;
+        $has_correction = isset($row['correction']) && trim($row['correction']) !== '' && floatval($row['correction']) != 0;
+        $has_time = isset($row['time']) && trim($row['time']) !== '' && floatval($row['time']) != 0;
+        
+        if ($has_h0 || $has_t1 || $has_h1 || $has_t2 || $has_thickness || $has_water_level || $has_temp || $has_correction || $has_time) {
+            $filtered_experimental_data[] = $row;
+        }
+    }
+    $test_data['experimental_data'] = $filtered_experimental_data;
+}
+
+// Get reference number from the rejected report
+$original_reference_number = $report['reference_number'] ?? '';
+$original_bundle_reference = $report['bundle_reference'] ?? '';
+
+// If reference_number is truncated or too short, try to get full reference from roll_entry
+$full_reference_number = $original_reference_number;
+if (!empty($original_reference_number) && (strlen(trim($original_reference_number)) <= 3 || !preg_match('/[A-Za-z]/', $original_reference_number))) {
+    $lookupStmt = $conn->prepare("SELECT reference_number FROM roll_entry 
+        WHERE reference_number LIKE ? 
+           OR reference_number LIKE ? 
+           OR reference_number LIKE ?
+        ORDER BY date_time DESC 
+        LIMIT 1");
+    $likePattern1 = '%' . trim($original_reference_number) . '%';
+    $likePattern2 = trim($original_reference_number) . '-%';
+    $likePattern3 = trim($original_reference_number) . '%';
+    $lookupStmt->bind_param("sss", $likePattern1, $likePattern2, $likePattern3);
+    $lookupStmt->execute();
+    $lookupResult = $lookupStmt->get_result();
+    if ($lookupRow = $lookupResult->fetch_assoc()) {
+        $full_reference_number = $lookupRow['reference_number'];
+    }
+    $lookupStmt->close();
+}
+
 // Clean rejection remarks
 $rejection_reason = $report['remarks'] ?? 'No comments';
 $rejection_reason = preg_replace('/\[Checker Rejection\]:\s*/i', '', $rejection_reason);
@@ -75,8 +122,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $data = [
             'test_name' => trim($_POST['test_name']),
             'test_date' => $_POST['test_date'],
-            'gsm' => intval($_POST['gsm']),
-            'roll_number' => trim($_POST['roll_number']),
             'specimen_area' => floatval($_POST['specimen_area']),
             'water_temperature' => floatval($_POST['water_temperature']),
             'correction_factor' => floatval($_POST['correction_factor']),
@@ -96,9 +141,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'reporter_name' => $reporter_name
         ];
         
-        // Collect experimental data (5 rows)
+        // Collect experimental data (dynamic rows)
         $experimental_data = [];
-        for ($i = 1; $i <= 5; $i++) {
+        $i = 1;
+        while (isset($_POST["exp_h0_$i"])) {
             $experimental_data[] = [
                 'no' => $i,
                 'h0' => floatval($_POST["exp_h0_$i"] ?? 0),
@@ -114,9 +160,43 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'velocity' => floatval($_POST["exp_velocity_$i"] ?? 0),
                 'permeability' => floatval($_POST["exp_permeability_$i"] ?? 0)
             ];
+            $i++;
         }
         
         $data['experimental_data'] = $experimental_data;
+        
+        // Get reference number from form - use original_reference_number as primary source since it's auto-fetched
+        // Use auto-fetched reference number from rejected report (priority)
+        $reference_number = trim($_POST['original_reference_number'] ?? $full_reference_number ?? $_POST['reference_number'] ?? '');
+        $bundle_reference = trim($_POST['original_bundle_reference'] ?? $original_bundle_reference ?? $_POST['bundle_reference'] ?? '');
+        
+        // Validate reference
+        if (empty($reference_number)) {
+            throw new Exception("Reference number is required. Please ensure the reference number is set.");
+        }
+        
+        // If reference_number is too short, try to find full reference from roll_entry
+        if (strlen(trim($reference_number)) <= 3 || !preg_match('/[A-Za-z]/', $reference_number)) {
+            $lookupStmt = $conn->prepare("SELECT reference_number FROM roll_entry 
+                WHERE reference_number LIKE ? 
+                   OR reference_number LIKE ? 
+                   OR reference_number LIKE ?
+                ORDER BY date_time DESC 
+                LIMIT 1");
+            $likePattern1 = '%' . trim($reference_number) . '%';
+            $likePattern2 = trim($reference_number) . '-%';
+            $likePattern3 = trim($reference_number) . '%';
+            $lookupStmt->bind_param("sss", $likePattern1, $likePattern2, $likePattern3);
+            $lookupStmt->execute();
+            $lookupResult = $lookupStmt->get_result();
+            if ($lookupRow = $lookupResult->fetch_assoc()) {
+                $reference_number = $lookupRow['reference_number'];
+            }
+            $lookupStmt->close();
+        }
+        
+        $data['reference_number'] = $reference_number;
+        $data['bundle_reference'] = $bundle_reference;
         
         // Define generateLabTestNumber function directly here to avoid session conflict
         function generateLabTestNumber($conn) {
@@ -150,8 +230,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     id INT AUTO_INCREMENT PRIMARY KEY,
                     report_number VARCHAR(100) UNIQUE NOT NULL,
                     lab_test_number VARCHAR(50) NOT NULL,
-                    gsm INT NOT NULL,
-                    roll_number VARCHAR(100) NOT NULL,
                     test_date DATE NOT NULL,
                     test_results JSON NOT NULL,
                     test_performed_by VARCHAR(255) NOT NULL,
@@ -197,15 +275,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         // Determine current shift
         $current_shift = getCurrentShift();
         
-        // Generate Sample ID using: GSM.XL[YY][MONTH][DD]-LT[XX]-R[XX]
-        $test_date_obj = new DateTime($data['test_date']);
-        $year = $test_date_obj->format('y');
-        $month = strtoupper($test_date_obj->format('M'));
-        $day = $test_date_obj->format('d');
-        $gsm_formatted = number_format($data['gsm'] / 100, 1);
-        $lab_test_formatted = 'LT' . str_pad($generated_lab_test_no, 2, '0', STR_PAD_LEFT);
-        $roll_formatted = 'R' . $data['roll_number'];
-        $data['sample_id'] = "{$gsm_formatted}L{$year}{$month}{$day}-{$lab_test_formatted}-{$roll_formatted}";
+        // Sample ID is not generated (GSM and Roll Number removed)
+        $data['sample_id'] = null;
         
         // Generate NEW Report Number in format: WPT-YYYYMMDD-XXXXX (resets at 8 AM daily)
         // Use MAX to get the highest number for today, then increment
@@ -232,49 +303,68 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         // Store as JSON
         $test_results_json = json_encode($data);
         
-        // First, mark the old rejected test as 'resubmitted' or delete it
-        $update_old = $conn->prepare("UPDATE water_permeability_tests SET status = 'resubmitted', remarks = CONCAT(COALESCE(remarks, ''), '\n[Resubmitted on: ', NOW(), ']') WHERE id = ?");
-        $update_old->bind_param("i", $report_id);
-        $update_old->execute();
-        $update_old->close();
+        // Check if this report has a bundle_reference with pipe separator (range format: from|to)
+        $bundle_ref = trim($original_bundle_reference ?? '');
+        $reports_to_update = [$report_id];
         
-        // Add sample_id and shift columns if they don't exist
-        $conn->query("ALTER TABLE water_permeability_tests ADD COLUMN IF NOT EXISTS sample_id VARCHAR(100) AFTER report_number");
+        // If bundle_reference exists and contains a pipe (|), find all reports with the same bundle_reference
+        if (!empty($bundle_ref) && strpos($bundle_ref, '|') !== false) {
+            // Find all reports with the same bundle_reference that are rejected
+            $findBulkStmt = $conn->prepare("SELECT id FROM water_permeability_tests WHERE bundle_reference = ? AND status IN ('rejected', 'rejected_by_checker') AND id != ?");
+            $findBulkStmt->bind_param("si", $bundle_ref, $report_id);
+            $findBulkStmt->execute();
+            $bulkResult = $findBulkStmt->get_result();
+            while ($bulkRow = $bulkResult->fetch_assoc()) {
+                $reports_to_update[] = $bulkRow['id'];
+            }
+            $findBulkStmt->close();
+            
+            error_log("Water Permeability: Resubmitting bulk reference range: $bundle_ref. Found " . count($reports_to_update) . " reports to update.");
+        }
+        
+        // Update all reports in the range to 'pending' status
+        $placeholders = str_repeat('?,', count($reports_to_update) - 1) . '?';
+        $updateStmt = $conn->prepare("UPDATE water_permeability_tests SET status = 'pending', remarks = NULL, checked_by = NULL, checked_at = NULL, approved_by = NULL, approved_at = NULL, updated_at = NOW() WHERE id IN ($placeholders)");
+        $types = str_repeat('i', count($reports_to_update));
+        $updateStmt->bind_param($types, ...$reports_to_update);
+        $updateStmt->execute();
+        $updateStmt->close();
+        
+        // Add shift column if it doesn't exist
         $conn->query("ALTER TABLE water_permeability_tests ADD COLUMN IF NOT EXISTS shift VARCHAR(10) AFTER test_date");
+        // Add reference_number and bundle_reference columns if they don't exist
+        $conn->query("ALTER TABLE water_permeability_tests ADD COLUMN IF NOT EXISTS reference_number VARCHAR(255) AFTER lab_test_number");
+        $conn->query("ALTER TABLE water_permeability_tests ADD COLUMN IF NOT EXISTS bundle_reference VARCHAR(255) AFTER reference_number");
         
-        // Insert NEW test with new report number and sample ID
-        $insert_stmt = $conn->prepare(
-            "INSERT INTO water_permeability_tests 
-            (report_number, sample_id, lab_test_number, gsm, roll_number, test_date, shift, test_results, 
-             test_performed_by, reporter_id, reporter_name, status, created_at) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NOW())"
+        // Update the existing report with new test data (instead of creating a new one)
+        $update_stmt = $conn->prepare(
+            "UPDATE water_permeability_tests 
+            SET test_results = ?, 
+                test_performed_by = ?,
+                updated_at = NOW()
+            WHERE id = ?"
         );
         
-        $status = 'pending';
-        $insert_stmt->bind_param(
-            "ssissssssis",
-            $data['report_no'],
-            $data['sample_id'],
-            $data['lab_test_no'],
-            $data['gsm'],
-            $data['roll_number'],
-            $data['test_date'],
-            $current_shift,
+        $update_stmt->bind_param(
+            "ssi",
             $test_results_json,
             $reporter_full_name,
-            $reporter_id,
-            $reporter_name
+            $report_id
         );
         
-        if ($insert_stmt->execute()) {
-            $insert_stmt->close();
+        if ($update_stmt->execute()) {
+            $update_stmt->close();
             // Redirect to main form with success message
-            $_SESSION['success_message'] = "✅ Test resubmitted successfully! Report Number: " . $data['report_no'] . " | Status: Pending";
-            header("Location: water_permeability_test.php");
+            $count = count($reports_to_update);
+            $message = $count > 1 
+                ? "Test resubmitted successfully! {$count} reports in the reference range have been resubmitted. Status: Pending"
+                : "Test resubmitted successfully! Report Number: " . $report['report_number'] . " | Status: Pending";
+            $_SESSION['success_message'] = $message;
+            header("Location: ../tester_rejected_reports.php");
             exit();
         } else {
-            $insert_stmt->close();
-            throw new Exception("Failed to save test: " . $insert_stmt->error);
+            $update_stmt->close();
+            throw new Exception("Failed to update test: " . $update_stmt->error);
         }
         
     } catch (Exception $e) {
@@ -349,14 +439,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <label>Test Date:</label>
         <input type="date" name="test_date" id="test_date" value="<?php echo htmlspecialchars($report['test_date']); ?>" required>
       </div>
+    </div>
+
+    <div class="form-row">
       <div class="form-group">
-        <label>GSM:</label>
-        <input type="number" name="gsm" id="gsm" step="any" value="<?php echo htmlspecialchars($report['gsm']); ?>" required>
+        <label>Reference Number (Auto-fetched):</label>
+        <input type="text" name="reference_number" id="reference_number" value="<?php echo htmlspecialchars($full_reference_number); ?>" readonly style="background:#f0f0f0; cursor:not-allowed;" required>
+        <input type="hidden" name="original_reference_number" value="<?php echo htmlspecialchars($full_reference_number); ?>">
+        <small style="color:#666; font-size:11px;">This reference was automatically fetched from the rejected report.</small>
       </div>
+      <?php if (!empty($original_bundle_reference)): ?>
       <div class="form-group">
-        <label>Roll Number:</label>
-        <input type="text" name="roll_number" id="roll_number" value="<?php echo htmlspecialchars($report['roll_number']); ?>" required>
+        <label>Bundle Reference (Auto-fetched):</label>
+        <input type="text" name="bundle_reference" id="bundle_reference" value="<?php echo htmlspecialchars($original_bundle_reference); ?>" readonly style="background:#f0f0f0; cursor:not-allowed;">
+        <input type="hidden" name="original_bundle_reference" value="<?php echo htmlspecialchars($original_bundle_reference); ?>">
+        <small style="color:#666; font-size:11px;">Bundle reference from the rejected report.</small>
       </div>
+      <?php endif; ?>
     </div>
 
     <div class="form-row">
@@ -436,6 +535,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <th rowspan="2">Time<br>(s)</th>
             <th rowspan="2">Velocity<br>(m/s⁻¹)</th>
             <th rowspan="2">Permeability<br>10⁻³(m/s)</th>
+            <th rowspan="2">Actions</th>
           </tr>
           <tr>
             <th>h₀(m)</th>
@@ -444,28 +544,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <th>t₂ (s)</th>
           </tr>
         </thead>
-        <tbody>
-          <?php for ($i = 1; $i <= 5; $i++): 
-            $row_data = $test_data['experimental_data'][$i-1] ?? [];
+        <tbody id="experimental_data_table">
+          <?php 
+          $existing_rows = $test_data['experimental_data'] ?? [];
+          $row_count = count($existing_rows);
+          if ($row_count === 0) {
+              $row_count = 1; // At least 1 row if no data
+          }
+          for ($i = 0; $i < $row_count; $i++): 
+            $row_data = $existing_rows[$i] ?? [];
+            $row_num = $i + 1;
           ?>
-          <tr>
-            <td><?php echo $i; ?></td>
-            <td><input type="number" id="exp_h0_<?php echo $i; ?>" name="exp_h0_<?php echo $i; ?>" step="any" value="<?php echo $row_data['h0'] ?? ''; ?>" oninput="calculateRow(<?php echo $i; ?>)" required></td>
-            <td><input type="number" id="exp_t1_<?php echo $i; ?>" name="exp_t1_<?php echo $i; ?>" step="any" value="<?php echo $row_data['t1'] ?? ''; ?>" oninput="calculateRow(<?php echo $i; ?>)" required></td>
-            <td><input type="number" id="exp_h1_<?php echo $i; ?>" name="exp_h1_<?php echo $i; ?>" step="any" value="<?php echo $row_data['h1'] ?? ''; ?>" oninput="calculateRow(<?php echo $i; ?>)" required></td>
-            <td><input type="number" id="exp_t2_<?php echo $i; ?>" name="exp_t2_<?php echo $i; ?>" step="any" value="<?php echo $row_data['t2'] ?? ''; ?>" oninput="calculateRow(<?php echo $i; ?>)" required></td>
-            <td><input type="number" id="exp_thickness_<?php echo $i; ?>" name="exp_thickness_<?php echo $i; ?>" step="any" value="<?php echo $row_data['thickness'] ?? ''; ?>" oninput="calculateRow(<?php echo $i; ?>)" required></td>
-            <td><input type="number" id="exp_water_level_<?php echo $i; ?>" name="exp_water_level_<?php echo $i; ?>" step="any" value="<?php echo $row_data['water_level'] ?? ''; ?>" required></td>
-            <td><input type="number" id="exp_temp_<?php echo $i; ?>" name="exp_temp_<?php echo $i; ?>" step="any" value="<?php echo $row_data['temp'] ?? ''; ?>" oninput="calculateRow(<?php echo $i; ?>)" required></td>
-            <td><input type="number" id="exp_correction_<?php echo $i; ?>" name="exp_correction_<?php echo $i; ?>" step="any" value="<?php echo $row_data['correction'] ?? ''; ?>" oninput="calculateRow(<?php echo $i; ?>)" required></td>
-            <td><input type="number" id="exp_head_diff_<?php echo $i; ?>" name="exp_head_diff_<?php echo $i; ?>" step="any" value="<?php echo $row_data['head_diff'] ?? ''; ?>" readonly class="readonly"></td>
-            <td><input type="number" id="exp_time_<?php echo $i; ?>" name="exp_time_<?php echo $i; ?>" step="any" value="<?php echo $row_data['time'] ?? ''; ?>" oninput="calculateRow(<?php echo $i; ?>)" required></td>
-            <td><input type="number" id="exp_velocity_<?php echo $i; ?>" name="exp_velocity_<?php echo $i; ?>" step="any" value="<?php echo $row_data['velocity'] ?? ''; ?>" readonly class="readonly"></td>
-            <td><input type="number" id="exp_permeability_<?php echo $i; ?>" name="exp_permeability_<?php echo $i; ?>" step="any" value="<?php echo $row_data['permeability'] ?? ''; ?>" readonly class="readonly"></td>
+          <tr data-row="<?php echo $row_num; ?>">
+            <td><?php echo $row_num; ?></td>
+            <td><input type="number" id="exp_h0_<?php echo $row_num; ?>" name="exp_h0_<?php echo $row_num; ?>" step="any" value="<?php echo $row_data['h0'] ?? ''; ?>" oninput="calculateRow(<?php echo $row_num; ?>)" required></td>
+            <td><input type="number" id="exp_t1_<?php echo $row_num; ?>" name="exp_t1_<?php echo $row_num; ?>" step="any" value="<?php echo $row_data['t1'] ?? ''; ?>" oninput="calculateRow(<?php echo $row_num; ?>)" required></td>
+            <td><input type="number" id="exp_h1_<?php echo $row_num; ?>" name="exp_h1_<?php echo $row_num; ?>" step="any" value="<?php echo $row_data['h1'] ?? ''; ?>" oninput="calculateRow(<?php echo $row_num; ?>)" required></td>
+            <td><input type="number" id="exp_t2_<?php echo $row_num; ?>" name="exp_t2_<?php echo $row_num; ?>" step="any" value="<?php echo $row_data['t2'] ?? ''; ?>" oninput="calculateRow(<?php echo $row_num; ?>)" required></td>
+            <td><input type="number" id="exp_thickness_<?php echo $row_num; ?>" name="exp_thickness_<?php echo $row_num; ?>" step="any" value="<?php echo $row_data['thickness'] ?? ''; ?>" oninput="calculateRow(<?php echo $row_num; ?>)" required></td>
+            <td><input type="number" id="exp_water_level_<?php echo $row_num; ?>" name="exp_water_level_<?php echo $row_num; ?>" step="any" value="<?php echo $row_data['water_level'] ?? ''; ?>" required></td>
+            <td><input type="number" id="exp_temp_<?php echo $row_num; ?>" name="exp_temp_<?php echo $row_num; ?>" step="any" value="<?php echo $row_data['temp'] ?? ''; ?>" oninput="calculateRow(<?php echo $row_num; ?>)" required></td>
+            <td><input type="number" id="exp_correction_<?php echo $row_num; ?>" name="exp_correction_<?php echo $row_num; ?>" step="any" value="<?php echo $row_data['correction'] ?? ''; ?>" oninput="calculateRow(<?php echo $row_num; ?>)" required></td>
+            <td><input type="number" id="exp_head_diff_<?php echo $row_num; ?>" name="exp_head_diff_<?php echo $row_num; ?>" step="any" value="<?php echo $row_data['head_diff'] ?? ''; ?>" readonly class="readonly"></td>
+            <td><input type="number" id="exp_time_<?php echo $row_num; ?>" name="exp_time_<?php echo $row_num; ?>" step="any" value="<?php echo $row_data['time'] ?? ''; ?>" oninput="calculateRow(<?php echo $row_num; ?>)" required></td>
+            <td><input type="number" id="exp_velocity_<?php echo $row_num; ?>" name="exp_velocity_<?php echo $row_num; ?>" step="any" value="<?php echo $row_data['velocity'] ?? ''; ?>" readonly class="readonly"></td>
+            <td><input type="number" id="exp_permeability_<?php echo $row_num; ?>" name="exp_permeability_<?php echo $row_num; ?>" step="any" value="<?php echo $row_data['permeability'] ?? ''; ?>" readonly class="readonly"></td>
+            <td>
+              <?php if ($row_count > 1 || $row_num > 1): ?>
+              <button type="button" onclick="removeWPTRow(this)" style="padding:4px 8px; background:#dc3545; color:#fff; border:none; cursor:pointer; border-radius:4px;">Delete</button>
+              <?php endif; ?>
+            </td>
           </tr>
           <?php endfor; ?>
         </tbody>
       </table>
+      <button type="button" onclick="addWPTRow()" style="margin-top:10px; padding:8px 16px; background:#28a745; color:#fff; border:none; cursor:pointer; border-radius:4px;"><i class="fas fa-plus"></i> Add 1 More Row</button>
     </div>
 
     <h3>Summary Results</h3>
@@ -529,12 +642,15 @@ function calculateRow(rowNum) {
 function calculateAverages() {
   let totalK = 0, totalV = 0, nK = 0, nV = 0;
 
-  for (let i = 1; i <= 5; i++) {
-    const K = parseFloat(document.getElementById('exp_permeability_' + i).value) || 0;
-    const V = parseFloat(document.getElementById('exp_velocity_' + i).value) || 0;
+  // Get all rows dynamically
+  const rows = document.querySelectorAll('#experimental_data_table tr');
+  rows.forEach((row, index) => {
+    const rowNum = index + 1;
+    const K = parseFloat(document.getElementById('exp_permeability_' + rowNum)?.value) || 0;
+    const V = parseFloat(document.getElementById('exp_velocity_' + rowNum)?.value) || 0;
     if (K > 0) { totalK += K; nK++; }
     if (V > 0) { totalV += V; nV++; }
-  }
+  });
 
   if (nK > 0) document.getElementById('avg_permeability').value = (totalK / nK).toFixed(3);
   if (nV > 0) document.getElementById('avg_velocity').value = (totalV / nV).toFixed(3);
@@ -542,9 +658,66 @@ function calculateAverages() {
 
 // Recalculate all rows when common inputs change
 function recalculateAll() {
-  for (let i = 1; i <= 5; i++) {
-    calculateRow(i);
+  const rows = document.querySelectorAll('#experimental_data_table tr');
+  rows.forEach((row, index) => {
+    const rowNum = index + 1;
+    calculateRow(rowNum);
+  });
+}
+
+// Initialize row count
+let rowCount = <?php echo $row_count; ?>;
+
+// Add a new row to experimental data table
+function addWPTRow() {
+  rowCount++;
+  const tbody = document.getElementById('experimental_data_table');
+  const newRow = document.createElement('tr');
+  newRow.setAttribute('data-row', rowCount);
+  
+  newRow.innerHTML = `
+    <td>${rowCount}</td>
+    <td><input type="number" step="any" name="exp_h0_${rowCount}" id="exp_h0_${rowCount}" oninput="calculateRow(${rowCount})" required></td>
+    <td><input type="number" step="any" name="exp_t1_${rowCount}" id="exp_t1_${rowCount}" oninput="calculateRow(${rowCount})" required></td>
+    <td><input type="number" step="any" name="exp_h1_${rowCount}" id="exp_h1_${rowCount}" oninput="calculateRow(${rowCount})" required></td>
+    <td><input type="number" step="any" name="exp_t2_${rowCount}" id="exp_t2_${rowCount}" oninput="calculateRow(${rowCount})" required></td>
+    <td><input type="number" step="any" name="exp_thickness_${rowCount}" id="exp_thickness_${rowCount}" oninput="calculateRow(${rowCount})" required></td>
+    <td><input type="number" step="any" name="exp_water_level_${rowCount}" id="exp_water_level_${rowCount}" required></td>
+    <td><input type="number" step="any" name="exp_temp_${rowCount}" id="exp_temp_${rowCount}" oninput="calculateRow(${rowCount})" required></td>
+    <td><input type="number" step="any" name="exp_correction_${rowCount}" id="exp_correction_${rowCount}" oninput="calculateRow(${rowCount})" required></td>
+    <td><input type="number" step="any" name="exp_head_diff_${rowCount}" id="exp_head_diff_${rowCount}" readonly class="readonly"></td>
+    <td><input type="number" step="any" name="exp_time_${rowCount}" id="exp_time_${rowCount}" oninput="calculateRow(${rowCount})"></td>
+    <td><input type="number" step="any" name="exp_velocity_${rowCount}" id="exp_velocity_${rowCount}" readonly class="readonly"></td>
+    <td><input type="number" step="any" name="exp_permeability_${rowCount}" id="exp_permeability_${rowCount}" readonly class="readonly"></td>
+    <td><button type="button" onclick="removeWPTRow(this)" style="padding:4px 8px; background:#dc3545; color:#fff; border:none; cursor:pointer; border-radius:4px;">Delete</button></td>
+  `;
+  
+  tbody.appendChild(newRow);
+  updateRowNumbers();
+}
+
+// Remove a row from experimental data table
+function removeWPTRow(button) {
+  const row = button.closest('tr');
+  const rows = document.querySelectorAll('#experimental_data_table tr');
+  if (rows.length <= 1) {
+    alert('At least one row is required!');
+    return;
   }
+  row.remove();
+  updateRowNumbers();
+  calculateAverages();
+}
+
+// Update row numbers after add/remove
+function updateRowNumbers() {
+  const rows = document.querySelectorAll('#experimental_data_table tr');
+  rows.forEach((row, index) => {
+    const rowNum = index + 1;
+    row.querySelector('td:first-child').textContent = rowNum;
+    row.setAttribute('data-row', rowNum);
+  });
+  rowCount = rows.length;
 }
 
 // Update date/time and shift display

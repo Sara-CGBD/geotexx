@@ -35,13 +35,16 @@ if (!$hasDateFilter) {
 
 $query = "SELECT 
     d.*,
+    COALESCE(d.delivered_at, d.created_at, CONCAT(d.delivery_date, ' 00:00:00')) as actual_delivery_datetime,
     fe.fg_id,
     fe.bag_size as fg_bag_size,
     fe.packaging_type as fg_packaging_type,
-    p.project_name
+    p.project_name,
+    re.roll_size as roll_size
 FROM fg_deliveries d
 LEFT JOIN fg_entry fe ON d.fg_entry_id = fe.id
 LEFT JOIN projects p ON fe.project_id = p.id
+LEFT JOIN roll_entry re ON d.reference_number = re.reference_number
 WHERE 1=1";
 
 $params = [];
@@ -79,22 +82,63 @@ $result = $stmt->get_result();
 $deliveries = $result->fetch_all(MYSQLI_ASSOC);
 $stmt->close();
 
-$totalDeliveries = count($deliveries);
-$totalQuantity = array_sum(array_column($deliveries, 'delivery_quantity'));
-$totalValue = array_sum(array_map(function($d) {
-    return $d['delivery_quantity'] * ($d['unit_price'] ?? 0);
-}, $deliveries));
-
-// Group by client
-$byClient = [];
+// Group deliveries by challan_no (and other common fields)
+$groupedDeliveries = [];
 foreach ($deliveries as $delivery) {
-    $client = $delivery['client_name'] ?? 'Unknown';
+    // Use challan_no as the grouping key, or delivery_id if challan_no is empty
+    $groupKey = !empty($delivery['challan_no']) ? $delivery['challan_no'] : $delivery['delivery_id'];
+    
+    if (!isset($groupedDeliveries[$groupKey])) {
+        $groupedDeliveries[$groupKey] = [
+            'delivery' => $delivery, // Store first delivery as base
+            'references' => [],
+            'total_quantity' => 0,
+            'total_value' => 0,
+            'count' => 0
+        ];
+    }
+    
+    // Add reference to the group
+    if (!empty($delivery['reference_number'])) {
+        $groupedDeliveries[$groupKey]['references'][] = $delivery['reference_number'];
+    }
+    $groupedDeliveries[$groupKey]['total_quantity'] += $delivery['delivery_quantity'] ?? 0;
+    $groupedDeliveries[$groupKey]['total_value'] += ($delivery['delivery_quantity'] ?? 0) * ($delivery['unit_price'] ?? 0);
+    $groupedDeliveries[$groupKey]['count']++;
+}
+
+// Format reference numbers as "from to" range
+function formatReferenceRange($references) {
+    if (empty($references)) {
+        return 'N/A';
+    }
+    
+    $uniqueRefs = array_unique($references);
+    if (count($uniqueRefs) == 1) {
+        return $uniqueRefs[0];
+    }
+    
+    // Sort references
+    sort($uniqueRefs);
+    
+    // Format as "first to last"
+    return $uniqueRefs[0] . ' to ' . $uniqueRefs[count($uniqueRefs) - 1];
+}
+
+$totalDeliveries = count($groupedDeliveries);
+$totalQuantity = array_sum(array_column($groupedDeliveries, 'total_quantity'));
+$totalValue = array_sum(array_column($groupedDeliveries, 'total_value'));
+
+// Group by client for chart
+$byClient = [];
+foreach ($groupedDeliveries as $group) {
+    $client = $group['delivery']['client_name'] ?? 'Unknown';
     if (!isset($byClient[$client])) {
         $byClient[$client] = ['count' => 0, 'qty' => 0, 'value' => 0];
     }
-    $byClient[$client]['count']++;
-    $byClient[$client]['qty'] += $delivery['delivery_quantity'];
-    $byClient[$client]['value'] += $delivery['delivery_quantity'] * ($delivery['unit_price'] ?? 0);
+    $byClient[$client]['count'] += $group['count'];
+    $byClient[$client]['qty'] += $group['total_quantity'];
+    $byClient[$client]['value'] += $group['total_value'];
 }
 
 // Performance: Defer filter options - load asynchronously after page render
@@ -258,8 +302,45 @@ $referenceNumbers = [];
         .export-btn { background: #27ae60; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-weight: 600; margin-bottom: 20px; margin-right: 10px; }
         
         @media print {
-            .filters, .export-btn, .challan-btn { display: none; }
+            @page {
+                size: A4 landscape;
+                margin: 10mm;
+            }
+            .filters, .export-btn, .challan-btn, .chart-card { display: none; }
             body { background: white; padding: 0; }
+            .container { max-width: 100%; padding: 10px; }
+            h1, h2 { font-size: 1.2em; }
+            .table-wrapper {
+                overflow: visible;
+                width: 100%;
+            }
+            table {
+                width: 100% !important;
+                min-width: auto !important;
+                max-width: 100%;
+                font-size: 9px;
+                page-break-inside: avoid;
+                break-inside: avoid;
+            }
+            th, td {
+                padding: 4px 3px;
+                font-size: 9px;
+                white-space: normal;
+            }
+            th {
+                font-size: 9px;
+                position: static;
+            }
+            table thead {
+                display: table-header-group;
+            }
+            table tbody {
+                display: table-row-group;
+            }
+            table tr {
+                page-break-inside: avoid;
+                break-inside: avoid;
+            }
         }
     </style>
 </head>
@@ -342,7 +423,7 @@ $referenceNumbers = [];
     </div>
     <?php endif; ?>
     
-    <?php if (count($deliveries) > 0): ?>
+    <?php if (count($groupedDeliveries) > 0): ?>
     <h2 style="font-size: 1.3em; color: #34495e; margin-bottom: 15px; padding-bottom: 10px; border-bottom: 3px solid #3498db;">
         <i class="fas fa-list"></i> Delivery Records
     </h2>
@@ -356,10 +437,9 @@ $referenceNumbers = [];
                 <th>Shift</th>
                 <th>Reference No.</th>
                 <th>CNC Cutting Batch</th>
-                <th>Project</th>
                 <th>Client</th>
                 <th>Bag Size</th>
-                <th>Packaging</th>
+                <th>Roll Size</th>
                 <th>Quantity</th>
                 <th>Unit Price</th>
                 <th>Total Value</th>
@@ -371,45 +451,84 @@ $referenceNumbers = [];
         <tbody>
             <?php 
             $counter = 1;
-            foreach ($deliveries as $delivery): 
-                $rowTotalValue = $delivery['delivery_quantity'] * ($delivery['unit_price'] ?? 0);
+            foreach ($groupedDeliveries as $group): 
+                $delivery = $group['delivery'];
+                $referenceDisplay = formatReferenceRange($group['references']);
+                $unitPrice = $delivery['unit_price'] ?? 0;
+                $deliveryUnit = $delivery['delivery_quantity_unit'] ?? '';
+                if (empty($deliveryUnit)) {
+                    $deliveryUnit = ($delivery['delivery_product_type'] ?? 'bag') === 'roll' ? 'kg' : 'pcs';
+                }
+                $unitLabel = in_array($deliveryUnit, ['kg', 'sqm'], true) ? $deliveryUnit : 'pcs';
+                $unitPriceLabel = $unitLabel === 'pcs' ? 'pc' : $unitLabel;
+                $isBagDelivery = !empty($delivery['cnc_cutting_batch']) && (($delivery['delivery_product_type'] ?? 'bag') !== 'roll');
+                $displayUnit = $isBagDelivery ? 'pcs' : $unitLabel;
+                $displayUnitPriceLabel = $isBagDelivery ? 'pc' : $unitPriceLabel;
+                
+                // Use first delivery's ID for challan button
+                $firstDeliveryId = $delivery['id'];
             ?>
                 <tr>
                     <td><?php echo $counter++; ?></td>
                     <td><strong><?php echo htmlspecialchars($delivery['delivery_id'] ?? 'N/A'); ?></strong></td>
                     <td><?php 
-                        $deliveryDate = $delivery['delivery_date'];
-                        if (!empty($deliveryDate) && $deliveryDate != '0000-00-00' && $deliveryDate != '0000-00-00 00:00:00' && strtotime($deliveryDate)) {
-                            echo date('M d, Y g:i A', strtotime($deliveryDate));
+                        // Use actual_delivery_datetime which has the full datetime with time
+                        $deliveryDateTime = $delivery['actual_delivery_datetime'] ?? null;
+                        
+                        if (!empty($deliveryDateTime) && $deliveryDateTime != '0000-00-00' && $deliveryDateTime != '0000-00-00 00:00:00' && strtotime($deliveryDateTime)) {
+                            echo date('M d, Y g:i A', strtotime($deliveryDateTime));
                         } else {
-                            echo 'N/A';
+                            // Fallback: try delivered_at or created_at
+                            $fallbackDateTime = $delivery['delivered_at'] ?? $delivery['created_at'] ?? null;
+                            if (!empty($fallbackDateTime) && strtotime($fallbackDateTime)) {
+                                echo date('M d, Y g:i A', strtotime($fallbackDateTime));
+                            } else {
+                                echo 'N/A';
+                            }
                         }
                     ?></td>
                     <td><span class="badge" style="background: <?php echo ($delivery['shift'] == 'Day') ? '#d5f4e6' : '#e3f2fd'; ?>; color: <?php echo ($delivery['shift'] == 'Day') ? '#27ae60' : '#2980b9'; ?>;"><?php echo htmlspecialchars($delivery['shift'] ?? 'N/A'); ?></span></td>
-                    <td><?php echo htmlspecialchars($delivery['reference_number'] ?? 'N/A'); ?></td>
+                    <td><?php echo htmlspecialchars($referenceDisplay); ?></td>
                     <td><?php echo htmlspecialchars($delivery['cnc_cutting_batch'] ?? 'N/A'); ?></td>
-                    <td><?php echo htmlspecialchars($delivery['project_name'] ?? 'Unassigned'); ?></td>
                     <td><strong><?php 
                         $clientName = $delivery['client_name'] ?? '';
                         echo htmlspecialchars((!empty($clientName) && $clientName != '0') ? $clientName : 'Unknown'); 
                     ?></strong></td>
-                    <td><?php echo htmlspecialchars($delivery['bag_size'] ?: $delivery['fg_bag_size'] ?: 'N/A'); ?></td>
-                    <td><?php echo htmlspecialchars($delivery['packaging_type'] ?: $delivery['fg_packaging_type'] ?: 'N/A'); ?></td>
+                    <td><?php 
+                        // Show bag size for bag deliveries, N/A for roll deliveries
+                        $hasReference = !empty($delivery['reference_number']);
+                        $noCncBatch = empty($delivery['cnc_cutting_batch']);
+                        $isRollDelivery = ($hasReference && $noCncBatch) || (isset($delivery['delivery_product_type']) && $delivery['delivery_product_type'] === 'roll');
+                        if ($isRollDelivery) {
+                            echo 'N/A';
+                        } else {
+                            echo htmlspecialchars($delivery['bag_size'] ?: $delivery['fg_bag_size'] ?: 'N/A');
+                        }
+                    ?></td>
+                    <td><?php 
+                        // Show roll size for roll deliveries, N/A for bag deliveries
+                        $hasReference = !empty($delivery['reference_number']);
+                        $noCncBatch = empty($delivery['cnc_cutting_batch']);
+                        $isRollDelivery = ($hasReference && $noCncBatch) || (isset($delivery['delivery_product_type']) && $delivery['delivery_product_type'] === 'roll');
+                        if ($isRollDelivery) {
+                            $rollSizeValue = $delivery['roll_size'] ?? $delivery['fg_bag_size'] ?? $delivery['bag_size'] ?? '';
+                            $rollSizeValue = trim($rollSizeValue);
+                            echo htmlspecialchars($rollSizeValue !== '' ? $rollSizeValue : 'N/A');
+                        } else {
+                            echo 'N/A';
+                        }
+                    ?></td>
                     <td>
                         <span class="badge badge-delivered">
-                            <?php 
-                            $deliveryUnit = $delivery['delivery_unit'] ?? 'piece';
-                            $unitLabel = ($deliveryUnit === 'kg') ? 'kg' : 'pcs';
-                            echo number_format($delivery['delivery_quantity'], 2) . ' ' . $unitLabel; 
-                            ?>
+                            <?php echo number_format($group['total_quantity'], 2) . ' ' . $displayUnit; ?>
                         </span>
                     </td>
-                    <td>৳<?php echo number_format($delivery['unit_price'] ?? 0, 2); ?> / <?php echo ($deliveryUnit === 'kg') ? 'kg' : 'pc'; ?></td>
-                    <td><strong>৳<?php echo number_format($rowTotalValue, 2); ?></strong></td>
+                    <td>৳<?php echo number_format($unitPrice, 2); ?> / <?php echo htmlspecialchars($displayUnitPriceLabel); ?></td>
+                    <td><strong>৳<?php echo number_format($group['total_value'], 2); ?></strong></td>
                     <td><?php echo htmlspecialchars($delivery['challan_no'] ?? 'N/A'); ?></td>
                     <td><?php echo htmlspecialchars($delivery['truck_no'] ?? 'N/A'); ?></td>
                     <td>
-                        <button class="challan-btn" onclick="printChallan(<?php echo $delivery['id']; ?>)">
+                        <button class="challan-btn" onclick="printChallan(<?php echo $firstDeliveryId; ?>)">
                             <i class="fas fa-file-invoice"></i> Challan
                         </button>
                     </td>
@@ -467,7 +586,7 @@ function exportToCSV() {
     csv.push(['FG Delivery Report']);
     csv.push(['Generated: ' + new Date().toLocaleString()]);
     csv.push(['Total Deliveries: <?php echo $totalDeliveries; ?>']);
-    csv.push(['Total Quantity: <?php echo $totalQuantity; ?> pcs']);
+    csv.push(['Total Quantity (mixed units): <?php echo $totalQuantity; ?>']);
     csv.push([]);
     
     const headers = Array.from(table.querySelectorAll('thead th')).slice(0, -1).map(th => th.textContent);

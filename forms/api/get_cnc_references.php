@@ -50,18 +50,26 @@ $cncDeletedCondition = $hasCncIsDeleted ? "AND (c.is_deleted = 0 OR c.is_deleted
 $allRefs = [];
 $refsWithDates = []; // Store references with their creation dates for sorting
 
-
+// Improved query to exclude already submitted references
+// This checks if the reference appears anywhere in the comma-separated reference_number field
+// Using FIND_IN_SET for better comma-separated value matching
 $refQuery = "SELECT DISTINCT r.reference_number, MAX(r.created_at) as created_at
              FROM roll_received r 
              WHERE r.reference_number IS NOT NULL 
              AND r.reference_number != ''
+             AND TRIM(r.reference_number) != ''
              {$receivedDeletedCondition}
              AND NOT EXISTS (
                  SELECT 1 FROM cnc_entries c 
-                 WHERE (c.reference_number = r.reference_number 
-                    OR c.reference_number LIKE CONCAT(r.reference_number, ',%')
-                    OR c.reference_number LIKE CONCAT('%,', r.reference_number, ',%')
-                    OR c.reference_number LIKE CONCAT('%,', r.reference_number))
+                 WHERE (
+                     -- Use FIND_IN_SET for comma-separated values (most reliable)
+                     FIND_IN_SET(r.reference_number, c.reference_number) > 0
+                     -- Also check exact match (in case it's a single reference, not comma-separated)
+                     OR c.reference_number = r.reference_number
+                     -- Also check with trimmed values
+                     OR FIND_IN_SET(TRIM(r.reference_number), TRIM(c.reference_number)) > 0
+                     OR TRIM(c.reference_number) = TRIM(r.reference_number)
+                 )
                  {$cncDeletedCondition}
              )
              GROUP BY r.reference_number
@@ -176,10 +184,15 @@ foreach ($references as $ref) {
         // First check: Is the bundle reference format itself submitted?
         // e.g., "4.0L226JAN05-R01-H0.1-1-4" might be stored in cnc_entries
         $checkBundleQuery = "SELECT COUNT(*) as count FROM cnc_entries c 
-                            WHERE (c.reference_number = ? 
-                               OR c.reference_number LIKE CONCAT(?, ',%')
-                               OR c.reference_number LIKE CONCAT('%,', ?, ',%')
-                               OR c.reference_number LIKE CONCAT('%,', ?))
+                            WHERE (
+                                -- Use FIND_IN_SET for comma-separated values (most reliable)
+                                FIND_IN_SET(?, c.reference_number) > 0
+                                -- Also check exact match
+                                OR c.reference_number = ?
+                                -- Also check with trimmed values
+                                OR FIND_IN_SET(TRIM(?), TRIM(c.reference_number)) > 0
+                                OR TRIM(c.reference_number) = TRIM(?)
+                            )
                             {$cncDeletedCondition}";
         $checkBundleStmt = $conn->prepare($checkBundleQuery);
         if ($checkBundleStmt) {
@@ -198,12 +211,18 @@ foreach ($references as $ref) {
         }
         
         // Second check: Check if any individual reference in the bundle has been submitted
+        // Note: Individual refs are already filtered by main query, but we double-check here for safety
         foreach ($ref['bundle_refs'] as $bundleRef) {
             $checkQuery = "SELECT COUNT(*) as count FROM cnc_entries c 
-                          WHERE (c.reference_number = ? 
-                             OR c.reference_number LIKE CONCAT(?, ',%')
-                             OR c.reference_number LIKE CONCAT('%,', ?, ',%')
-                             OR c.reference_number LIKE CONCAT('%,', ?))
+                          WHERE (
+                              -- Use FIND_IN_SET for comma-separated values (most reliable)
+                              FIND_IN_SET(?, c.reference_number) > 0
+                              -- Also check exact match
+                              OR c.reference_number = ?
+                              -- Also check with trimmed values
+                              OR FIND_IN_SET(TRIM(?), TRIM(c.reference_number)) > 0
+                              OR TRIM(c.reference_number) = TRIM(?)
+                          )
                           {$cncDeletedCondition}";
             $checkStmt = $conn->prepare($checkQuery);
             if ($checkStmt) {
@@ -213,17 +232,43 @@ foreach ($references as $ref) {
                 if ($checkResult && ($checkRow = $checkResult->fetch_assoc())) {
                     if ($checkRow['count'] > 0) {
                         $shouldExclude = true;
+                        $checkStmt->close();
                         break;
                     }
                 }
                 $checkStmt->close();
             }
         }
+    } else {
+        // For individual (non-bundle) references, double-check they haven't been submitted
+        // This is a safety check even though the main query should have filtered them
+        $individualRef = $ref['reference'];
+        $checkIndividualQuery = "SELECT COUNT(*) as count FROM cnc_entries c 
+                                  WHERE (
+                                      -- Use FIND_IN_SET for comma-separated values (most reliable)
+                                      FIND_IN_SET(?, c.reference_number) > 0
+                                      -- Also check exact match
+                                      OR c.reference_number = ?
+                                      -- Also check with trimmed values
+                                      OR FIND_IN_SET(TRIM(?), TRIM(c.reference_number)) > 0
+                                      OR TRIM(c.reference_number) = TRIM(?)
+                                  )
+                                  {$cncDeletedCondition}";
+        $checkIndividualStmt = $conn->prepare($checkIndividualQuery);
+        if ($checkIndividualStmt) {
+            $checkIndividualStmt->bind_param('ssss', $individualRef, $individualRef, $individualRef, $individualRef);
+            $checkIndividualStmt->execute();
+            $checkIndividualResult = $checkIndividualStmt->get_result();
+            if ($checkIndividualResult && ($checkIndividualRow = $checkIndividualResult->fetch_assoc())) {
+                if ($checkIndividualRow['count'] > 0) {
+                    $shouldExclude = true;
+                }
+            }
+            $checkIndividualStmt->close();
+        }
     }
-    // Individual references are already filtered by the SQL query, so we include them directly
-    // No need to check them again here - they should ALWAYS be included if they passed the SQL filter
     
-    // Only include if not excluded (bundles are checked above, individual refs are always included)
+    // Only include if not excluded (both bundles and individual refs are checked above)
     if (!$shouldExclude) {
         $filteredReferences[] = $ref;
     }

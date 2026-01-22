@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 // Security headers
 header("X-Content-Type-Options: nosniff");
 header("X-Frame-Options: SAMEORIGIN");
@@ -54,16 +54,74 @@ if ($res) {
 
 // Material type is always "PP Stable Fiber"
 
+// Function to generate Fiber Input Entry ID (resets daily at 8 AM)
+function generateFiberInputEntryId($conn) {
+    $now = new DateTime('now', new DateTimeZone('Asia/Dhaka'));
+    $hour = (int)$now->format('H');
+    $baseDate = clone $now;
+    if ($hour < 8) {
+        $baseDate->modify('-1 day');
+    }
+    $baseDate->setTime(8, 0, 0);
+    $dateKey = $baseDate->format('Ymd');
+
+    // Check if fiber_to_roll_entry table exists and has entry_id column
+    $tableCheck = $conn->query("SHOW TABLES LIKE 'fiber_to_roll_entry'");
+    if ($tableCheck && $tableCheck->num_rows > 0) {
+        $colCheck = $conn->query("SHOW COLUMNS FROM fiber_to_roll_entry LIKE 'entry_id'");
+        if ($colCheck && $colCheck->num_rows > 0) {
+            $stmt = $conn->prepare("SELECT MAX(CAST(SUBSTRING(entry_id, -3) AS UNSIGNED)) as last_num 
+                                    FROM fiber_to_roll_entry 
+                                    WHERE date_time >= ?");
+            $resetTimestamp = $baseDate->format('Y-m-d H:i:s');
+            $stmt->bind_param('s', $resetTimestamp);
+            $stmt->execute();
+            $result = $stmt->get_result();
+            $nextNum = 1;
+            if ($result && $row = $result->fetch_assoc()) {
+                if (!empty($row['last_num'])) {
+                    $nextNum = (int)$row['last_num'] + 1;
+                }
+            }
+            $stmt->close();
+        } else {
+            $nextNum = 1;
+        }
+    } else {
+        $nextNum = 1;
+    }
+
+    return 'FIE-' . $dateKey . '-' . str_pad($nextNum, 3, '0', STR_PAD_LEFT);
+}
+
+$displayEntryId = generateFiberInputEntryId($conn);
+
 // Operator
 $operator_id = $_SESSION['user_id'];
 $operator_name = $_SESSION['username'];
+
+// Fetch distinct manufacturer names from fiber_entries (only from received materials)
+$manufacturers = [];
+$manufacturerQuery = $conn->query("
+    SELECT DISTINCT manufacturer_name 
+    FROM fiber_entries 
+    WHERE manufacturer_name IS NOT NULL 
+    AND manufacturer_name != '' 
+    AND (is_deleted = 0 OR is_deleted IS NULL)
+    ORDER BY manufacturer_name ASC
+");
+if ($manufacturerQuery) {
+    while ($row = $manufacturerQuery->fetch_assoc()) {
+        $manufacturers[] = $row['manufacturer_name'];
+    }
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Fiber To Roll Entry</title>
+  <title>Fiber Input Entry</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
   <style>
     body { font-family:'Inter',sans-serif; background:#f4f6f9; margin:0; padding:0; color:#2c3e50; }
@@ -251,11 +309,145 @@ $operator_name = $_SESSION['username'];
     .qty-limit-popup-close:active {
       transform: scale(0.95);
     }
+    
+    /* Material Percentage Error Popup Styles */
+    .percentage-error-popup-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(15, 23, 42, 0.75);
+      backdrop-filter: blur(8px);
+      z-index: 10000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0;
+      visibility: hidden;
+      transition: all 0.3s ease;
+    }
+    
+    .percentage-error-popup-overlay.show {
+      opacity: 1;
+      visibility: visible;
+    }
+    
+    .percentage-error-popup {
+      background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+      border-radius: 20px;
+      max-width: 420px;
+      width: 90%;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+      position: relative;
+      transform: scale(0.9) translateY(20px);
+      transition: all 0.3s ease;
+      overflow: hidden;
+    }
+    
+    .percentage-error-popup-overlay.show .percentage-error-popup {
+      transform: scale(1) translateY(0);
+    }
+    
+    .percentage-error-popup-header {
+      background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+      padding: 20px 24px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      position: relative;
+    }
+    
+    .percentage-error-popup-icon {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.25);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 24px;
+      flex-shrink: 0;
+    }
+    
+    .percentage-error-popup-title {
+      font-size: 18px;
+      font-weight: 700;
+      margin: 0;
+      color: #ffffff;
+      text-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    }
+    
+    .percentage-error-popup-body {
+      padding: 24px;
+    }
+    
+    .percentage-error-popup-message {
+      font-size: 15px;
+      color: #475569;
+      margin-bottom: 20px;
+      line-height: 1.6;
+      text-align: center;
+    }
+    
+    .percentage-error-popup-button {
+      background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+      color: white;
+      border: none;
+      padding: 12px 32px;
+      border-radius: 10px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+      width: 100%;
+    }
+    
+    .percentage-error-popup-button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 16px rgba(59, 130, 246, 0.4);
+    }
+    
+    .percentage-error-popup-button:active {
+      transform: translateY(0);
+      box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
+    }
+    
+    .percentage-error-popup-close {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.2);
+      border: none;
+      color: #ffffff;
+      font-size: 18px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s ease;
+      z-index: 10;
+      backdrop-filter: blur(10px);
+      line-height: 1;
+    }
+    
+    .percentage-error-popup-close:hover {
+      background: rgba(255, 255, 255, 0.3);
+      transform: scale(1.1);
+    }
+    
+    .percentage-error-popup-close:active {
+      transform: scale(0.95);
+    }
   </style>
 </head>
 <body>
   <div class="container">
-    <h1>Fiber To Roll Entry</h1>
+    <h1>Fiber Input Entry</h1>
 
     <div id="dateTimeDisplay" class="summary-info"></div>
     <div id="shiftBanner" class="summary-info"></div>
@@ -275,6 +467,12 @@ $operator_name = $_SESSION['username'];
     <form id="rollEntryForm" method="post" action="../handlers/submit_fiber_to_roll_entry.php" onsubmit="return validateAndSubmit();">
       <input type="hidden" id="dateTime" name="date_time" />
 
+      <!-- Entry ID -->
+      <div class="form-group">
+        <label>Entry ID:</label>
+        <input type="text" id="entry_id" name="entry_id" value="<?php echo htmlspecialchars($displayEntryId); ?>" readonly class="readonly">
+      </div>
+
       <!-- Operator -->
       <div class="form-group">
         <label>Operator Name:</label>
@@ -282,14 +480,30 @@ $operator_name = $_SESSION['username'];
         <input type="hidden" name="operator_id" value="<?php echo htmlspecialchars($operator_id); ?>">
       </div>
 
+      <!-- Manufacturer Name -->
       <div class="form-group">
-        <label>Reference Number:</label>
-        <input type="text" id="reference_number" name="reference_number" placeholder="Will auto-generate after filling fields below" readonly class="readonly">
+        <label>Manufacturer Name:</label>
+        <div class="btn-group" id="manufacturerGroup">
+          <?php if (empty($manufacturers)): ?>
+            <button type="button" class="btn" disabled style="background: #f5f5f5; color: #999;">No manufacturers available</button>
+          <?php else: ?>
+            <?php foreach ($manufacturers as $manufacturer): ?>
+              <button type="button" class="btn" data-value="<?php echo htmlspecialchars($manufacturer); ?>" onclick="selectBtn(this,'manufacturerGroup')">
+                <?php echo htmlspecialchars($manufacturer); ?>
+              </button>
+            <?php endforeach; ?>
+          <?php endif; ?>
+        </div>
+        <input type="hidden" id="manufacturer_name" name="manufacturer_name" value="">
+        <small style="color: #666; font-size: 12px; display: block; margin-top: 5px;">Only manufacturers from Fiber Received Entry are available</small>
       </div>
 
+      <!-- Material Percentage -->
       <div class="form-group">
-        <label>GSM:</label>
-        <input type="number" step="0.01" id="gsm" name="gsm" placeholder="e.g., 400" required>
+        <label>Material Percentage (%):</label>
+        <input type="number" step="0.01" min="0" max="100" id="material_percentage" name="material_percentage" placeholder="Enter percentage (0-100)" oninput="validateMaterialPercentage()">
+        <small style="color: #666; font-size: 12px; display: block; margin-top: 5px;">Enter material percentage (cannot exceed 100%)</small>
+        <small id="percentage_warning" style="color: #e74c3c; font-weight: 600; display: none; margin-top: 5px;"></small>
       </div>
 
       <div class="form-group">
@@ -302,19 +516,15 @@ $operator_name = $_SESSION['username'];
         
         <!-- Bale Opener Number (shown after Line Number is selected) -->
         <div id="baleOpenerSection" style="display:none; margin-top:15px;">
-          <label style="font-size:14px; color:#555;">Bale Opener Number:</label>
+          <label style="font-size:14px; color:#555;">Bale Opener Number (Select Multiple):</label>
           <div class="btn-group" id="baleOpenerGroup">
-            <button type="button" class="btn" data-value="1" onclick="selectBtn(this,'baleOpenerGroup')">1</button>
-            <button type="button" class="btn" data-value="2" onclick="selectBtn(this,'baleOpenerGroup')">2</button>
-            <button type="button" class="btn" data-value="3" onclick="selectBtn(this,'baleOpenerGroup')">3</button>
+            <button type="button" class="btn" data-value="1" onclick="toggleBaleOpener(this)">1</button>
+            <button type="button" class="btn" data-value="2" onclick="toggleBaleOpener(this)">2</button>
+            <button type="button" class="btn" data-value="3" onclick="toggleBaleOpener(this)">3</button>
           </div>
           <input type="hidden" id="bale_opener_number" name="bale_opener_number" value="">
+          <small style="color: #666; font-size: 12px; display: block; margin-top: 5px;">You can select multiple bale opener numbers</small>
         </div>
-      </div>
-
-      <div class="form-group">
-        <label>Roll Number:</label>
-        <input type="number" step="1" min="1" id="roll_no" name="roll_no" placeholder="e.g., 8" required>
       </div>
 
       <div class="form-group">
@@ -348,6 +558,7 @@ $operator_name = $_SESSION['username'];
         <label>Material Type:</label>
         <div class="btn-group" id="materialTypeGroup">
           <button type="button" class="btn" data-value="PP Stable Fiber" onclick="selectMaterialType(this)">PP Stable Fiber</button>
+          <button type="button" class="btn" data-value="PSF Fiber" onclick="selectMaterialType(this)">PSF Fiber</button>
         </div>
         <input type="hidden" id="material_type" name="material_type" value="">
       </div>
@@ -382,6 +593,24 @@ $operator_name = $_SESSION['username'];
         <button type="reset" class="clear-btn" onclick="clearForm()">Clear</button>
       </div>
     </form>
+  </div>
+
+  <!-- Material Percentage Error Popup -->
+  <div id="percentageErrorPopup" class="percentage-error-popup-overlay">
+    <div class="percentage-error-popup">
+      <div class="percentage-error-popup-header">
+        <div class="percentage-error-popup-icon">⚠️</div>
+        <h3 class="percentage-error-popup-title">Material Percentage Error</h3>
+        <button class="percentage-error-popup-close" onclick="closePercentageErrorPopup()">×</button>
+      </div>
+      <div class="percentage-error-popup-body">
+        <p class="percentage-error-popup-message">
+          Material percentage cannot be greater than 100%.<br>
+          Please enter a value between 0 and 100.
+        </p>
+        <button class="percentage-error-popup-button" onclick="closePercentageErrorPopup()">OK</button>
+      </div>
+    </div>
   </div>
 
 <script>
@@ -419,16 +648,32 @@ $operator_name = $_SESSION['username'];
     if(groupId==="originGroup"){
       document.getElementById("origin").value = button.dataset.value;
     }
+    if(groupId==="manufacturerGroup"){
+      document.getElementById("manufacturer_name").value = button.dataset.value;
+      onManufacturerSelected();
+    }
     if(groupId==="lineNumberGroup"){
       document.getElementById("line_no").value = button.dataset.value;
       // Show Bale Opener section after Line Number is selected
       document.getElementById("baleOpenerSection").style.display = "block";
     }
-    if(groupId==="baleOpenerGroup"){
-      document.getElementById("bale_opener_number").value = button.dataset.value;
-    }
     updateSummary();
-    generateReferenceNumber();
+  }
+  
+  // Function to toggle bale opener selection (multi-select)
+  function toggleBaleOpener(button) {
+    button.classList.toggle('selected');
+    updateBaleOpenerValue();
+    updateSummary();
+  }
+  
+  // Update the hidden input with selected bale opener numbers
+  function updateBaleOpenerValue() {
+    const selected = [];
+    document.querySelectorAll('#baleOpenerGroup .btn.selected').forEach(btn => {
+      selected.push(btn.dataset.value);
+    });
+    document.getElementById("bale_opener_number").value = selected.join(',');
   }
   
   // Function to handle material type selection
@@ -438,32 +683,55 @@ $operator_name = $_SESSION['username'];
     materialGroup.querySelectorAll('.btn').forEach(btn => btn.classList.remove('selected'));
     button.classList.add('selected');
     
-    // Set the material type value - always "PP Stable Fiber"
-    document.getElementById('material_type').value = 'PP Stable Fiber';
+    // Set the material type value from the button
+    const materialValue = (button.dataset.value || button.textContent).trim();
+    document.getElementById('material_type').value = materialValue;
     
-    // Fetch available material quantity
-    fetchAvailableMaterial('PP Stable Fiber');
+    // Fetch available material quantity (will use manufacturer if selected)
+    fetchAvailableMaterial();
     
     updateSummary();
-    generateReferenceNumber();
+  }
+  
+  // Function to handle manufacturer selection
+  function onManufacturerSelected() {
+    // Fetch available material when manufacturer is selected
+    fetchAvailableMaterial();
+    updateSummary();
   }
 
   // Fetch available material quantity from fiber_entries
-  async function fetchAvailableMaterial(materialType) {
+  async function fetchAvailableMaterial() {
     const availableText = document.getElementById('available_material_text');
     const warning = document.getElementById('weight_warning');
+    const materialType = document.getElementById('material_type').value;
+    const manufacturerName = document.getElementById('manufacturer_name').value;
+    
+    // Don't fetch if material type is not selected
+    if (!materialType) {
+      availableText.textContent = 'Select a material type to see available quantity';
+      availableText.style.color = '#999';
+      availableText.style.display = 'block';
+      return;
+    }
     
     // Show loading indicator
-    availableText.textContent = ' Loading available quantity...';
+    availableText.textContent = 'Loading remaining quantity...';
     availableText.style.color = '#3498db';
     availableText.style.display = 'block';
     warning.style.display = 'none';
     
-    console.log('Fetching available material for:', materialType);
-    console.log('API URL:', `api/get_fiber_available_material.php?material_type=${encodeURIComponent(materialType)}`);
+    // Build API URL with material type and manufacturer (if selected)
+    let apiUrl = `api/get_fiber_available_material.php?material_type=${encodeURIComponent(materialType)}`;
+    if (manufacturerName) {
+      apiUrl += `&manufacturer_name=${encodeURIComponent(manufacturerName)}`;
+    }
+    
+    console.log('Fetching remaining material for:', materialType, manufacturerName ? `(Manufacturer: ${manufacturerName})` : '');
+    console.log('API URL:', apiUrl);
     
     try {
-      const response = await fetch(`api/get_fiber_available_material.php?material_type=${encodeURIComponent(materialType)}`);
+      const response = await fetch(apiUrl);
       console.log('Response status:', response.status);
       
       if (!response.ok) {
@@ -474,19 +742,26 @@ $operator_name = $_SESSION['username'];
       console.log('API Response:', data);
       
       if (data.success) {
-        const availableQty = parseFloat(data.available_quantity) || 0;
-        console.log('Available quantity:', availableQty, 'kg');
+        const remainingQty = parseFloat(data.remaining_quantity || data.available_quantity) || 0;
+        const receivedQty = parseFloat(data.received_quantity || 0) || 0;
+        const usedQty = parseFloat(data.used_quantity || 0) || 0;
         
-        if (availableQty > 0) {
-          availableText.textContent = `Available: ${availableQty.toFixed(2)} kg`;
+        console.log('Remaining quantity:', remainingQty, 'kg');
+        
+        if (remainingQty > 0) {
+          let displayText = `Remaining: ${remainingQty.toFixed(2)} kg`;
+          if (manufacturerName) {
+            displayText += ` (Received: ${receivedQty.toFixed(2)} kg, Used: ${usedQty.toFixed(2)} kg)`;
+          }
+          availableText.textContent = displayText;
           availableText.style.color = '#27ae60'; // Green for available stock
           availableText.style.display = 'block';
           availableText.style.fontWeight = '600';
           
           // Store for validation
-          document.getElementById('total_weight').setAttribute('data-max-weight', availableQty);
+          document.getElementById('total_weight').setAttribute('data-max-weight', remainingQty);
         } else {
-          availableText.textContent = `âš ï¸ No stock available for this material`;
+          availableText.textContent = `No remaining stock available${manufacturerName ? ' for this manufacturer' : ''}`;
           availableText.style.color = '#e74c3c'; // Red for no stock
           availableText.style.display = 'block';
           availableText.style.fontWeight = '600';
@@ -496,7 +771,7 @@ $operator_name = $_SESSION['username'];
         throw new Error(data.error || 'Unknown error');
       }
     } catch (error) {
-      console.error(' Error fetching available material:', error);
+      console.error('Error fetching available material:', error);
       availableText.textContent = `Error: ${error.message} (Check console)`;
       availableText.style.color = '#e74c3c';
       availableText.style.display = 'block';
@@ -621,71 +896,18 @@ $operator_name = $_SESSION['username'];
   });
 
   function clearForm(){
-    document.querySelectorAll('#projectGroup .btn,#materialTypeGroup .btn,#lineNumberGroup .btn,#baleOpenerGroup .btn').forEach(b=>b.classList.remove('selected'));
+    document.querySelectorAll('#projectGroup .btn,#materialTypeGroup .btn,#lineNumberGroup .btn,#baleOpenerGroup .btn,#manufacturerGroup .btn').forEach(b=>b.classList.remove('selected'));
     document.getElementById("project_id").value='';
     document.getElementById("material_type").value='';
     document.getElementById("origin").value='';
     document.getElementById("line_no").value='';
+    document.getElementById("manufacturer_name").value='';
+    document.getElementById("material_percentage").value='';
+    document.getElementById("percentage_warning").style.display='none';
     document.getElementById("bale_opener_number").value='';
-    document.getElementById("reference_number").value='';
     // Hide Bale Opener section
     document.getElementById("baleOpenerSection").style.display = "none";
     updateTimeAndShift();
-    updateSummary();
-  }
-
-  // Generate Reference Number: 4.0L225OCT21-R08-GT0.9H0.1
-  function generateReferenceNumber() {
-    const gsm = document.getElementById("gsm").value;
-    const lineNo = document.getElementById("line_no").value;
-    const rollNo = document.getElementById("roll_no").value;
-    const batchInfo = document.getElementById("batch_info").value;
-
-    console.log('Generating ref:', {gsm, lineNo, rollNo, batchInfo}); // Debug
-
-    if (!gsm || !lineNo || !rollNo || !batchInfo) {
-      document.getElementById("reference_number").value = '';
-      return;
-    }
-
-    // Get current date
-    const now = new Date();
-    const utc = now.getTime() + (now.getTimezoneOffset()*60000);
-    const dhaka = new Date(utc + (6*3600000));
-    
-    const year = dhaka.getFullYear().toString().slice(-2); // Last 2 digits of year (2025 -> 25)
-    const monthNames = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
-    const month = monthNames[dhaka.getMonth()];
-    const day = String(dhaka.getDate()).padStart(2, '0');
-
-    // Format GSM: 300 -> 3.0, 400 -> 4.0
-    const gsmFormatted = (parseFloat(gsm) / 100).toFixed(1);
-    
-    // Format Roll No: 3 -> R03, 8 -> R08
-    const rollFormatted = 'R' + String(rollNo).padStart(2, '0');
-    
-    // Format Batch Info: GT9.H1 -> GT0.9H0.1 or gt9.h1 -> GT0.9H0.1
-    // Convert to uppercase first
-    let batchFormatted = batchInfo.toUpperCase();
-    
-    // Replace each number with 0.number format
-    // GT9.H1 -> GT[9].H[1] -> GT0.9H0.1
-    batchFormatted = batchFormatted.replace(/([A-Z]+)(\d+)/g, function(match, letters, number) {
-      return letters + '0.' + number;
-    });
-
-    // Final format: 3.0L125OCT21-R03-GT0.9H0.1 (single entry, no roll suffix in fiber_to_roll)
-    const refNumber = `${gsmFormatted}L${lineNo}${year}${month}${day}-${rollFormatted}-${batchFormatted}`;
-    
-    console.log('Generated reference:', refNumber); // Debug
-    
-    const refField = document.getElementById("reference_number");
-    if (refField) {
-      refField.value = refNumber;
-      console.log('Set reference field to:', refField.value); // Debug
-    } else {
-      console.error('Reference number field not found!');
-    }
     updateSummary();
   }
 
@@ -693,31 +915,32 @@ $operator_name = $_SESSION['username'];
     const dateTime = document.getElementById("dateTime").value;
     const shift = document.getElementById("shiftBanner").innerText.replace("Shift: ","");
     const operator = "<?php echo htmlspecialchars($operator_name); ?>";
-    const gsm = document.getElementById("gsm").value;
     const lineNo = document.getElementById("line_no").value;
     const baleOpener = document.getElementById("bale_opener_number").value;
-    const rollNo = document.getElementById("roll_no").value;
     const batchInfo = document.getElementById("batch_info").value;
-    const refNumber = document.getElementById("reference_number").value;
     const baleNumber = document.getElementById("bale_number").value;
     const baleWeight = document.getElementById("bale_weight").value;
     const projectBtn = document.querySelector("#projectGroup .btn.selected");
     const project = projectBtn ? projectBtn.innerText : "";
     const materialType = document.getElementById("material_type").value;
+    const manufacturerName = document.getElementById("manufacturer_name").value;
+    const materialPercentage = document.getElementById("material_percentage").value;
     const origin = document.getElementById("origin").value;
     const totalWeight = document.getElementById("total_weight").value;
 
     let summary = `${dateTime} | Shift: ${shift} | Operator: ${operator}`;
-    if (gsm) summary += ` | GSM: ${gsm}`;
     if (lineNo) summary += ` | Line: ${lineNo}`;
-    if (baleOpener) summary += ` | Bale Opener: ${baleOpener}`;
-    if (rollNo) summary += ` | Roll: ${rollNo}`;
+    if (baleOpener) {
+      const baleOpenerDisplay = baleOpener.split(',').join(', ');
+      summary += ` | Bale Opener: ${baleOpenerDisplay}`;
+    }
     if (batchInfo) summary += ` | Batch: ${batchInfo}`;
-    if (refNumber) summary += ` | Ref: ${refNumber}`;
     if (baleNumber) summary += ` | Bale: ${baleNumber}`;
     if (baleWeight) summary += ` | Bale Wt: ${baleWeight}kg`;
     if (project) summary += ` | Project: ${project}`;
     if (materialType) summary += ` | Material: ${materialType}`;
+    if (manufacturerName) summary += ` | Manufacturer: ${manufacturerName}`;
+    if (materialPercentage) summary += ` | Material %: ${materialPercentage}%`;
     if (origin) summary += ` | Origin: ${origin}`;
     if (totalWeight) summary += ` | Total Wt: ${totalWeight}kg`;
 
@@ -725,20 +948,80 @@ $operator_name = $_SESSION['username'];
     document.getElementById("summary").value = summary;
   }
 
-  ["bale_number","bale_weight","gsm","roll_no","batch_info","origin","total_weight"].forEach(id=>{
+  // Show Material Percentage Error Popup
+  function showPercentageErrorPopup() {
+    const popup = document.getElementById('percentageErrorPopup');
+    if (popup) {
+      popup.classList.add('show');
+    }
+  }
+  
+  // Close Material Percentage Error Popup
+  function closePercentageErrorPopup() {
+    const popup = document.getElementById('percentageErrorPopup');
+    if (popup) {
+      popup.classList.remove('show');
+    }
+  }
+
+  // Validate Material Percentage
+  function validateMaterialPercentage() {
+    const percentageInput = document.getElementById('material_percentage');
+    const warning = document.getElementById('percentage_warning');
+    const value = parseFloat(percentageInput.value) || 0;
+    
+    if (value > 100) {
+      warning.textContent = 'Material percentage cannot exceed 100%!';
+      warning.style.display = 'block';
+      percentageInput.style.borderColor = '#e74c3c';
+      
+      // Show modern UI popup notification
+      showPercentageErrorPopup();
+      
+      // Reset to 100 if user entered more
+      percentageInput.value = 100;
+      warning.style.display = 'none';
+      percentageInput.style.borderColor = '#ccc';
+    } else if (value < 0) {
+      warning.textContent = 'Material percentage cannot be negative!';
+      warning.style.display = 'block';
+      percentageInput.style.borderColor = '#e74c3c';
+      percentageInput.value = 0;
+    } else {
+      warning.style.display = 'none';
+      percentageInput.style.borderColor = '#ccc';
+    }
+    
+    updateSummary();
+  }
+  
+  // Close popup on ESC key
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+      const popup = document.getElementById('percentageErrorPopup');
+      if (popup && popup.classList.contains('show')) {
+        closePercentageErrorPopup();
+      }
+    }
+  });
+  
+  // Close popup when clicking outside
+  document.getElementById('percentageErrorPopup')?.addEventListener('click', function(e) {
+    if (e.target === this) {
+      closePercentageErrorPopup();
+    }
+  });
+
+  ["bale_number","bale_weight","batch_info","origin","total_weight","material_percentage"].forEach(id=>{
     document.getElementById(id).addEventListener("input", function() {
       updateSummary();
-      generateReferenceNumber();
     });
   });
 
   function validateAndSubmit(){
-    if(!document.getElementById("gsm").value.trim()){ alert("Please fill GSM."); return false; }
     if(!document.getElementById("line_no").value){ alert("Please select Line Number."); return false; }
-    if(!document.getElementById("bale_opener_number").value){ alert("Please select Bale Opener Number."); return false; }
-    if(!document.getElementById("roll_no").value.trim()){ alert("Please fill Roll Number."); return false; }
+    if(!document.getElementById("bale_opener_number").value){ alert("Please select at least one Bale Opener Number."); return false; }
     if(!document.getElementById("batch_info").value.trim()){ alert("Please fill Batch Information."); return false; }
-    if(!document.getElementById("reference_number").value.trim()){ alert("Reference Number not generated."); return false; }
     if(!document.getElementById("bale_number").value.trim()){ alert("Please fill Bale Number."); return false; }
     if(!document.getElementById("bale_weight").value.trim()){ alert("Please fill Bale Weight."); return false; }
     if(!document.getElementById("project_id").value){ alert("Please select a Project."); return false; }

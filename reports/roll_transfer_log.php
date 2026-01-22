@@ -298,6 +298,10 @@ $drivers = $driversResult ? $driversResult->fetch_all(MYSQLI_ASSOC) : [];
         }
         
         @media print {
+            @page {
+                size: A4 landscape;
+                margin: 10mm;
+            }
             * { 
                 box-sizing: border-box;
                 -webkit-print-color-adjust: exact;

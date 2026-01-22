@@ -180,6 +180,10 @@ $hourlyData = $hourlyResult ? $hourlyResult->fetch_all(MYSQLI_ASSOC) : [];
         .badge-night { background: #e8eaf6; color: #3f51b5; }
         
         @media print {
+            @page {
+                size: A4 landscape;
+                margin: 10mm;
+            }
             * { box-sizing: border-box; }
             body { 
                 background: white; 
@@ -220,19 +224,41 @@ $hourlyData = $hourlyResult ? $hourlyResult->fetch_all(MYSQLI_ASSOC) : [];
             table { 
                 font-size: 7px !important; 
                 width: 100% !important;
-                page-break-inside: auto;
+                min-width: auto !important;
+                max-width: 100% !important;
+                page-break-inside: avoid !important;
+                break-inside: avoid !important;
                 border-collapse: collapse !important;
                 margin-bottom: 8px !important;
+                table-layout: auto !important;
             }
             th, td { 
                 padding: 3px 2px !important; 
                 font-size: 7px !important;
                 line-height: 1.1 !important;
                 border: 1px solid #ddd !important;
+                white-space: normal !important;
+                word-wrap: break-word !important;
+                position: static !important;
             }
             th { 
-                font-size: 8px !important; 
+                font-size: 7px !important; 
                 font-weight: 600 !important;
+                position: static !important;
+                top: auto !important;
+            }
+            .table-wrapper {
+                overflow: visible !important;
+                width: 100% !important;
+            }
+            td:first-child, th:first-child {
+                position: static !important;
+                left: auto !important;
+                background: transparent !important;
+                z-index: auto !important;
+            }
+            th:first-child {
+                background: #34495e !important;
             }
             .stats-grid { 
                 grid-template-columns: repeat(3, 1fr) !important;

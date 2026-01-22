@@ -774,9 +774,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_report'])) {
         $result = $FinenessFiberHandler->saveReport($_POST);
         if ($result['success']) {
             if (in_array($user_role, ['admin', 'agm ops', 'agm operations'])) {
-                $message = "✅ Fineness of Fiber Report saved and auto-approved! Report Number: " . $actual_report_number;
+                $message = "Fineness of Fiber Report saved and auto-approved! Report Number: " . $actual_report_number;
             } else {
-                $message = "✅ Fineness of Fiber Report submitted successfully! Report Number: " . $actual_report_number . " - Status: Pending Approval";
+                $message = "Fineness of Fiber Report submitted successfully! Report Number: " . $actual_report_number . " - Status: Pending Approval";
             }
             
             $_SESSION['success_message'] = $message;

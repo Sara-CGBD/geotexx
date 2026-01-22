@@ -212,7 +212,47 @@ foreach ($reports as $report) {
         .badge.overall-pending { background: #fdecea; color: #c0392b; }
         .no-data { text-align: center; padding: 60px 20px; color: #95a5a6; }
         .export-btn { background: #27ae60; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-weight: 600; margin-bottom: 20px; }
-        @media print { .filters, .export-btn { display: none; } body { background: white; padding: 0; } .container { box-shadow: none; } }
+        @media print {
+            @page {
+                size: A4 landscape;
+                margin: 10mm;
+            }
+            .filters, .export-btn { display: none; }
+            body { background: white; padding: 0; }
+            .container { box-shadow: none; max-width: 100%; padding: 10px; }
+            h1, h2 { font-size: 1.2em; }
+            .table-wrapper {
+                overflow: visible;
+                width: 100%;
+            }
+            table {
+                width: 100% !important;
+                min-width: auto !important;
+                max-width: 100%;
+                font-size: 9px;
+                page-break-inside: avoid;
+                break-inside: avoid;
+            }
+            th, td {
+                padding: 4px 3px;
+                font-size: 9px;
+                white-space: normal;
+            }
+            th {
+                font-size: 9px;
+                position: static;
+            }
+            table thead {
+                display: table-header-group;
+            }
+            table tbody {
+                display: table-row-group;
+            }
+            table tr {
+                page-break-inside: avoid;
+                break-inside: avoid;
+            }
+        }
     </style>
 </head>
 <body>

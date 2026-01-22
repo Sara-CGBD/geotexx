@@ -249,6 +249,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_entry'])) {
       <label>Material Type:</label>
       <div class="btn-group" id="materialTypeGroup">
         <button type="button" class="btn" data-value="PP Stable Fiber" onclick="selectBtn(this, 'materialTypeGroup')">PP Stable Fiber</button>
+        <button type="button" class="btn" data-value="PSF Fiber" onclick="selectBtn(this, 'materialTypeGroup')">PSF Fiber</button>
       </div>
       <input type="hidden" id="materialType" name="materialType" value="" required>
     </div>

@@ -1,146 +1,164 @@
 <?php
-// get_cnc_cutting_batches.php
-// Returns distinct CNC cutting batches from cnc_entries for dropdown selection
+// Start output buffering to prevent any output before JSON
+ob_start();
 
 session_start();
 require_once '../../config/security_config.php';
 
-// Security check
+// Set JSON header
+header('Content-Type: application/json');
+
+// Clear any output buffer
+ob_clean();
+
 if (!isset($_SESSION['user_id']) || !isset($_SESSION['username'])) {
-    http_response_code(401);
-    echo json_encode(['success' => false, 'error' => 'Unauthorized']);
-    exit();
+    echo json_encode(['success' => false, 'message' => 'Unauthorized']);
+    exit;
 }
 
-// Database connection
-$conn = SecurityConfig::getConnection();
-if (!$conn) {
-    http_response_code(500);
-    echo json_encode(['success' => false, 'error' => 'Database connection failed']);
-    exit();
+try {
+    $conn = SecurityConfig::getConnection();
+    if (!$conn) {
+        throw new Exception('Database connection failed');
+    }
+} catch (Exception $e) {
+    ob_clean();
+    echo json_encode(['success' => false, 'message' => 'Database connection error']);
+    exit;
 }
 
-// Get batches that have already been used in sewing machine entries
-// Check which table exists (sewing_machine_entry or swing_machine_entry)
-$used_batches = [];
-$sewing_table_check = $conn->query("SHOW TABLES LIKE 'sewing_machine_entry'");
-$swing_table_check = $conn->query("SHOW TABLES LIKE 'swing_machine_entry'");
+// Check if is_deleted column exists in cnc_entries
+$hasIsDeleted = false;
+$checkIsDeleted = $conn->query("SHOW COLUMNS FROM cnc_entries LIKE 'is_deleted'");
+if ($checkIsDeleted && $checkIsDeleted->num_rows > 0) {
+    $hasIsDeleted = true;
+}
 
-if ($sewing_table_check && $sewing_table_check->num_rows > 0) {
-    // Check if cnc_cutting_batch column exists
-    $col_check = $conn->query("SHOW COLUMNS FROM sewing_machine_entry LIKE 'cnc_cutting_batch'");
-    if ($col_check && $col_check->num_rows > 0) {
-        $used_query = "SELECT DISTINCT cnc_cutting_batch 
-                       FROM sewing_machine_entry 
-                       WHERE cnc_cutting_batch IS NOT NULL 
-                       AND cnc_cutting_batch != ''";
-        $used_result = $conn->query($used_query);
-        if ($used_result) {
-            while ($row = $used_result->fetch_assoc()) {
-                if (!in_array($row['cnc_cutting_batch'], $used_batches)) {
-                    $used_batches[] = $row['cnc_cutting_batch'];
-                }
+// Check if cnc_cutting_batch column exists in cnc_entries
+$hasCncBatch = $conn->query("SHOW COLUMNS FROM cnc_entries LIKE 'cnc_cutting_batch'")->num_rows > 0;
+$hasCreatedAt = $conn->query("SHOW COLUMNS FROM cnc_entries LIKE 'created_at'")->num_rows > 0;
+$hasDateTime = $conn->query("SHOW COLUMNS FROM cnc_entries LIKE 'date_time'")->num_rows > 0;
+
+if (!$hasCncBatch) {
+    ob_clean();
+    echo json_encode([
+        'success' => true, 
+        'batches' => []
+    ]);
+    ob_end_flush();
+    exit;
+}
+
+// Check if branding_entries table exists and has bag_size column
+$hasBrandingTable = $conn->query("SHOW TABLES LIKE 'branding_entries'")->num_rows > 0;
+$hasBrandingBagSize = false;
+$hasBrandingIsDeleted = false;
+$hasBrandingCncBatch = false;
+
+if ($hasBrandingTable) {
+    $hasBrandingBagSize = $conn->query("SHOW COLUMNS FROM branding_entries LIKE 'bag_size'")->num_rows > 0;
+    $hasBrandingIsDeleted = $conn->query("SHOW COLUMNS FROM branding_entries LIKE 'is_deleted'")->num_rows > 0;
+    $hasBrandingCncBatch = $conn->query("SHOW COLUMNS FROM branding_entries LIKE 'cnc_cutting_batch'")->num_rows > 0;
+}
+
+// Get bag_size and total_printed from branding_entries for each batch
+$bagSizeMap = [];
+$totalPrintedMap = [];
+if ($hasBrandingTable && $hasBrandingCncBatch) {
+    $hasBrandingPrintQty = $conn->query("SHOW COLUMNS FROM branding_entries LIKE 'print_qty'")->num_rows > 0;
+    $brandingDeletedFilter = $hasBrandingIsDeleted ? "AND (be.is_deleted = 0 OR be.is_deleted IS NULL)" : "";
+    
+    $brandingQuery = "
+        SELECT 
+            be.cnc_cutting_batch";
+    
+    if ($hasBrandingBagSize) {
+        $brandingQuery .= ",
+            MAX(be.bag_size) as bag_size";
+    }
+    
+    if ($hasBrandingPrintQty) {
+        $brandingQuery .= ",
+            SUM(COALESCE(be.print_qty, 0)) as total_printed";
+    }
+    
+    $brandingQuery .= "
+        FROM branding_entries be
+        WHERE be.cnc_cutting_batch IS NOT NULL
+          AND be.cnc_cutting_batch != ''
+          {$brandingDeletedFilter}
+        GROUP BY be.cnc_cutting_batch
+    ";
+    
+    $brandingResult = $conn->query($brandingQuery);
+    if ($brandingResult) {
+        while ($brandingRow = $brandingResult->fetch_assoc()) {
+            if ($hasBrandingBagSize && !empty($brandingRow['bag_size'])) {
+                $bagSizeMap[$brandingRow['cnc_cutting_batch']] = $brandingRow['bag_size'];
+            }
+            if ($hasBrandingPrintQty) {
+                $totalPrintedMap[$brandingRow['cnc_cutting_batch']] = (int)($brandingRow['total_printed'] ?? 0);
             }
         }
     }
 }
 
-if ($swing_table_check && $swing_table_check->num_rows > 0) {
-    // Check if cnc_cutting_batch column exists
-    $col_check = $conn->query("SHOW COLUMNS FROM swing_machine_entry LIKE 'cnc_cutting_batch'");
-    if ($col_check && $col_check->num_rows > 0) {
-        $used_query = "SELECT DISTINCT cnc_cutting_batch 
-                       FROM swing_machine_entry 
-                       WHERE cnc_cutting_batch IS NOT NULL 
-                       AND cnc_cutting_batch != ''";
-        $used_result = $conn->query($used_query);
-        if ($used_result) {
-            while ($row = $used_result->fetch_assoc()) {
-                if (!in_array($row['cnc_cutting_batch'], $used_batches)) {
-                    $used_batches[] = $row['cnc_cutting_batch'];
-                }
-            }
-        }
-    }
-}
+// Build query to get distinct CNC cutting batches from cnc_entries
+$isDeletedFilter = $hasIsDeleted ? "AND (ce.is_deleted = 0 OR ce.is_deleted IS NULL)" : "";
 
-// Fetch distinct CNC cutting batches from cnc_entries with reference numbers
-// Exclude batches that have already been used in sewing machine entries
-// Note: reference_number can be comma-separated within a single entry
+// Use date_time if available, otherwise created_at
+$dateCol = $hasDateTime ? "MAX(ce.date_time)" : ($hasCreatedAt ? "MAX(ce.created_at)" : "NULL");
+$orderCol = $hasDateTime ? "MAX(ce.date_time)" : ($hasCreatedAt ? "MAX(ce.created_at)" : "MAX(ce.cnc_cutting_batch)");
+
+$query = "
+    SELECT 
+        ce.cnc_cutting_batch,
+        {$dateCol} as batch_date,
+        SUM(COALESCE(ce.cutting_roll_quantity, 0)) as total_cutting_quantity
+    FROM cnc_entries ce
+    WHERE ce.cnc_cutting_batch IS NOT NULL
+      AND ce.cnc_cutting_batch != ''
+      {$isDeletedFilter}
+    GROUP BY ce.cnc_cutting_batch
+    ORDER BY {$orderCol} DESC
+    LIMIT 200
+";
+
+$result = $conn->query($query);
 $batches = [];
-$query = "SELECT cnc_cutting_batch, 
-          COUNT(*) as entry_count,
-          MIN(date_time) as first_entry_date,
-          MAX(date_time) as last_entry_date,
-          GROUP_CONCAT(DISTINCT reference_number SEPARATOR ',') as references_raw
-          FROM cnc_entries 
-          WHERE cnc_cutting_batch IS NOT NULL 
-          AND cnc_cutting_batch != '' 
-          AND reference_number IS NOT NULL
-          AND reference_number != ''";
-          
-// Add WHERE clause to exclude used batches if any exist
-if (!empty($used_batches)) {
-    $placeholders = str_repeat('?,', count($used_batches) - 1) . '?';
-    $query .= " AND cnc_cutting_batch NOT IN ($placeholders)";
-}
-
-$query .= " GROUP BY cnc_cutting_batch 
-           ORDER BY last_entry_date DESC, cnc_cutting_batch DESC
-           LIMIT 200";
-
-// Prepare and execute query with used batches exclusion
-if (!empty($used_batches)) {
-    $stmt = $conn->prepare($query);
-    if ($stmt) {
-        $types = str_repeat('s', count($used_batches));
-        $stmt->bind_param($types, ...$used_batches);
-        $stmt->execute();
-        $result = $stmt->get_result();
-    } else {
-        $result = false;
-    }
-} else {
-    $result = $conn->query($query);
-}
 
 if ($result) {
     while ($row = $result->fetch_assoc()) {
-        // Clean up references - handle both comma-separated within entries and across entries
-        $references_raw = $row['references_raw'] ?? '';
-        $reference_list = [];
-        if ($references_raw) {
-            // Split by comma (handles both cases: comma-separated within entry and GROUP_CONCAT separator)
-            $all_refs = explode(',', $references_raw);
-            foreach ($all_refs as $ref) {
-                $ref = trim($ref);
-                if (!empty($ref) && !in_array($ref, $reference_list)) {
-                    $reference_list[] = $ref;
-                }
-            }
-            // Sort references for consistent display
-            sort($reference_list);
+        // Format the date for display
+        $batchDate = '';
+        if (!empty($row['batch_date'])) {
+            $dateObj = new DateTime($row['batch_date']);
+            $batchDate = $dateObj->format('Y-m-d'); // Format as YYYY-MM-DD
         }
         
+        // Get bag_size and total_printed from branding_entries if available
+        $bagSize = isset($bagSizeMap[$row['cnc_cutting_batch']]) ? $bagSizeMap[$row['cnc_cutting_batch']] : null;
+        $totalPrinted = isset($totalPrintedMap[$row['cnc_cutting_batch']]) ? $totalPrintedMap[$row['cnc_cutting_batch']] : 0;
+        
         $batches[] = [
-            'batch' => $row['cnc_cutting_batch'],
-            'entry_count' => (int)$row['entry_count'],
-            'first_entry_date' => $row['first_entry_date'],
-            'last_entry_date' => $row['last_entry_date'],
-            'references' => $reference_list
+            'cnc_cutting_batch' => $row['cnc_cutting_batch'],
+            'batch_date' => $batchDate,
+            'total_cutting_quantity' => (int)($row['total_cutting_quantity'] ?? 0),
+            'bag_size' => $bagSize,
+            'total_printed' => $totalPrinted
         ];
-    }
-    // Close prepared statement if it was used
-    if (!empty($used_batches) && isset($stmt)) {
-        $stmt->close();
     }
 }
 
-header('Content-Type: application/json');
-echo json_encode([
-    'success' => true,
-    'batches' => $batches
-]);
+// Ensure no output before JSON
+ob_clean();
 
-$conn->close();
+echo json_encode([
+    'success' => true, 
+    'batches' => $batches
+], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+// End output buffering
+ob_end_flush();
+exit;
 ?>

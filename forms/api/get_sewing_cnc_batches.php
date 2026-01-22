@@ -102,6 +102,35 @@ if ($refColCheck) {
     }
 }
 
+// First, get exact cutting quantity from cnc_entries for each batch
+// Also get bag_size from cnc_entries
+$cncBatchesData = [];
+$cncTableCheck = $conn->query("SHOW TABLES LIKE 'cnc_entries'");
+if ($cncTableCheck && $cncTableCheck->num_rows > 0) {
+    $cncHasDeleted = $conn->query("SHOW COLUMNS FROM cnc_entries LIKE 'is_deleted'")->num_rows > 0;
+    $cncDeletedFilter = $cncHasDeleted ? "AND (ce.is_deleted = 0 OR ce.is_deleted IS NULL)" : "";
+    
+    $cncQuery = "SELECT 
+        ce.cnc_cutting_batch,
+        SUM(COALESCE(ce.cutting_roll_quantity, 0)) as total_cutting_quantity,
+        MAX(ce.bag_size) as bag_size
+    FROM cnc_entries ce
+    WHERE ce.cnc_cutting_batch IS NOT NULL 
+    AND ce.cnc_cutting_batch != ''
+    {$cncDeletedFilter}
+    GROUP BY ce.cnc_cutting_batch";
+    
+    $cncResult = $conn->query($cncQuery);
+    if ($cncResult) {
+        while ($cncRow = $cncResult->fetch_assoc()) {
+            $cncBatchesData[$cncRow['cnc_cutting_batch']] = [
+                'total_cutting_quantity' => (int)$cncRow['total_cutting_quantity'],
+                'bag_size' => $cncRow['bag_size']
+            ];
+        }
+    }
+}
+
 // Fetch distinct CNC cutting batches from sewing machine entries
 // Exclude batches that have already been used in branding entries
 $batches = [];
@@ -137,13 +166,22 @@ $result = $conn->query($query);
 if ($result) {
     while ($row = $result->fetch_assoc()) {
         $batch = $row['cnc_cutting_batch'];
-        $total_qty = (int)$row['total_sewing_qty'];
         
-        // Calculate used quantity for this batch
+        // Get exact cutting quantity from cnc_entries (not from sewing)
+        $total_cutting_qty = isset($cncBatchesData[$batch]['total_cutting_quantity']) 
+            ? $cncBatchesData[$batch]['total_cutting_quantity'] 
+            : (int)$row['total_sewing_qty']; // Fallback to sewing_qty if cnc data not available
+        
+        // Get bag_size from cnc_entries
+        $bag_size = isset($cncBatchesData[$batch]['bag_size']) 
+            ? $cncBatchesData[$batch]['bag_size'] 
+            : null;
+        
+        // Calculate used quantity for this batch (from branding entries)
         $used_qty = isset($used_quantities[$batch]) ? $used_quantities[$batch] : 0;
         
-        // Calculate remaining quantity
-        $remaining_qty = $total_qty - $used_qty;
+        // Calculate remaining quantity (based on cutting quantity, not sewing quantity)
+        $remaining_qty = $total_cutting_qty - $used_qty;
         
         // Only include batches with remaining quantity > 0
         if ($remaining_qty > 0) {
@@ -190,10 +228,12 @@ if ($result) {
                 'entry_count' => (int)$row['entry_count'],
                 'first_entry_date' => $row['first_entry_date'],
                 'last_entry_date' => $row['last_entry_date'],
-                'total_sewing_qty' => $total_qty,
+                'total_sewing_qty' => (int)$row['total_sewing_qty'],
+                'total_cutting_qty' => $total_cutting_qty, // Exact cutting quantity from cnc_entries
                 'remaining_qty' => $remaining_qty,
                 'used_qty' => $used_qty,
                 'total_ncp' => (int)$row['total_ncp'],
+                'bag_size' => $bag_size, // Bag size from cnc_entries
                 'references' => $references
             ];
         }

@@ -112,6 +112,130 @@ $sewing_id = "SEW-" . date('Ymd') . "-" . str_pad($next_sewing_number, 3, '0', S
   }
   .btn-group .btn:hover { background: #f8f9fa; border-color: #007bff; }
   .btn-group .btn.selected { background: #007bff; color: #fff; border-color: #007bff; }
+  
+  /* Modern Warning Popup Styles */
+  .popup-overlay {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(4px);
+    z-index: 10000;
+    align-items: center;
+    justify-content: center;
+    animation: fadeIn 0.2s ease-out;
+  }
+  .popup-overlay.show {
+    display: flex;
+  }
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  .warning-popup {
+    background: #ffffff;
+    border-radius: 16px;
+    box-shadow: 0 20px 60px rgba(220, 53, 69, 0.3), 0 0 0 1px rgba(220, 53, 69, 0.1);
+    max-width: 480px;
+    width: 90%;
+    overflow: hidden;
+    animation: slideUp 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+    transform-origin: center;
+  }
+  @keyframes slideUp {
+    from {
+      opacity: 0;
+      transform: translateY(30px) scale(0.95);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+  .warning-popup-content {
+    display: flex;
+    align-items: flex-start;
+    padding: 28px 24px;
+    position: relative;
+  }
+  .warning-bar {
+    width: 5px;
+    background: linear-gradient(180deg, #dc3545 0%, #c82333 100%);
+    border-radius: 3px 0 0 3px;
+    margin-right: 20px;
+    flex-shrink: 0;
+    box-shadow: 0 2px 8px rgba(220, 53, 69, 0.3);
+  }
+  .warning-icon {
+    width: 48px;
+    height: 48px;
+    background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-right: 18px;
+    flex-shrink: 0;
+    box-shadow: 0 4px 12px rgba(220, 53, 69, 0.4);
+  }
+  .warning-icon span {
+    color: #fff;
+    font-size: 28px;
+    font-weight: 700;
+    line-height: 1;
+  }
+  .warning-text {
+    flex: 1;
+    padding-top: 2px;
+  }
+  .warning-title {
+    font-size: 20px;
+    font-weight: 700;
+    color: #1a1a1a;
+    margin: 0 0 8px 0;
+    letter-spacing: -0.3px;
+  }
+  .warning-message {
+    font-size: 15px;
+    color: #4a4a4a;
+    margin: 0;
+    line-height: 1.6;
+    font-weight: 500;
+  }
+  .popup-actions {
+    padding: 20px 24px;
+    background: linear-gradient(to bottom, #fafafa 0%, #f5f5f5 100%);
+    display: flex;
+    justify-content: center;
+    border-top: 1px solid #e8e8e8;
+  }
+  .popup-btn {
+    padding: 12px 36px;
+    border: none;
+    border-radius: 8px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    min-width: 100px;
+  }
+  .popup-btn-ok {
+    background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
+    color: #ffffff;
+    box-shadow: 0 4px 12px rgba(220, 53, 69, 0.3);
+  }
+  .popup-btn-ok:hover {
+    background: linear-gradient(135deg, #c82333 0%, #bd2130 100%);
+    box-shadow: 0 6px 16px rgba(220, 53, 69, 0.4);
+    transform: translateY(-1px);
+  }
 </style>
 </head>
 <body>
@@ -198,8 +322,9 @@ $sewing_id = "SEW-" . date('Ymd') . "-" . str_pad($next_sewing_number, 3, '0', S
 
     <!-- Sewing quantity -->
     <div class="form-group">
-      <label>Sewing Quantity (Pieces)</label>
-      <input type="number" id="sewing_qty" name="sewing_qty" required min="1">
+      <label>Sewing Quantity (Pieces) <span id="cutting_qty_hint" style="color:#27ae60; font-weight:normal; font-size:13px;"></span></label>
+      <input type="number" id="sewing_qty" name="sewing_qty" required min="1" onchange="validateSewingQuantity()" oninput="validateSewingQuantity()">
+      <small id="sewing_qty_error" style="color:#e74c3c; display:none; margin-top:5px;"></small>
     </div>
 
     <!-- NCP piece -->
@@ -219,6 +344,25 @@ $sewing_id = "SEW-" . date('Ymd') . "-" . str_pad($next_sewing_number, 3, '0', S
       <button type="button" class="clear-btn" onclick="clearForm()">Clear</button>
     </div>
   </form>
+</div>
+
+<!-- Modern Warning Popup -->
+<div id="quantityExceedPopup" class="popup-overlay">
+  <div class="warning-popup">
+    <div class="warning-popup-content">
+      <div class="warning-bar"></div>
+      <div class="warning-icon">
+        <span>!</span>
+      </div>
+      <div class="warning-text">
+        <div class="warning-title">Quantity Exceeded</div>
+        <div class="warning-message" id="quantityExceedMessage"></div>
+      </div>
+    </div>
+    <div class="popup-actions">
+      <button class="popup-btn popup-btn-ok" onclick="closeQuantityExceedPopup()">OK</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -295,32 +439,19 @@ function loadCNCCuttingBatches() {
       
       batches.forEach(batch => {
         const option = document.createElement('option');
-        option.value = batch.batch;
+        option.value = batch.cnc_cutting_batch;
         
-        // Build display text with batch number and references
-        let displayText = batch.batch;
+        // Build display text with batch number and date
+        let displayText = batch.cnc_cutting_batch;
         
-        // Add references if available
-        if (batch.references && batch.references.length > 0) {
-          const refCount = batch.references.length;
-          
-          // For small batches (<= 5 refs), show all references
-          if (refCount <= 5) {
-            displayText += ` - Ref: ${batch.references.join(', ')}`;
-          } 
-          // For medium batches (6-15 refs), show first 2 and count
-          else if (refCount <= 15) {
-            const refsToShow = batch.references.slice(0, 2).join(', ');
-            displayText += ` - Ref: ${refsToShow} +${refCount - 2} more`;
-          }
-          // For large batches (>15 refs), just show count
-          else {
-            displayText += ` - ${refCount} references`;
-          }
+        // Add date if available
+        if (batch.batch_date) {
+          displayText += ` (${batch.batch_date})`;
         }
         
         option.textContent = displayText;
-        option.setAttribute('data-entry-count', batch.entry_count);
+        // Store cutting quantity as data attribute for validation
+        option.setAttribute('data-cutting-quantity', batch.total_cutting_quantity || 0);
         option.setAttribute('data-first-entry', batch.first_entry_date);
         option.setAttribute('data-last-entry', batch.last_entry_date);
         if (batch.references && batch.references.length > 0) {
@@ -414,13 +545,109 @@ function validateForm(){
   if(!document.getElementById("line_no").value.trim()){
     alert("Please enter line number."); return false;
   }
+  if(!document.getElementById("cnc_cutting_batch").value){
+    alert("Please select a CNC cutting batch."); return false;
+  }
   if(!document.getElementById("sewing_qty").value.trim()){
     alert("Please enter sewing quantity."); return false;
   }
+  
+  // Validate sewing quantity doesn't exceed cutting quantity
+  const batchSelect = document.getElementById("cnc_cutting_batch");
+  const selectedOption = batchSelect.options[batchSelect.selectedIndex];
+  const cuttingQuantity = parseInt(selectedOption.getAttribute('data-cutting-quantity')) || 0;
+  const sewingQty = parseInt(document.getElementById("sewing_qty").value) || 0;
+  
+  if (cuttingQuantity > 0 && sewingQty > cuttingQuantity) {
+    showQuantityExceedPopup(sewingQty, cuttingQuantity);
+    document.getElementById("sewing_qty").focus();
+    return false;
+  }
+  
   if(!document.getElementById("ncp_piece").value.trim()){
     alert("Please enter NCP piece."); return false;
   }
   return true;
+}
+
+// Update cutting quantity hint when batch is selected
+function updateCuttingQuantityHint() {
+  const batchSelect = document.getElementById('cnc_cutting_batch');
+  const hintElement = document.getElementById('cutting_qty_hint');
+  const errorElement = document.getElementById('sewing_qty_error');
+  
+  if (!batchSelect || !hintElement) return;
+  
+  const selectedOption = batchSelect.options[batchSelect.selectedIndex];
+  if (selectedOption && selectedOption.value) {
+    const cuttingQuantity = parseInt(selectedOption.getAttribute('data-cutting-quantity')) || 0;
+    if (cuttingQuantity > 0) {
+      hintElement.textContent = `(Max: ${cuttingQuantity} pieces)`;
+      hintElement.style.display = 'inline';
+    } else {
+      hintElement.textContent = '';
+      hintElement.style.display = 'none';
+    }
+  } else {
+    hintElement.textContent = '';
+    hintElement.style.display = 'none';
+  }
+  
+  // Clear error when batch changes
+  if (errorElement) {
+    errorElement.style.display = 'none';
+    errorElement.textContent = '';
+  }
+}
+
+// Validate sewing quantity against cutting quantity
+function validateSewingQuantity() {
+  const batchSelect = document.getElementById('cnc_cutting_batch');
+  const sewingQtyInput = document.getElementById('sewing_qty');
+  const errorElement = document.getElementById('sewing_qty_error');
+  
+  if (!batchSelect || !sewingQtyInput || !errorElement) return;
+  
+  const selectedOption = batchSelect.options[batchSelect.selectedIndex];
+  if (!selectedOption || !selectedOption.value) {
+    errorElement.style.display = 'none';
+    errorElement.textContent = '';
+    return;
+  }
+  
+  const cuttingQuantity = parseInt(selectedOption.getAttribute('data-cutting-quantity')) || 0;
+  const sewingQty = parseInt(sewingQtyInput.value) || 0;
+  
+  if (cuttingQuantity > 0 && sewingQty > cuttingQuantity) {
+    errorElement.textContent = `Sewing quantity (${sewingQty}) cannot exceed cutting quantity (${cuttingQuantity}) for this CNC cutting batch.`;
+    errorElement.style.display = 'block';
+    sewingQtyInput.style.borderColor = '#e74c3c';
+    // Show modern popup
+    showQuantityExceedPopup(sewingQty, cuttingQuantity);
+  } else {
+    errorElement.style.display = 'none';
+    errorElement.textContent = '';
+    sewingQtyInput.style.borderColor = '';
+  }
+}
+
+// Show modern popup for quantity exceeded
+function showQuantityExceedPopup(sewingQty, cuttingQuantity) {
+  const popup = document.getElementById('quantityExceedPopup');
+  const messageElement = document.getElementById('quantityExceedMessage');
+  
+  if (popup && messageElement) {
+    messageElement.textContent = `Sewing quantity (${sewingQty} pieces) cannot exceed cutting quantity (${cuttingQuantity} pieces) for this CNC cutting batch.`;
+    popup.classList.add('show');
+  }
+}
+
+// Close quantity exceed popup
+function closeQuantityExceedPopup() {
+  const popup = document.getElementById('quantityExceedPopup');
+  if (popup) {
+    popup.classList.remove('show');
+  }
 }
 
 // Add event listeners for form fields to update summary
@@ -432,7 +659,14 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('line_no').addEventListener('input', updateSummary);
   document.getElementById('sewing_qty').addEventListener('input', updateSummary);
   document.getElementById('ncp_piece').addEventListener('input', updateSummary);
-  document.getElementById('cnc_cutting_batch').addEventListener('change', updateSummary);
+  document.getElementById('cnc_cutting_batch').addEventListener('change', function() {
+    updateCuttingQuantityHint();
+    validateSewingQuantity();
+    updateSummary();
+  });
+  
+  // Update cutting quantity hint when batch is selected
+  updateCuttingQuantityHint();
   
   // Update summary on page load
   updateSummary();

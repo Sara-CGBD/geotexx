@@ -23,7 +23,10 @@ if (SecurityConfig::isAccountLocked($_SESSION['username'])) {
 
 // Role-based access control for Finished Goods module
 require_once '../config/AccessControl.php';
-if (!AccessControl::hasModuleAccess($_SESSION['role'], AccessControl::MODULE_FINISHED_GOODS, AccessControl::PERMISSION_ENTRY)) {
+$userRole = strtolower(trim($_SESSION['role'] ?? ''));
+
+// Check if user has access to FG module
+if (!AccessControl::hasModuleAccess($userRole, AccessControl::MODULE_FINISHED_GOODS, AccessControl::PERMISSION_ENTRY)) {
     http_response_code(403);
     die("<div style='font-family: Arial; max-width: 600px; margin: 100px auto; padding: 30px; border: 2px solid #e74c3c; border-radius: 10px; background: #ffe8e8;'>
         <h2 style='color: #e74c3c;'>🚫 Access Denied</h2>
@@ -31,6 +34,28 @@ if (!AccessControl::hasModuleAccess($_SESSION['role'], AccessControl::MODULE_FIN
         <p>Your role: <strong>" . htmlspecialchars($_SESSION['role']) . "</strong></p>
         <a href='../index.php' style='display: inline-block; margin-top: 20px; padding: 10px 20px; background: #3498db; color: white; text-decoration: none; border-radius: 5px;'>Return to Dashboard</a>
         </div>");
+}
+
+// Determine which product types the user can access
+$canAccessRoll = false;
+$canAccessBag = false;
+
+// Admin and management can access both
+if (in_array($userRole, ['admin', 'management', 'agm ops'])) {
+    $canAccessRoll = true;
+    $canAccessBag = true;
+} elseif ($userRole === 'prod_test' || $userRole === 'production_user') {
+    // Production users can only access Roll portion
+    $canAccessRoll = true;
+    $canAccessBag = false;
+} elseif ($userRole === 'sewing_test') {
+    // Sewing test users can only access Bag portion
+    $canAccessRoll = false;
+    $canAccessBag = true;
+} else {
+    // Default: allow both for other roles with FG access
+    $canAccessRoll = true;
+    $canAccessBag = true;
 }
 
 date_default_timezone_set('Asia/Dhaka');
@@ -194,63 +219,64 @@ if ($brandingExists) {
     }
 }
 
-// Fetch roll references from qc_test_orders routed to FG (status approved)
-$rollReferences = array();
-$hasQcTable = $conn->query("SHOW TABLES LIKE 'qc_test_orders'")->num_rows > 0;
-if ($hasQcTable) {
-    $hasApprovedAt = $conn->query("SHOW COLUMNS FROM qc_test_orders LIKE 'approved_at'")->num_rows > 0;
-    $approvedAtCol = $hasApprovedAt ? "MAX(qto.approved_at)" : "MAX(qto.updated_at)";
-
-    $hasRollDest = $conn->query("SHOW COLUMNS FROM qc_test_orders LIKE 'roll_destination'")->num_rows > 0;
-    $rollDestFilter = $hasRollDest ? "AND qto.roll_destination = 'fg_production'" : "";
-
-    $hasStatus = $conn->query("SHOW COLUMNS FROM qc_test_orders LIKE 'status'")->num_rows > 0;
-    $statusFilter = $hasStatus ? "AND qto.status = 'approved'" : "";
-
-    $fgRefNotExists = "";
-    if ($conn->query("SHOW TABLES LIKE 'fg_entry'")->num_rows > 0 &&
-        $conn->query("SHOW COLUMNS FROM fg_entry LIKE 'reference_number'")->num_rows > 0) {
-        $fgHasDeleted = $conn->query("SHOW COLUMNS FROM fg_entry LIKE 'is_deleted'")->num_rows > 0;
-        $fgRefNotExists = "AND qto.sample_reference_id NOT IN (
-            SELECT reference_number FROM fg_entry 
-            WHERE reference_number IS NOT NULL AND reference_number != '' " .
-            ($fgHasDeleted ? "AND (is_deleted = 0 OR is_deleted IS NULL)" : "") .
-        ")";
+// Fetch trip numbers from roll_transfer where to_location = 'FG'
+$fgTripNumbers = array();
+$fgRollTripReferences = array();
+$hasRollTransfer = $conn->query("SHOW TABLES LIKE 'roll_transfer'")->num_rows > 0;
+if ($hasRollTransfer) {
+    $hasToLocation = $conn->query("SHOW COLUMNS FROM roll_transfer LIKE 'to_location'")->num_rows > 0;
+    $hasTrip = $conn->query("SHOW COLUMNS FROM roll_transfer LIKE 'trip'")->num_rows > 0;
+    
+    if ($hasToLocation && $hasTrip) {
+        $tripQuery = $conn->query("
+            SELECT DISTINCT trip, MAX(date_time) as last_transfer_date
+            FROM roll_transfer 
+            WHERE to_location = 'FG' 
+              AND trip IS NOT NULL
+            GROUP BY trip
+            ORDER BY trip DESC
+            LIMIT 50
+        ");
+        if ($tripQuery) {
+            while ($row = $tripQuery->fetch_assoc()) {
+                $fgTripNumbers[] = [
+                    'trip' => (int)$row['trip'],
+                    'last_transfer_date' => $row['last_transfer_date']
+                ];
+            }
+        }
     }
-
-    $rollRefQuery = $conn->query("
-        SELECT DISTINCT 
-            qto.sample_reference_id as reference_number,
-            re.roll_size,
-            re.material_type,
-            re.total_weight,
-            {$approvedAtCol} as last_approved_at
-        FROM qc_test_orders qto
-        LEFT JOIN roll_entry re ON qto.sample_reference_id = re.reference_number
-        WHERE qto.sample_reference_id IS NOT NULL
-          AND qto.sample_reference_id != ''
-          AND qto.sample_reference_id NOT LIKE 'EXT-%'
-          {$rollDestFilter}
-          {$statusFilter}
-          {$fgRefNotExists}
-        GROUP BY qto.sample_reference_id, re.roll_size, re.material_type, re.total_weight
-        ORDER BY last_approved_at DESC
-        LIMIT 100
+    
+    // Fetch references for each trip from roll_transfer
+    if ($hasToLocation && $hasTrip) {
+        $refQuery = $conn->query("
+            SELECT 
+                rt.reference_number,
+                rt.trip,
+                SUM(rt.amount_kg) AS total_amount,
+                COALESCE(re.total_area, 0) AS total_area
+            FROM roll_transfer rt
+            LEFT JOIN roll_entry re ON rt.reference_number = re.reference_number
+            WHERE rt.to_location = 'FG'
+              AND rt.reference_number IS NOT NULL
+              AND rt.reference_number != ''
+              AND rt.trip IS NOT NULL
+            GROUP BY rt.reference_number, rt.trip, re.total_area
+            ORDER BY MAX(rt.date_time) DESC
+            LIMIT 400
     ");
-    if ($rollRefQuery) {
-        while ($row = $rollRefQuery->fetch_assoc()) {
-            $rollReferences[] = [
+        if ($refQuery) {
+            while ($row = $refQuery->fetch_assoc()) {
+                $fgRollTripReferences[] = [
                 'reference_number' => $row['reference_number'],
-                'roll_size' => $row['roll_size'] ?? '',
-                'material_type' => $row['material_type'] ?? '',
-                'total_weight' => $row['total_weight'] ?? 0
+                    'trip' => (int)$row['trip'],
+                    'total_amount' => (float)$row['total_amount'],
+                    'total_area' => (float)$row['total_area']
             ];
         }
     }
 }
-
-// Performance: Defer bundle references loading - will load asynchronously after page render
-$bundleReferences = array();
+}
 
 // Batch number will be auto-generated based on form fields
 ?>
@@ -308,6 +334,161 @@ $bundleReferences = array();
   /* Thickness button group */
   #thicknessGroup { display: flex; flex-wrap: wrap; gap: 8px; }
   #thicknessGroup .btn { min-width: 100px; text-align: center; }
+  .modern-add-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 8px 16px;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: #ffffff;
+    border: none;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
+  }
+
+  .modern-add-btn .btn-icon-wrapper {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .modern-add-btn .btn-text {
+    font-size: 13px;
+    letter-spacing: 0.04em;
+  }
+  /* Modern Warning Popup Styles */
+  .popup-overlay {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(4px);
+    z-index: 10000;
+    align-items: center;
+    justify-content: center;
+    animation: fadeIn 0.2s ease-out;
+  }
+  .popup-overlay.show {
+    display: flex;
+  }
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  .warning-popup {
+    background: #ffffff;
+    border-radius: 16px;
+    box-shadow: 0 20px 60px rgba(220, 53, 69, 0.3), 0 0 0 1px rgba(220, 53, 69, 0.1);
+    max-width: 480px;
+    width: 90%;
+    overflow: hidden;
+    animation: slideUp 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+    transform-origin: center;
+  }
+  @keyframes slideUp {
+    from {
+      opacity: 0;
+      transform: translateY(30px) scale(0.95);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+  .warning-popup-content {
+    display: flex;
+    align-items: flex-start;
+    padding: 28px 24px;
+    position: relative;
+  }
+  .warning-bar {
+    width: 5px;
+    background: linear-gradient(180deg, #dc3545 0%, #c82333 100%);
+    border-radius: 3px 0 0 3px;
+    margin-right: 20px;
+    flex-shrink: 0;
+    box-shadow: 0 2px 8px rgba(220, 53, 69, 0.3);
+  }
+  .warning-icon {
+    width: 48px;
+    height: 48px;
+    background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-right: 18px;
+    flex-shrink: 0;
+    box-shadow: 0 4px 12px rgba(220, 53, 69, 0.4);
+  }
+  .warning-icon span {
+    color: #fff;
+    font-size: 28px;
+    font-weight: 700;
+    line-height: 1;
+  }
+  .warning-text {
+    flex: 1;
+    padding-top: 2px;
+  }
+  .warning-title {
+    font-size: 20px;
+    font-weight: 700;
+    color: #1a1a1a;
+    margin: 0 0 8px 0;
+    letter-spacing: -0.3px;
+  }
+  .warning-message {
+    font-size: 15px;
+    color: #4a4a4a;
+    margin: 0;
+    line-height: 1.6;
+    font-weight: 500;
+  }
+  .popup-actions {
+    padding: 20px 24px;
+    background: linear-gradient(to bottom, #fafafa 0%, #f5f5f5 100%);
+    display: flex;
+    justify-content: center;
+    border-top: 1px solid #e8e8e8;
+  }
+  .popup-btn {
+    padding: 12px 36px;
+    border: none;
+    border-radius: 8px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    letter-spacing: 0.3px;
+  }
+  .popup-btn-ok {
+    background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
+    color: #fff;
+    min-width: 120px;
+  }
+  .popup-btn-ok:hover {
+    background: linear-gradient(135deg, #c82333 0%, #bd2130 100%);
+    box-shadow: 0 4px 16px rgba(220, 53, 69, 0.4);
+    transform: translateY(-1px);
+  }
+  .popup-btn-ok:active {
+    transform: translateY(0);
+    box-shadow: 0 2px 8px rgba(220, 53, 69, 0.3);
+  }
 </style>
 </head>
 <body>
@@ -317,7 +498,7 @@ $bundleReferences = array();
 
   <?php if (isset($_GET['success']) && $_GET['success'] === 'fg_entry_saved'): ?>
     <div class="alert alert-success">
-      ✅ FG Entry saved successfully! FG ID: <?php echo htmlspecialchars($_GET['fg_id'] ?? ''); ?>
+      FG Entry saved successfully! FG ID: <?php echo htmlspecialchars($_GET['fg_id'] ?? ''); ?>
       <?php if (isset($_GET['batch_number'])): ?>
         <br>Batch Number: <?php echo htmlspecialchars($_GET['batch_number']); ?>
       <?php endif; ?>
@@ -345,7 +526,7 @@ $bundleReferences = array();
   <!-- Back to Dashboard Link -->
   <?php if (isset($_GET['success'])): ?>
     <div style="background:#d4edda;color:#155724;padding:12px;border-radius:6px;border:1px solid #c3e6cb;margin-bottom:15px;">
-      ✅ <?php echo htmlspecialchars($_GET['success']); ?>
+      <?php echo htmlspecialchars($_GET['success']); ?>
       <?php if (isset($_GET['fg_id'])): ?>
         <br><strong>FG ID: <?php echo htmlspecialchars($_GET['fg_id']); ?></strong>
       <?php endif; ?>
@@ -367,6 +548,25 @@ $bundleReferences = array();
   <div id="dateTimeDisplay" class="summary-info"></div>
   <div id="shiftBanner" class="summary-info"></div>
 
+  <!-- Modern Warning Popup -->
+  <div id="warningPopup" class="popup-overlay">
+    <div class="warning-popup">
+      <div class="warning-popup-content">
+        <div class="warning-bar"></div>
+        <div class="warning-icon">
+          <span>!</span>
+        </div>
+        <div class="warning-text">
+          <h3 class="warning-title">Quantity Limit Exceeded</h3>
+          <p class="warning-message" id="warningMessage"></p>
+        </div>
+      </div>
+      <div class="popup-actions">
+        <button type="button" class="popup-btn popup-btn-ok" id="warningPopupOk" onclick="closeWarningPopup()">OK</button>
+      </div>
+    </div>
+  </div>
+
   <form id="fgForm" method="post" action="../handlers/submit_fg_entry.php" onsubmit="return validateForm();" novalidate>
 
     <!-- FG ID -->
@@ -380,40 +580,62 @@ $bundleReferences = array();
     <div class="form-group">
       <label>Product Type: <span style="color:red;">*</span></label>
       <div class="btn-group" id="productTypeGroup" style="display:flex; gap:10px; flex-wrap:wrap;">
+        <?php if ($canAccessRoll): ?>
         <button type="button" class="btn product-type-btn" onclick="selectProductType('roll')" style="background:#e0e0e0;color:#333; border:2px solid #ccc;">
           <i class="fas fa-scroll"></i> Roll
         </button>
+        <?php endif; ?>
+        <?php if ($canAccessBag): ?>
         <button type="button" class="btn product-type-btn" onclick="selectProductType('bag')" style="background:#e0e0e0;color:#333; border:2px solid #ccc;">
           <i class="fas fa-shopping-bag"></i> Bag
         </button>
+        <?php endif; ?>
+        <?php if (!$canAccessRoll && !$canAccessBag): ?>
+        <div style="padding:15px; background:#fff3cd; border:1px solid #ffc107; border-radius:6px; color:#856404;">
+          <strong>⚠️ Access Restricted</strong><br>
+          You do not have permission to access any product type in FG Entry.
+        </div>
+        <?php endif; ?>
       </div>
       <input type="hidden" id="product_type" name="product_type" value="" required>
+      <?php if ($canAccessRoll && !$canAccessBag): ?>
+      <small style="color:#6c757d; display:block; margin-top:5px;">
+        <i class="fas fa-info-circle"></i> Your role (<?php echo htmlspecialchars($_SESSION['role']); ?>) can only access Roll entries.
+      </small>
+      <?php elseif (!$canAccessRoll && $canAccessBag): ?>
+      <small style="color:#6c757d; display:block; margin-top:5px;">
+        <i class="fas fa-info-circle"></i> Your role (<?php echo htmlspecialchars($_SESSION['role']); ?>) can only access Bag entries.
+      </small>
+      <?php endif; ?>
     </div>
 
-    <!-- Roll Entry Type (Individual or Bundle) - Shown only when Roll is selected -->
-    <div class="form-group" id="rollEntryTypeGroup" style="display:none;">
-      <label>Entry Type: <span style="color:red;">*</span></label>
-      <div class="btn-group" style="display:flex; gap:10px; flex-wrap:wrap;">
-        <button type="button" class="btn roll-entry-type-btn" onclick="selectRollEntryType('individual')" style="background:#e0e0e0;color:#333; border:2px solid #ccc;">
-          <i class="fas fa-circle"></i> Individual Roll
-        </button>
-        <button type="button" class="btn roll-entry-type-btn" onclick="selectRollEntryType('bundle')" style="background:#e0e0e0;color:#333; border:2px solid #ccc;">
-          <i class="fas fa-layer-group"></i> Bundle (All Rolls Together)
-        </button>
-      </div>
-      <input type="hidden" id="roll_entry_type" name="roll_entry_type" value="">
+    <!-- Trip Number - Shown only when Roll is selected -->
+    <div class="form-group" id="tripNumberGroup" style="display:none;">
+      <label>Trip Number: <span style="color:red;">*</span></label>
+      <select id="trip_number" name="trip_number" required>
+        <option value="">-- Select Trip Number --</option>
+      </select>
       <small style="color:#6c757d; display:block; margin-top:8px;">
-        <strong>Individual:</strong> Select one roll | <strong>Bundle:</strong> All rolls from same batch submitted together
+        Select a trip number from roll transfers submitted as FG
       </small>
     </div>
 
     <!-- All other fields below this will be hidden until product/entry type is selected -->
     <div id="productFieldsContainer" style="display:none;">
 
-    <!-- Reference Number (from Sheet Production or Roll) -->
-    <div class="form-group">
+    <!-- CNC Cutting Batch (for Bags) -->
+    <div class="form-group" id="bagCncBatchGroup">
+      <label>CNC Cutting Batch: <span style="color:red;">*</span></label>
+      <select id="bag_cnc_cutting_batch" onchange="updateReferenceFromCNCBatch()">
+        <option value="">Select Product Type First</option>
+      </select>
+      <small id="cnc_batch_hint" style="color:#6c757d; display:block; margin-top:5px;">Select a CNC cutting batch for bags</small>
+    </div>
+
+    <!-- Reference Number (for Rolls only - hidden for bags) -->
+    <div class="form-group" id="bagReferenceGroup" style="display:none;">
       <label>Reference Number: <span style="color:red;">*</span></label>
-      <select id="reference_number" name="reference_number" onchange="updateCNCBatchFromReference()" required>
+      <select id="bag_reference_number" onchange="updateCNCBatchFromReference()">
         <option value="">Select Product Type First</option>
       </select>
       <small id="reference_hint" style="color:#6c757d; display:block; margin-top:5px;"></small>
@@ -422,6 +644,41 @@ $bundleReferences = array();
         <div id="bundleRollList" style="margin-top:8px; color:#424242; font-size:14px;"></div>
       </div>
     </div>
+
+    <div class="form-group" id="rollReferenceGroup" style="display:none;">
+      <label>Reference Number: <span style="color:red;">*</span></label>
+      <div style="display:flex; gap:15px; align-items:flex-start; margin-bottom:10px;">
+        <div style="flex:1; position:relative;">
+          <input type="text"
+                 id="roll_reference_search"
+                 placeholder="Search or type reference number..."
+                 style="padding:10px; border:1px solid #ccc; border-radius:6px; width:100%;"
+                 onkeyup="filterRollTripReferences()"
+                 onfocus="showRollReferenceDropdown()"
+                 disabled>
+          <div id="roll_reference_dropdown"
+               style="display:none; max-height:220px; overflow-y:auto; border:1px solid #ccc; border-radius:6px; background:#fff; position:absolute; z-index:1000; width:100%; top:100%; box-shadow:0 4px 6px rgba(0,0,0,0.1); margin-top:2px;">
+            <div id="roll_no_references_message"
+                 style="display:none; padding:15px; text-align:center; color:#999; font-style:italic;">
+              Please select a trip number first.
+            </div>
+          </div>
+        </div>
+        <div style="display:flex; align-items:center; padding-top:0;">
+          <button type="button" onclick="addRollReference()" class="modern-add-btn">
+            <span class="btn-icon-wrapper">
+              <i class="fas fa-plus"></i>
+            </span>
+            <span class="btn-text">Add</span>
+          </button>
+        </div>
+      </div>
+      <div id="roll_selected_reference" style="margin-top:10px; min-height:30px;"></div>
+      <small id="roll_reference_hint" style="color:#6c757d; display:block; margin-top:5px;">Select a trip number first to load references.</small>
+    </div>
+
+    <input type="hidden" id="reference_number" name="reference_number" required>
+    <input type="hidden" id="delivered_quantity" name="delivered_quantity" value="0">
     
     <script>
     // Reference to CNC Batch mapping (for bags)
@@ -437,9 +694,268 @@ $bundleReferences = array();
     // Bag size to recommended weight mapping from database
     const bagSizeToRecommendedWeightFromDB = <?php echo json_encode($bagSizeToRecommendedWeightMap); ?>;
     
-    // Roll references (for FG Production)
-    const rollReferences = <?php echo json_encode($rollReferences); ?>;
-    const bundleReferences = <?php echo json_encode($bundleReferences); ?>;
+    // FG roll references by trip
+    const fgTripReferences = <?php echo json_encode($fgRollTripReferences); ?>;
+    const fgTripNumbers = <?php echo json_encode($fgTripNumbers); ?>;
+    
+    // Function to load FG Trip Numbers into dropdown
+    function loadFGTripNumbers() {
+      const tripSelect = document.getElementById('trip_number');
+      if (!tripSelect) return;
+      
+      tripSelect.innerHTML = '<option value="">-- Select Trip Number --</option>';
+      
+      if (fgTripNumbers && fgTripNumbers.length > 0) {
+        fgTripNumbers.forEach(tripData => {
+          const option = document.createElement('option');
+          option.value = tripData.trip;
+          const dateStr = tripData.last_transfer_date ? new Date(tripData.last_transfer_date).toLocaleDateString() : '';
+          option.textContent = 'Trip ' + tripData.trip + (dateStr ? ' (Last: ' + dateStr + ')' : '');
+          tripSelect.appendChild(option);
+        });
+      } else {
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = 'No trips found';
+        option.disabled = true;
+        tripSelect.appendChild(option);
+      }
+    }
+
+    let fgSelectedReferences = [];
+    let currentTripFilter = '';
+
+    function onFgTripChange() {
+      const tripSelect = document.getElementById('trip_number');
+      const searchInput = document.getElementById('roll_reference_search');
+      const hint = document.getElementById('roll_reference_hint');
+      if (!tripSelect || !searchInput) return;
+
+      const selectedTrip = tripSelect.value;
+      currentTripFilter = selectedTrip;
+      if (selectedTrip) {
+        searchInput.disabled = false;
+        loadRollReferencesForTrip(selectedTrip);
+        if (hint) hint.textContent = 'Showing references for Trip ' + selectedTrip + '.';
+      } else {
+        searchInput.disabled = true;
+        clearRollReferenceDropdown();
+        if (hint) hint.textContent = 'Select a trip number first to load references.';
+      }
+
+      fgSelectedReferences = [];
+      renderFgSelectedReferences();
+      updateReferenceHiddenField();
+      searchInput.value = '';
+    }
+
+    function loadRollReferencesForTrip(trip) {
+      const dropdown = document.getElementById('roll_reference_dropdown');
+      if (!dropdown) return;
+      const message = document.getElementById('roll_no_references_message');
+      dropdown.innerHTML = '';
+      if (message) dropdown.appendChild(message);
+
+      const tripRefs = fgTripReferences.filter(ref => String(ref.trip) === String(trip));
+      if (tripRefs.length === 0) {
+        showNoFgReferencesMessage('No references found for the selected trip.');
+        return;
+      }
+
+      tripRefs.forEach(ref => {
+        const option = document.createElement('div');
+        option.className = 'roll-reference-option';
+        option.setAttribute('data-ref', ref.reference_number);
+        option.setAttribute('data-total-amount', ref.total_amount);
+        option.setAttribute('data-total-area', ref.total_area);
+        option.setAttribute('style', 'display:block; padding:10px; cursor:pointer; border-bottom:1px solid #eee;');
+        option.innerHTML = `<strong>${escapeHtml(ref.reference_number)}</strong><br><small style="color:#27ae60; font-weight:600;">Qty: ${parseFloat(ref.total_amount).toFixed(2)} kg${ref.total_area ? ', Area: ' + parseFloat(ref.total_area).toFixed(2) + ' sqm' : ''}</small>`;
+        option.addEventListener('click', function() {
+          selectFgReferenceFromDropdown(ref.reference_number);
+        });
+        dropdown.appendChild(option);
+      });
+
+      if (message) message.style.display = 'none';
+      dropdown.style.display = 'none';
+    }
+
+    function showNoFgReferencesMessage(text) {
+      const message = document.getElementById('roll_no_references_message');
+      if (message) {
+        message.textContent = text || 'No references available for the selected trip.';
+        message.style.display = 'block';
+      }
+    }
+
+    function clearRollReferenceDropdown() {
+      const dropdown = document.getElementById('roll_reference_dropdown');
+      const message = document.getElementById('roll_no_references_message');
+      if (!dropdown) return;
+      dropdown.innerHTML = '';
+      if (message) {
+        message.style.display = 'block';
+        message.textContent = 'Please select a trip number first.';
+        dropdown.appendChild(message);
+      }
+    }
+
+    function filterRollTripReferences() {
+      const searchInput = document.getElementById('roll_reference_search');
+      const dropdown = document.getElementById('roll_reference_dropdown');
+      if (!searchInput || !dropdown) return;
+
+      const term = searchInput.value.trim().toLowerCase();
+      const options = dropdown.querySelectorAll('.roll-reference-option');
+      let visibleCount = 0;
+      options.forEach(option => {
+        const refText = (option.getAttribute('data-ref') || '').toLowerCase();
+        if (!term || refText.includes(term)) {
+          option.style.display = 'block';
+          visibleCount++;
+        } else {
+          option.style.display = 'none';
+        }
+      });
+
+      const noRefsMsg = document.getElementById('roll_no_references_message');
+      if (noRefsMsg) noRefsMsg.style.display = visibleCount === 0 ? 'block' : 'none';
+      dropdown.style.display = visibleCount === 0 ? 'none' : 'block';
+    }
+
+    function showRollReferenceDropdown() {
+      const dropdown = document.getElementById('roll_reference_dropdown');
+      const tripSelect = document.getElementById('trip_number');
+      if (!dropdown || !tripSelect || !tripSelect.value) return;
+      filterRollTripReferences();
+      dropdown.style.display = 'block';
+    }
+
+    function selectFgReferenceFromDropdown(refNumber) {
+      const searchInput = document.getElementById('roll_reference_search');
+      const dropdown = document.getElementById('roll_reference_dropdown');
+      if (searchInput) searchInput.value = refNumber;
+      if (dropdown) dropdown.style.display = 'none';
+    }
+
+    function addRollReference() {
+      const searchInput = document.getElementById('roll_reference_search');
+      if (!searchInput) return;
+      const value = searchInput.value.trim();
+      if (!value) {
+        alert('Please search and select a reference number first.');
+        return;
+      }
+
+      if (!currentTripFilter) {
+        alert('Please select a trip number first.');
+        return;
+      }
+
+      const dropdown = document.getElementById('roll_reference_dropdown');
+      const options = dropdown ? dropdown.querySelectorAll('.roll-reference-option') : [];
+      let matchedOption = null;
+      options.forEach(option => {
+        if (!matchedOption) {
+          const refText = option.getAttribute('data-ref') || '';
+          if (refText.toLowerCase() === value.toLowerCase()) {
+            matchedOption = option;
+          }
+        }
+      });
+      if (!matchedOption) {
+        alert('Please select a valid reference from the dropdown first.');
+        return;
+      }
+
+      const reference = matchedOption.getAttribute('data-ref');
+      if (fgSelectedReferences.some(ref => ref.reference === reference)) {
+        alert('This reference has already been added.');
+        searchInput.value = '';
+        return;
+      }
+
+      const totalAmount = parseFloat(matchedOption.getAttribute('data-total-amount')) || 0;
+      const totalArea = parseFloat(matchedOption.getAttribute('data-total-area')) || 0;
+      fgSelectedReferences.push({
+        id: 'fg_ref_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
+        reference,
+        trip: currentTripFilter,
+        amountKg: totalAmount,
+        areaSqm: totalArea
+      });
+
+      renderFgSelectedReferences();
+      updateReferenceHiddenField();
+      searchInput.value = '';
+      if (dropdown) dropdown.style.display = 'none';
+    }
+
+    function renderFgSelectedReferences() {
+      const container = document.getElementById('roll_selected_reference');
+      if (!container) return;
+      if (fgSelectedReferences.length === 0) {
+        container.innerHTML = '<small style="color:#999;">No references added yet.</small>';
+        return;
+      }
+
+      let html = '';
+      fgSelectedReferences.forEach(ref => {
+        html += `
+          <div class="delivery-ref-row" style="padding:12px; background:#e8f5e9; border:2px solid #4caf50; border-radius:6px; margin-bottom:10px;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+              <div>
+                <strong style="color:#2e7d32;">${escapeHtml(ref.reference)}</strong>
+                <br><small style="color:#666;">Trip: ${escapeHtml(ref.trip.toString())}</small>
+              </div>
+              <button type="button" onclick="removeFgReference('${ref.id}')" style="padding:6px 10px; background:#e74c3c; color:#fff; border:none; border-radius:4px; cursor:pointer; font-weight:600;">Remove</button>
+            </div>
+            <div style="margin-top:8px; font-size:13px; color:#2c3e50;">
+              KG: ${ref.amountKg.toFixed(2)}
+              ${ref.areaSqm ? ` | SQM: ${ref.areaSqm.toFixed(2)}` : ''}
+            </div>
+          </div>
+        `;
+      });
+
+      container.innerHTML = html;
+      updateDeliveredQuantityHidden();
+    }
+
+    function updateReferenceHiddenField() {
+      const hiddenField = document.getElementById('reference_number');
+      if (!hiddenField) return;
+      hiddenField.value = fgSelectedReferences.map(ref => ref.reference).join(', ');
+      updateDeliveredQuantityHidden();
+    }
+
+    function removeFgReference(id) {
+      fgSelectedReferences = fgSelectedReferences.filter(ref => ref.id !== id);
+      renderFgSelectedReferences();
+      updateReferenceHiddenField();
+    }
+
+    function updateDeliveredQuantityHidden() {
+      const hiddenQty = document.getElementById('delivered_quantity');
+      if (!hiddenQty) return;
+      const totalKg = fgSelectedReferences.reduce((sum, ref) => sum + (ref.amountKg || 0), 0);
+      hiddenQty.value = totalKg.toFixed(2);
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    document.addEventListener('click', function(event) {
+      const dropdown = document.getElementById('roll_reference_dropdown');
+      const searchInput = document.getElementById('roll_reference_search');
+      if (!dropdown || !searchInput) return;
+      if (!dropdown.contains(event.target) && event.target !== searchInput) {
+        dropdown.style.display = 'none';
+      }
+    });
     
     // Reference to GSM mapping (from fiber_to_roll_entry)
     <?php
@@ -470,10 +986,10 @@ $bundleReferences = array();
     ];
     </script>
 
-    <!-- CNC Cutting Batch Number (auto-populated from reference) -->
-    <div class="form-group">
+    <!-- CNC Cutting Batch Number (hidden field - populated from dropdown for bags, auto-filled for rolls) -->
+    <div class="form-group" id="cncBatchDisplayGroup" style="display:none;">
       <label>CNC Cutting Batch:</label>
-      <input type="text" id="cnc_cutting_batch" name="cnc_cutting_batch" readonly style="background-color: #f0f0f0;" placeholder="Auto-filled when reference selected">
+      <input type="text" id="cnc_cutting_batch" name="cnc_cutting_batch" readonly style="background-color: #f0f0f0;" placeholder="Auto-filled">
     </div>
 
     <!-- Hidden datetime -->
@@ -586,38 +1102,6 @@ $bundleReferences = array();
       <input type="hidden" id="thickness_mm" name="thickness_mm" value="">
     </div>
 
-    <!-- Measurement Type Selection (for rolls only) -->
-    <div class="form-group" id="measurementTypeGroup" style="display:none;">
-      <label>Measurement Type: <span style="color:red;">*</span></label>
-      <div class="btn-group" style="display:flex; gap:10px; flex-wrap:wrap;">
-        <button type="button" class="btn measurement-type-btn" onclick="selectMeasurementType('weight', this)" style="background:#e0e0e0;color:#333; border:2px solid #ccc;">
-          <i class="fas fa-weight"></i> Weight (kg)
-        </button>
-        <button type="button" class="btn measurement-type-btn" onclick="selectMeasurementType('area', this)" style="background:#e0e0e0;color:#333; border:2px solid #ccc;">
-          <i class="fas fa-ruler-combined"></i> Area (sqm)
-        </button>
-      </div>
-      <input type="hidden" id="measurement_type" name="measurement_type" value="">
-    </div>
-
-    <!-- Total Weight (shown when weight is selected for rolls) -->
-    <div class="form-group" id="actualWeightGroup" style="display:none;">
-      <label>Total Weight (kg): <span style="color:red;">*</span></label>
-      <input type="number" id="total_weight" name="total_weight" min="0.01" step="0.01">
-      <small style="color:#6c757d; display:block; margin-top:5px;">
-        <i class="fas fa-info-circle"></i> Enter the total weight manually (will be auto-filled from roll data if available, but you can edit it)
-      </small>
-    </div>
-
-    <!-- Total Area (shown when area is selected) -->
-    <div class="form-group" id="totalAreaGroup" style="display:none;">
-      <label>Total Area (sqm): <span style="color:red;">*</span></label>
-      <input type="number" id="total_area" name="total_area" min="0.01" step="0.01" placeholder="Enter total area in square meters">
-      <small style="color:#6c757d; display:block; margin-top:5px;">
-        <i class="fas fa-info-circle"></i> Enter the total area in square meters
-      </small>
-    </div>
-
     <!-- Actual weight for bags (manual input, always shown for bags) -->
     <div class="form-group" id="actualWeightBagGroup" style="display:none;">
       <label>Actual Weight (kg): <span style="color:red;">*</span></label>
@@ -629,8 +1113,8 @@ $bundleReferences = array();
 
     <!-- Quality checked -->
     <div class="form-group" id="qualityCheckedFormGroup">
-      <label>Quality Checked (pcs): <span id="maxBrandedQtyLabel" style="color:#2196F3; font-weight:normal; font-size:13px;"></span></label>
-      <input type="number" id="quality_checked" name="quality_checked" min="1" onchange="validateQualityChecked()" oninput="validateQualityChecked()">
+      <label>Quality Checked (pcs): <span id="totalPrintedQtyLabel" style="color:#27ae60; font-weight:600; font-size:13px;"></span> <span id="maxBrandedQtyLabel" style="color:#2196F3; font-weight:normal; font-size:13px;"></span></label>
+      <input type="number" id="quality_checked" name="quality_checked" min="1" onchange="validateQualityChecked(true)" onblur="validateQualityChecked(true)" oninput="debounceValidateQualityChecked()">
       <small id="qualityCheckedHint" style="color:#6c757d; display:block; margin-top:5px;">
         <i class="fas fa-info-circle"></i> Enter the number of bags to be quality checked
       </small>
@@ -690,6 +1174,65 @@ function updateTimeAndShift() {
 }
 setInterval(updateTimeAndShift,1000); updateTimeAndShift();
 
+// Debounce timer for quality checked validation
+let qualityCheckedDebounceTimer = null;
+
+function debounceValidateQualityChecked() {
+  // Clear existing timer
+  if (qualityCheckedDebounceTimer) {
+    clearTimeout(qualityCheckedDebounceTimer);
+  }
+  
+  // Set new timer - validate after 500ms of no typing (without resetting value)
+  qualityCheckedDebounceTimer = setTimeout(function() {
+    validateQualityChecked(false); // false = don't reset value, just show hints
+  }, 500);
+}
+
+// Modern Warning Popup Functions
+function showWarningPopup(message) {
+  const popup = document.getElementById('warningPopup');
+  const messageEl = document.getElementById('warningMessage');
+  if (popup && messageEl) {
+    messageEl.innerHTML = message;
+    popup.classList.add('show');
+  }
+}
+
+function closeWarningPopup() {
+  const popup = document.getElementById('warningPopup');
+  if (popup) {
+    popup.classList.remove('show');
+  }
+}
+
+// Close popup when clicking outside
+document.addEventListener('click', function(event) {
+  const popup = document.getElementById('warningPopup');
+  if (popup && event.target === popup) {
+    closeWarningPopup();
+  }
+});
+
+// Hide Entry Type field on page load (if it exists from cache or old version)
+document.addEventListener('DOMContentLoaded', function() {
+  const rollEntryTypeGroup = document.getElementById('rollEntryTypeGroup');
+  if(rollEntryTypeGroup) {
+    rollEntryTypeGroup.style.display = 'none';
+    rollEntryTypeGroup.remove(); // Remove it completely from DOM
+  }
+  
+  // Also hide any buttons with roll-entry-type-btn class
+  const entryTypeButtons = document.querySelectorAll('.roll-entry-type-btn');
+  entryTypeButtons.forEach(btn => {
+    const parent = btn.closest('.form-group');
+    if(parent && parent.id === 'rollEntryTypeGroup') {
+      parent.style.display = 'none';
+      parent.remove();
+    }
+  });
+});
+
 // Recommended weight map (kg) by bag size
 const bagSizeToRecommendedKg = {
   '2000mmX1500mm': 800,
@@ -743,132 +1286,38 @@ function selectProductType(type) {
   // Set hidden input
   document.getElementById('product_type').value = type;
   
-  // Show/hide roll entry type selection and fields
-  const rollEntryTypeGroup = document.getElementById('rollEntryTypeGroup');
+  // Show/hide trip number selection and fields
+  const tripNumberGroup = document.getElementById('tripNumberGroup');
   const productFieldsContainer = document.getElementById('productFieldsContainer');
+  const bagReferenceGroup = document.getElementById('bagReferenceGroup');
+  const rollReferenceGroup = document.getElementById('rollReferenceGroup');
+  const rollReferenceSearch = document.getElementById('roll_reference_search');
+  const referenceHiddenInput = document.getElementById('reference_number');
+  const bagReferenceSelect = document.getElementById('bag_reference_number');
   
   if (type === 'roll') {
-    // For rolls, show entry type selection first
-    if(rollEntryTypeGroup) rollEntryTypeGroup.style.display = 'block';
-    if(productFieldsContainer) productFieldsContainer.style.display = 'none'; // Wait for entry type selection
-  } else if (type === 'bag') {
-    // For bags, show all fields immediately
+    // Hide Entry Type field if it still exists (legacy)
+    const rollEntryTypeGroup = document.getElementById('rollEntryTypeGroup');
     if(rollEntryTypeGroup) rollEntryTypeGroup.style.display = 'none';
-    if(productFieldsContainer) productFieldsContainer.style.display = 'block';
     
-    
-    const bagSizeFormGroup = document.getElementById('bagSizeFormGroup');
-    const recommendedWeightGroup = document.getElementById('recommendedWeightGroup');
-    const actualWeightBagGroup = document.getElementById('actualWeightBagGroup');
-    const qualityCheckedFormGroup = document.getElementById('qualityCheckedFormGroup');
-    const passedQtyFormGroup = document.getElementById('passedQtyFormGroup');
-    const rejectedQtyFormGroup = document.getElementById('rejectedQtyFormGroup');
-    const cncGroup = document.getElementById('cnc_cutting_batch').closest('.form-group');
-    
-    if(bagSizeFormGroup) bagSizeFormGroup.style.display = 'block';
-    if(actualWeightBagGroup) actualWeightBagGroup.style.display = 'block';
-    if(qualityCheckedFormGroup) qualityCheckedFormGroup.style.display = 'block';
-    if(passedQtyFormGroup) passedQtyFormGroup.style.display = 'block';
-    if(rejectedQtyFormGroup) rejectedQtyFormGroup.style.display = 'block';
-    if(cncGroup) cncGroup.style.display = 'block';
-    
-    // Hide roll-specific fields
-    const rollSizeFormGroup = document.getElementById('rollSizeFormGroup');
-    const measurementTypeGroup = document.getElementById('measurementTypeGroup');
-    const actualWeightGroup = document.getElementById('actualWeightGroup');
-    const totalAreaGroup = document.getElementById('totalAreaGroup');
-    
-    if(rollSizeFormGroup) rollSizeFormGroup.style.display = 'none';
-    if(measurementTypeGroup) measurementTypeGroup.style.display = 'none';
-    if(actualWeightGroup) actualWeightGroup.style.display = 'none';
-    if(totalAreaGroup) totalAreaGroup.style.display = 'none';
-    
-    loadBagReferences();
-  }
-  
-  updateSummary();
-}
-
-function selectRollEntryType(entryType) {
-  // Remove selected styling from all entry type buttons
-  const allBtns = document.querySelectorAll('.roll-entry-type-btn');
-  allBtns.forEach(btn => {
-    btn.style.background = '#e0e0e0';
-    btn.style.color = '#333';
-    btn.style.border = '2px solid #ccc';
-    btn.classList.remove('selected');
-  });
-  
-  // Add selected styling to clicked button (blue)
-  event.target.style.background = '#2196F3';
-  event.target.style.color = '#fff';
-  event.target.style.border = '2px solid #1976D2';
-  event.target.classList.add('selected');
-  
-  // Set hidden input
-  document.getElementById('roll_entry_type').value = entryType;
-  
-  // Show product fields container now that entry type is selected
-  const productFieldsContainer = document.getElementById('productFieldsContainer');
+    // For rolls, show trip number selection and fields immediately
+    if(tripNumberGroup) tripNumberGroup.style.display = 'block';
   if(productFieldsContainer) productFieldsContainer.style.display = 'block';
-  
-  // Update reference dropdown based on entry type
-  const referenceSelect = document.getElementById('reference_number');
-  const referenceHint = document.getElementById('reference_hint');
-  referenceSelect.innerHTML = '<option value="">-- Select Reference --</option>';
-  
-  if (entryType === 'individual') {
-    // Individual rolls
-    rollReferences.forEach(roll => {
-      const option = document.createElement('option');
-      option.value = roll.reference_number;
-      option.textContent = roll.reference_number;
-      option.setAttribute('data-roll-size', roll.roll_size || 'N/A');
-      option.setAttribute('data-material-type', roll.material_type || '');
-      option.setAttribute('data-weight', roll.total_weight || '');
-      option.setAttribute('data-is-bundle', 'false');
-      referenceSelect.appendChild(option);
-    });
-    referenceHint.innerHTML = 'Showing <strong>individual rolls</strong> approved for FG';
+    loadFGTripNumbers();
     
-  } else if (entryType === 'bundle') {
-    // Bundle references
-    console.log('🔍 Loading bundle references...');
-    console.log('Bundle references data:', bundleReferences);
-    console.log('Bundle count:', bundleReferences ? bundleReferences.length : 0);
-    
-    if (bundleReferences && bundleReferences.length > 0) {
-      bundleReferences.forEach((bundle, index) => {
-        console.log(`Adding bundle ${index + 1}:`, bundle);
-        const option = document.createElement('option');
-        option.value = bundle.base_reference;
-        option.textContent = bundle.base_reference + ' (' + bundle.total_rolls + ' rolls)';
-        option.setAttribute('data-roll-size', bundle.roll_size || 'N/A');
-        option.setAttribute('data-material-type', bundle.material_type || '');
-        option.setAttribute('data-weight', bundle.total_weight || '');
-        option.setAttribute('data-roll-count', bundle.total_rolls);
-        option.setAttribute('data-roll-list', bundle.roll_list || '');
-        option.setAttribute('data-is-bundle', 'true');
-        referenceSelect.appendChild(option);
-      });
-      referenceHint.innerHTML = 'Showing <strong>' + bundleReferences.length + ' bundle(s)</strong> (multiple rolls grouped together)';
-      console.log('✅ Added ' + bundleReferences.length + ' bundles to dropdown');
-    } else {
-      referenceHint.innerHTML = '<span style="color:#e74c3c;">⚠️ No bundles available. All rolls may have been used or not all rolls in a batch are QC approved yet.</span>';
-      console.log('❌ No bundle references found - bundleReferences is empty or null');
-    }
-  }
+    if (bagReferenceGroup) bagReferenceGroup.style.display = 'none';
+    if (rollReferenceGroup) rollReferenceGroup.style.display = 'block';
+    if (rollReferenceSearch) rollReferenceSearch.disabled = true;
+    if (referenceHiddenInput) referenceHiddenInput.value = '';
+    if (bagReferenceSelect) bagReferenceSelect.value = '';
   
   // Show roll-specific fields
   const rollSizeFormGroup = document.getElementById('rollSizeFormGroup');
   if(rollSizeFormGroup) rollSizeFormGroup.style.display = 'block';
   
-  // Show measurement type selection for rolls
-  const measurementTypeGroup = document.getElementById('measurementTypeGroup');
-  if(measurementTypeGroup) measurementTypeGroup.style.display = 'block';
-  
     // Hide bag-specific fields
-    const cncGroup = document.getElementById('cnc_cutting_batch').closest('.form-group');
+  const bagCncBatchGroup = document.getElementById('bagCncBatchGroup');
+  const cncBatchDisplayGroup = document.getElementById('cncBatchDisplayGroup');
     const bagSizeFormGroup = document.getElementById('bagSizeFormGroup');
     const thicknessSection = document.getElementById('thicknessSection');
     const qualityCheckedFormGroup = document.getElementById('qualityCheckedFormGroup');
@@ -880,7 +1329,8 @@ function selectRollEntryType(entryType) {
     const passedQtyInput = document.getElementById('passed_qty');
     const rejectedQtyInput = document.getElementById('rejected_qty');
     
-    if(cncGroup) cncGroup.style.display = 'none';
+    if(bagCncBatchGroup) bagCncBatchGroup.style.display = 'none';
+    if(cncBatchDisplayGroup) cncBatchDisplayGroup.style.display = 'none';
     if(bagSizeFormGroup) bagSizeFormGroup.style.display = 'none';
     if(thicknessSection) thicknessSection.style.display = 'none';
     if(qualityCheckedFormGroup) qualityCheckedFormGroup.style.display = 'none';
@@ -899,69 +1349,92 @@ function selectRollEntryType(entryType) {
     
     const recommendedWeightInput = document.getElementById('recommended_weight');
     if(recommendedWeightInput) recommendedWeightInput.removeAttribute('required');
+  } else if (type === 'bag') {
+    // For bags, show all fields immediately
+    if(tripNumberGroup) tripNumberGroup.style.display = 'none';
+    if(productFieldsContainer) productFieldsContainer.style.display = 'block';
+    
+    // Show CNC batch dropdown for bags
+    const bagCncBatchGroup = document.getElementById('bagCncBatchGroup');
+    if (bagCncBatchGroup) bagCncBatchGroup.style.display = 'block';
+    
+    const bagSizeFormGroup = document.getElementById('bagSizeFormGroup');
+    const recommendedWeightGroup = document.getElementById('recommendedWeightGroup');
+    const actualWeightBagGroup = document.getElementById('actualWeightBagGroup');
+    const qualityCheckedFormGroup = document.getElementById('qualityCheckedFormGroup');
+    const passedQtyFormGroup = document.getElementById('passedQtyFormGroup');
+    const rejectedQtyFormGroup = document.getElementById('rejectedQtyFormGroup');
+    const cncBatchDisplayGroup = document.getElementById('cncBatchDisplayGroup');
   
-  updateSummary();
-}
+    if(bagSizeFormGroup) bagSizeFormGroup.style.display = 'block';
+    if(actualWeightBagGroup) actualWeightBagGroup.style.display = 'block';
+    if(qualityCheckedFormGroup) qualityCheckedFormGroup.style.display = 'block';
+    if(passedQtyFormGroup) passedQtyFormGroup.style.display = 'block';
+    if(rejectedQtyFormGroup) rejectedQtyFormGroup.style.display = 'block';
+    if(cncBatchDisplayGroup) cncBatchDisplayGroup.style.display = 'none'; // Hide display group, using dropdown instead
+    
+    // Hide roll-specific fields
+    const rollSizeFormGroup = document.getElementById('rollSizeFormGroup');
 
-function selectMeasurementType(type, btnElement) {
-  // Remove selected class and reset styles from all buttons
-  document.querySelectorAll('.measurement-type-btn').forEach(btn => {
-    btn.classList.remove('selected');
-    btn.style.background = '#e0e0e0';
-    btn.style.color = '#333';
-    btn.style.borderColor = '#ccc';
-  });
-  
-  // Add selected class and apply selected styles to clicked button
-  const targetBtn = btnElement || event.target;
-  targetBtn.classList.add('selected');
-  targetBtn.style.background = '#007bff';
-  targetBtn.style.color = '#fff';
-  targetBtn.style.borderColor = '#007bff';
-  
-  // Set hidden input
-  document.getElementById('measurement_type').value = type;
-  
-  // Show/hide appropriate fields
-  const actualWeightGroup = document.getElementById('actualWeightGroup');
-  const totalAreaGroup = document.getElementById('totalAreaGroup');
-  const totalWeightInput = document.getElementById('total_weight');
-  const totalAreaInput = document.getElementById('total_area');
-  
-  if (type === 'weight') {
-    if(actualWeightGroup) actualWeightGroup.style.display = 'block';
-    if(totalAreaGroup) totalAreaGroup.style.display = 'none';
-    if(totalWeightInput) totalWeightInput.setAttribute('required', 'required');
-    if(totalAreaInput) totalAreaInput.removeAttribute('required');
-    if(totalAreaInput) totalAreaInput.value = '';
-  } else if (type === 'area') {
-    if(actualWeightGroup) actualWeightGroup.style.display = 'none';
-    if(totalAreaGroup) totalAreaGroup.style.display = 'block';
-    if(totalWeightInput) totalWeightInput.removeAttribute('required');
-    if(totalAreaInput) totalAreaInput.setAttribute('required', 'required');
-    if(totalWeightInput) totalWeightInput.value = '';
+    if(rollSizeFormGroup) rollSizeFormGroup.style.display = 'none';
+    
+    loadBagReferences();
   }
   
   updateSummary();
 }
 
 function loadBagReferences() {
-  // Load bag references (from CNC)
-  const referenceSelect = document.getElementById('reference_number');
-  const referenceHint = document.getElementById('reference_hint');
-  const actualWeightInput = document.getElementById('actual_weight');
-  referenceSelect.innerHTML = '<option value="">-- Select Reference --</option>';
+  // Load CNC cutting batches for bags (instead of reference numbers)
+  const cncBatchSelect = document.getElementById('bag_cnc_cutting_batch');
+  const cncBatchHint = document.getElementById('cnc_batch_hint');
   
-  bagReferences.forEach(ref => {
+  if (!cncBatchSelect) return;
+  
+  cncBatchSelect.innerHTML = '<option value="">-- Loading CNC Cutting Batches... --</option>';
+  
+  // Fetch CNC cutting batches from API
+  fetch('api/get_cnc_cutting_batches.php')
+    .then(response => response.json())
+    .then(data => {
+      if (data.success && data.batches && data.batches.length > 0) {
+        cncBatchSelect.innerHTML = '<option value="">-- Select CNC Cutting Batch --</option>';
+        data.batches.forEach(batch => {
     const option = document.createElement('option');
-    option.value = ref;
-    option.textContent = ref;
-    referenceSelect.appendChild(option);
+          option.value = batch.cnc_cutting_batch;
+          // Display batch number with date if available
+          let displayText = batch.cnc_cutting_batch;
+          if (batch.batch_date) {
+            displayText += ' (' + batch.batch_date + ')';
+          }
+          option.textContent = displayText;
+          option.setAttribute('data-reference', batch.reference_number || '');
+          option.setAttribute('data-bag-size', batch.bag_size || '');
+          option.setAttribute('data-total-printed', batch.total_printed || 0);
+          option.setAttribute('data-batch-date', batch.batch_date || '');
+          cncBatchSelect.appendChild(option);
   });
-  referenceHint.textContent = 'Showing bags from Bag Production';
+        if (cncBatchHint) {
+          cncBatchHint.textContent = 'Select a CNC cutting batch from branding entries';
+          cncBatchHint.style.color = '#6c757d';
+        }
+      } else {
+        cncBatchSelect.innerHTML = '<option value="">-- No CNC Cutting Batches Available --</option>';
+        if (cncBatchHint) {
+          cncBatchHint.textContent = 'No CNC cutting batches found. Please create branding entries first.';
+          cncBatchHint.style.color = '#e74c3c';
+        }
+      }
+    })
+    .catch(err => {
+      console.error('Error loading CNC cutting batches:', err);
+      cncBatchSelect.innerHTML = '<option value="">-- Error Loading Batches --</option>';
+      if (cncBatchHint) {
+        cncBatchHint.textContent = 'Error loading CNC cutting batches. Please refresh the page.';
+        cncBatchHint.style.color = '#e74c3c';
+      }
+    });
   
-  // Note: For bags, we use actual_weight_bag field, not total_weight
-  // This function is for bag references, so we don't need to update total_weight here
   
   // Reset all bag size buttons to be visible
   const bagSizeButtons = document.querySelectorAll('#bagSizeButtonGroup .btn');
@@ -975,6 +1448,13 @@ function loadBagReferences() {
   if (bagSizeHint) {
     bagSizeHint.innerHTML = '<i class="fas fa-info-circle"></i> Select a Reference Number first to see available bag sizes from branding';
     bagSizeHint.style.color = '#2196F3';
+  }
+  
+  // Clear total printed quantity label
+  const totalPrintedLabel = document.getElementById('totalPrintedQtyLabel');
+  if (totalPrintedLabel) {
+    totalPrintedLabel.textContent = '';
+    totalPrintedLabel.style.display = 'none';
   }
   
   // Clear max branded quantity label
@@ -994,19 +1474,14 @@ function loadBagReferences() {
   const rollSizeFormGroup = document.getElementById('rollSizeFormGroup');
   const rollEntryTypeGroup = document.getElementById('rollEntryTypeGroup');
   const bundleInfo = document.getElementById('bundleInfo');
-  const measurementTypeGroup = document.getElementById('measurementTypeGroup');
-  const actualWeightGroup = document.getElementById('actualWeightGroup');
-  const totalAreaGroup = document.getElementById('totalAreaGroup');
   
   if(rollSizeFormGroup) rollSizeFormGroup.style.display = 'none';
   if(rollEntryTypeGroup) rollEntryTypeGroup.style.display = 'none';
   if(bundleInfo) bundleInfo.style.display = 'none';
-  if(measurementTypeGroup) measurementTypeGroup.style.display = 'none';
-  if(actualWeightGroup) actualWeightGroup.style.display = 'none';
-  if(totalAreaGroup) totalAreaGroup.style.display = 'none';
   
   // Show bag-specific fields
-  const cncGroup = document.getElementById('cnc_cutting_batch').closest('.form-group');
+  const bagCncBatchGroup = document.getElementById('bagCncBatchGroup');
+  const cncBatchDisplayGroup = document.getElementById('cncBatchDisplayGroup');
   const bagSizeFormGroup = document.getElementById('bagSizeFormGroup');
   const qualityCheckedFormGroup = document.getElementById('qualityCheckedFormGroup');
   const passedQtyFormGroup = document.getElementById('passedQtyFormGroup');
@@ -1022,7 +1497,8 @@ function loadBagReferences() {
     qualityCheckedInput.removeAttribute('max');
   }
   
-  if(cncGroup) cncGroup.style.display = 'block';
+  if(bagCncBatchGroup) bagCncBatchGroup.style.display = 'block';
+  if(cncBatchDisplayGroup) cncBatchDisplayGroup.style.display = 'none'; // Hide display, using dropdown
   if(bagSizeFormGroup) bagSizeFormGroup.style.display = 'block';
   if(qualityCheckedFormGroup) qualityCheckedFormGroup.style.display = 'block';
   if(passedQtyFormGroup) passedQtyFormGroup.style.display = 'block';
@@ -1044,8 +1520,113 @@ function loadBagReferences() {
   updateSummary();
 }
 
+function updateReferenceFromCNCBatch() {
+  const cncBatchSelect = document.getElementById('bag_cnc_cutting_batch');
+  const cncBatchInput = document.getElementById('cnc_cutting_batch');
+  const referenceHiddenInput = document.getElementById('reference_number');
+  const productType = document.getElementById('product_type').value;
+  
+  if (!cncBatchSelect || productType !== 'bag') return;
+  
+  const selectedBatch = cncBatchSelect.value;
+  const selectedOption = cncBatchSelect.options[cncBatchSelect.selectedIndex];
+  
+  if (selectedBatch && selectedOption) {
+    // Set CNC cutting batch in hidden field
+    if (cncBatchInput) {
+      cncBatchInput.value = selectedBatch;
+    }
+    
+    // Get reference number from the selected option's data attribute
+    const referenceNumber = selectedOption.getAttribute('data-reference') || '';
+    if (referenceHiddenInput && referenceNumber) {
+      referenceHiddenInput.value = referenceNumber;
+    }
+    
+    // Get bag size and update bag size selection
+    const bagSize = selectedOption.getAttribute('data-bag-size') || '';
+    const bagSizeInput = document.getElementById('bag_size');
+    if (bagSize && bagSizeInput) {
+      bagSizeInput.value = bagSize;
+      // Auto-select the matching bag size button (case-insensitive and handle spacing)
+      let bagSizeSelected = false;
+      document.querySelectorAll('#bagSizeButtonGroup .btn').forEach(btn => {
+        const btnText = btn.textContent.trim();
+        // Normalize both values for comparison (case-insensitive, handle spacing)
+        const normalizedBtnText = btnText.toLowerCase().replace(/\s+/g, '');
+        const normalizedBagSize = bagSize.toLowerCase().replace(/\s+/g, '');
+        if (normalizedBtnText === normalizedBagSize || btnText === bagSize) {
+          btn.classList.add('selected');
+          // Trigger selectBagSize to set recommended weight
+          selectBagSize(bagSize, btn);
+          bagSizeSelected = true;
+        } else {
+          btn.classList.remove('selected');
+        }
+      });
+      
+      // If no button matched, try to find a close match or use custom
+      if (!bagSizeSelected) {
+        // Try to find a button that contains the bag size or vice versa
+        document.querySelectorAll('#bagSizeButtonGroup .btn').forEach(btn => {
+          const btnText = btn.textContent.trim();
+          if (btnText.toLowerCase().includes(bagSize.toLowerCase()) || 
+              bagSize.toLowerCase().includes(btnText.toLowerCase())) {
+            btn.classList.add('selected');
+            selectBagSize(btnText, btn);
+            bagSizeSelected = true;
+          }
+        });
+      }
+    }
+    
+    // Get total printed quantity and display it next to the field label
+    const totalPrinted = parseInt(selectedOption.getAttribute('data-total-printed')) || 0;
+    const totalPrintedLabel = document.getElementById('totalPrintedQtyLabel');
+    const qualityCheckedInput = document.getElementById('quality_checked');
+    
+    if (totalPrintedLabel) {
+      if (totalPrinted > 0) {
+        totalPrintedLabel.textContent = '(Total Printed: ' + totalPrinted + ' pcs)';
+        totalPrintedLabel.style.display = 'inline';
+      } else {
+        totalPrintedLabel.textContent = '';
+        totalPrintedLabel.style.display = 'none';
+      }
+    }
+    
+    // Set max attribute on quality checked input to prevent exceeding total printed
+    if (qualityCheckedInput) {
+      if (totalPrinted > 0) {
+        qualityCheckedInput.setAttribute('max', totalPrinted);
+        // Validate current value if it exceeds the limit
+        const currentQty = parseInt(qualityCheckedInput.value) || 0;
+        if (currentQty > totalPrinted) {
+          validateQualityChecked(true);
+        }
+      } else {
+        qualityCheckedInput.removeAttribute('max');
+      }
+    }
+    
+    // Update max branded quantity label
+    if (referenceNumber) {
+      updateMaxBrandedQtyLabel(referenceNumber);
+    }
+    
+    updateSummary();
+  } else {
+    // No batch selected - clear the total printed label
+    const totalPrintedLabel = document.getElementById('totalPrintedQtyLabel');
+    if (totalPrintedLabel) {
+      totalPrintedLabel.textContent = '';
+      totalPrintedLabel.style.display = 'none';
+    }
+  }
+}
+
 function updateCNCBatchFromReference() {
-  const referenceSelect = document.getElementById('reference_number');
+  const referenceSelect = document.getElementById('bag_reference_number');
   const cncBatchInput = document.getElementById('cnc_cutting_batch');
   const selectedRef = referenceSelect.value;
   const productType = document.getElementById('product_type').value;
@@ -1056,7 +1637,11 @@ function updateCNCBatchFromReference() {
   // Handle roll-specific fields
   const bundleInfo = document.getElementById('bundleInfo');
   const bundleRollList = document.getElementById('bundleRollList');
-  const totalWeightInput = document.getElementById('total_weight');
+  
+  const referenceHiddenInput = document.getElementById('reference_number');
+  if (referenceHiddenInput && productType === 'bag') {
+    referenceHiddenInput.value = selectedRef;
+  }
   
   if (productType === 'roll' && selectedRef) {
     const rollSize = selectedOption.getAttribute('data-roll-size') || '';
@@ -1068,10 +1653,6 @@ function updateCNCBatchFromReference() {
       rollSizeInput.value = rollSize;
     }
     
-    // Auto-fill total weight from database
-    if (totalWeightInput && rollWeight) {
-      totalWeightInput.value = parseFloat(rollWeight).toFixed(2);
-    }
     
     if (isBundle && rollList) {
       const rolls = rollList.split(', ');
@@ -1117,17 +1698,15 @@ function updateCNCBatchFromReference() {
       actualWeightBagGroup.style.display = 'block';
     }
     
-    // Hide roll actual weight field
-    const actualWeightGroup = document.getElementById('actualWeightGroup');
-    if (actualWeightGroup) {
-      actualWeightGroup.style.display = 'none';
-    }
   }
   
-  // Only update CNC batch if product type is bag
+  // Only update CNC batch if product type is bag and using reference dropdown (for rolls)
+  // For bags, CNC batch is selected directly from dropdown, not from reference
   if (productType === 'bag' && selectedRef && refToBatchMap[selectedRef]) {
+    // This is for backward compatibility if reference dropdown is still used
     cncBatchInput.value = refToBatchMap[selectedRef];
-  } else {
+  } else if (productType !== 'bag') {
+    // For rolls, clear CNC batch
     cncBatchInput.value = '';
   }
   
@@ -1168,6 +1747,13 @@ function updateCNCBatchFromReference() {
       if (bagSizeHint) {
         bagSizeHint.innerHTML = '<i class="fas fa-info-circle"></i> Select a Reference Number first. Branded bags will show specific sizes, non-branded will show all sizes.';
         bagSizeHint.style.color = '#2196F3';
+      }
+      
+      // Clear total printed quantity label
+      const totalPrintedLabel = document.getElementById('totalPrintedQtyLabel');
+      if (totalPrintedLabel) {
+        totalPrintedLabel.textContent = '';
+        totalPrintedLabel.style.display = 'none';
       }
       
       // Clear max branded quantity label
@@ -1223,6 +1809,8 @@ function updateMaxBrandedQtyLabel(referenceNumber) {
     
     console.log('ℹ️ No branded quantity data for reference:', referenceNumber, '- products can be sold without branding');
   }
+
+  updateSummary();
 }
 
 function filterBagSizesByReference(referenceNumber) {
@@ -1299,26 +1887,83 @@ function filterBagSizesByReference(referenceNumber) {
   }
 }
 
-function validateQualityChecked() {
+function validateQualityChecked(resetValue = true) {
   const qualityCheckedInput = document.getElementById('quality_checked');
   const qualityChecked = parseInt(qualityCheckedInput.value) || 0;
   const referenceNumber = document.getElementById('reference_number').value;
   const productType = document.getElementById('product_type').value;
   const qualityCheckedHint = document.getElementById('qualityCheckedHint');
   
-  // Only validate for bags with branding data
-  if (productType === 'bag' && referenceNumber) {
+  // Get total printed quantity from selected CNC batch (for bags)
+  let totalPrinted = 0;
+  if (productType === 'bag') {
+    const cncBatchSelect = document.getElementById('bag_cnc_cutting_batch');
+    if (cncBatchSelect && cncBatchSelect.value) {
+      const selectedOption = cncBatchSelect.options[cncBatchSelect.selectedIndex];
+      if (selectedOption) {
+        totalPrinted = parseInt(selectedOption.getAttribute('data-total-printed')) || 0;
+      }
+    }
+  }
+  
+  // Primary validation: Check against total printed quantity (for bags with CNC batch)
+  if (productType === 'bag' && totalPrinted > 0) {
+    if (qualityChecked > totalPrinted) {
+      // Only reset value and show popup if resetValue is true (on blur/change)
+      if (resetValue) {
+        // Show modern popup notification
+        const warningMsg = 'Quality Checked (<strong>' + qualityChecked + ' pcs</strong>) cannot exceed Total Printed quantity (<strong>' + totalPrinted + ' pcs</strong>) for this CNC cutting batch.<br><br>Please enter a value less than or equal to <strong>' + totalPrinted + ' pcs</strong>.';
+        showWarningPopup(warningMsg);
+        
+        // Reset to total printed quantity
+        qualityCheckedInput.value = totalPrinted;
+        
+        // Recalculate rejected after reset
+        calculateRejected();
+      }
+      
+      // Show warning hint (always, even during typing)
+      if (qualityCheckedHint) {
+        qualityCheckedHint.innerHTML = '<i class="fas fa-exclamation-triangle"></i> <strong style="color:#e74c3c;">Quality Checked cannot exceed Total Printed (' + totalPrinted + ' pcs)</strong>';
+        qualityCheckedHint.style.color = '#e74c3c';
+      }
+      
+      if (resetValue) {
+        return;
+      }
+    } else if (qualityChecked > 0) {
+      // Valid entry - show success message
+      if (qualityCheckedHint) {
+        qualityCheckedHint.innerHTML = '<i class="fas fa-check-circle"></i> Valid - Maximum: ' + totalPrinted + ' pcs (Total Printed)';
+        qualityCheckedHint.style.color = '#4caf50';
+      }
+    }
+  }
+  
+  // Secondary validation: Check against branded quantity (if no CNC batch total printed)
+  if (productType === 'bag' && referenceNumber && totalPrinted === 0) {
     if (refToBrandedQtyMap[referenceNumber]) {
       // Branding data exists - enforce limit
       const maxBranded = refToBrandedQtyMap[referenceNumber];
       
       if (qualityChecked > maxBranded) {
+        // Only reset value and show popup if resetValue is true (on blur/change)
+        if (resetValue) {
         qualityCheckedInput.value = maxBranded;
+          const warningMsg = 'Quality Checked (<strong>' + qualityChecked + ' pcs</strong>) cannot exceed <strong>' + maxBranded + ' bags</strong>. This is the total number of bags branded under reference <strong>' + referenceNumber + '</strong>.';
+          showWarningPopup(warningMsg);
+        }
+        
+        // Show warning hint (always, even during typing)
         if (qualityCheckedHint) {
           qualityCheckedHint.innerHTML = '<i class="fas fa-exclamation-triangle"></i> <strong style="color:#e74c3c;">Quality Checked cannot exceed ' + maxBranded + ' bags (total branded for this reference)</strong>';
           qualityCheckedHint.style.color = '#e74c3c';
         }
-        alert('Quality Checked cannot exceed ' + maxBranded + ' bags. This is the total number of bags branded under reference ' + referenceNumber);
+        
+        if (resetValue) {
+          calculateRejected();
+          return;
+        }
       } else if (qualityChecked > 0) {
         if (qualityCheckedHint) {
           qualityCheckedHint.innerHTML = '<i class="fas fa-check-circle"></i> Valid - Maximum available: ' + maxBranded + ' branded bags';
@@ -1335,7 +1980,8 @@ function validateQualityChecked() {
         qualityCheckedHint.style.color = '#6c757d';
       }
     }
-  } else {
+  } else if (productType !== 'bag' || (productType === 'bag' && totalPrinted === 0 && !referenceNumber)) {
+    // Default hint for non-bag products or bags without batch/reference
     if (qualityCheckedHint) {
       qualityCheckedHint.innerHTML = '<i class="fas fa-info-circle"></i> Enter the number of bags to be quality checked';
       qualityCheckedHint.style.color = '#6c757d';
@@ -1509,6 +2155,14 @@ function selectThickness(thickness){
   if (size === '1125mmX900mm'){
     const weightInput = document.getElementById('recommended_weight');
     weightInput.value = (parseFloat(thickness) === 2.5) ? 200 : 300;
+    // Show CNC batch dropdown for bags, hide reference dropdown
+    const bagCncBatchGroup = document.getElementById('bagCncBatchGroup');
+    if (bagCncBatchGroup) bagCncBatchGroup.style.display = 'block';
+    if (bagReferenceGroup) bagReferenceGroup.style.display = 'none';
+    if (rollReferenceGroup) rollReferenceGroup.style.display = 'none';
+    if (rollReferenceSearch) rollReferenceSearch.disabled = true;
+    if (referenceHiddenInput && bagReferenceSelect) referenceHiddenInput.value = bagReferenceSelect.value;
+
     updateSummary();
   }
 }
@@ -1581,25 +2235,39 @@ function validateForm(){
     }
     
     const productType = document.getElementById("product_type").value;
-    const rollEntryType = document.getElementById("roll_entry_type").value;
-    
     // Validate product type selection
     if(!productType){
       alert("Please select a product type (Roll or Bag).");
       return false;
     }
     
-    // Validate roll entry type if Roll is selected
-    if(productType === 'roll' && !rollEntryType){
-      alert("Please select entry type (Individual or Bundle).");
+    // Validate trip number if Roll is selected
+    if(productType === 'roll'){
+      const tripNumber = document.getElementById("trip_number").value;
+      if(!tripNumber){
+        alert("Please select a Trip Number.");
       return false;
+      }
     }
     
-    // Validate reference number (required for all products)
+    // Validate reference number and CNC batch based on product type
+    if(productType === 'bag') {
+      // For bags, validate CNC cutting batch
+      const cncBatchSelect = document.getElementById('bag_cnc_cutting_batch');
+      if(!cncBatchSelect || !cncBatchSelect.value){
+        showWarningPopup('Please select a CNC Cutting Batch for bags.');
+        return false;
+      }
+      
+      // Reference number is optional for bags - it's auto-filled from CNC batch if available
+      // No need to validate reference number for bags
+    } else {
+      // For rolls, validate reference number
     const referenceNumberField = document.getElementById("reference_number");
     if(!referenceNumberField || !referenceNumberField.value){
-      alert("Please select a Reference Number. This is required for delivery tracking.");
+        showWarningPopup('Please select a Reference Number. This is required for delivery tracking.');
       return false;
+      }
     }
     
     // Validate bag size only for bags
@@ -1624,29 +2292,6 @@ function validateForm(){
         alert("Please select a roll size.");
         return false;
       }
-      
-      // Validate measurement type for rolls
-      const measurementTypeField = document.getElementById("measurement_type");
-      if(!measurementTypeField || !measurementTypeField.value) {
-        alert("Please select a measurement type (Weight or Area).");
-        return false;
-      }
-      
-      const measurementType = measurementTypeField.value;
-      
-      if(measurementType === 'weight') {
-        const totalWeight = document.getElementById("total_weight");
-        if(!totalWeight || !totalWeight.value || parseFloat(totalWeight.value) <= 0) {
-          alert("Please enter a valid total weight.");
-          return false;
-        }
-      } else if(measurementType === 'area') {
-        const totalArea = document.getElementById("total_area");
-        if(!totalArea || !totalArea.value || parseFloat(totalArea.value) <= 0) {
-          alert("Please enter a valid total area.");
-          return false;
-        }
-      }
     }
     
     console.log("Form validation passed, submitting...");
@@ -1661,10 +2306,10 @@ function validateForm(){
 function updateSummary() {
   const shiftInCharge = document.getElementById("shift_in_charge").value;
   const productType = document.getElementById("product_type").value;
-  const rollEntryType = document.getElementById("roll_entry_type").value;
+  const tripNumber = document.getElementById("trip_number") ? document.getElementById("trip_number").value : '';
   const referenceNumber = document.getElementById("reference_number").value;
   
-  console.log('📊 Updating summary - Product Type:', productType, 'Entry Type:', rollEntryType);
+  console.log('📊 Updating summary - Product Type:', productType, 'Trip Number:', tripNumber);
   const cncCuttingBatch = document.getElementById("cnc_cutting_batch").value;
   const projectId = document.getElementById("project_id").value;
   const projectName = document.querySelector('#project_id').closest('.form-group').querySelector('.btn.selected') ? 
@@ -1672,8 +2317,6 @@ function updateSummary() {
   const bagSize = document.getElementById("bag_size").value;
   const rollSize = document.getElementById("fg_roll_size").value;
   const recommendedWeight = document.getElementById("recommended_weight").value;
-  // For rolls: use total_weight, for bags: use actual_weight_bag
-  const totalWeight = document.getElementById("total_weight") ? document.getElementById("total_weight").value : '';
   const actualWeightBag = document.getElementById("actual_weight_bag") ? document.getElementById("actual_weight_bag").value : '';
   const qualityChecked = document.getElementById("quality_checked").value;
   const passedQty = document.getElementById("passed_qty").value;
@@ -1683,11 +2326,11 @@ function updateSummary() {
   if (shiftInCharge) {
     let summary = `Shift in Charge: ${shiftInCharge}`;
     
-    // Add product type and entry type (show even if not all fields filled)
+    // Add product type and trip number (show even if not all fields filled)
     if (productType === 'roll') {
       summary += ` | Type: Roll`;
-      if (rollEntryType) {
-        summary += ` (${rollEntryType === 'individual' ? 'Individual' : 'Bundle'})`;
+      if (tripNumber) {
+        summary += ` | Trip: ${tripNumber}`;
       }
     } else if (productType === 'bag') {
       summary += ` | Type: Bag`;
@@ -1709,10 +2352,8 @@ function updateSummary() {
     
     if (recommendedWeight) summary += ` | Rec Weight: ${recommendedWeight} kg`;
     
-    // Show weight based on product type
-    if (productType === 'roll' && totalWeight) {
-      summary += ` | Total Weight: ${totalWeight} kg`;
-    } else if (productType === 'bag' && actualWeightBag) {
+    // Show weight for bags only
+    if (productType === 'bag' && actualWeightBag) {
       summary += ` | Actual Weight: ${actualWeightBag} kg`;
     }
     
@@ -1750,7 +2391,8 @@ function clearForm() {
   });
   
   document.getElementById('product_type').value = '';
-  document.getElementById('roll_entry_type').value = '';
+  const tripNumberField = document.getElementById('trip_number');
+  if (tripNumberField) tripNumberField.value = '';
   document.getElementById('project_id').value = '';
   document.getElementById('bag_size').value = '';
   
@@ -1766,6 +2408,13 @@ function clearForm() {
   bagSizeButtons.forEach(btn => {
     btn.style.display = '';
   });
+  
+  // Clear total printed quantity label
+  const totalPrintedLabel = document.getElementById('totalPrintedQtyLabel');
+  if (totalPrintedLabel) {
+    totalPrintedLabel.textContent = '';
+    totalPrintedLabel.style.display = 'none';
+  }
   
   // Clear max branded quantity label
   const maxBrandedQtyLabel = document.getElementById('maxBrandedQtyLabel');
@@ -1794,6 +2443,16 @@ function clearForm() {
   const rollEntryTypeGroup = document.getElementById('rollEntryTypeGroup');
   if(rollEntryTypeGroup) rollEntryTypeGroup.style.display = 'none';
   
+  // Reset CNC batch dropdown for bags
+  const bagCncBatchSelect = document.getElementById('bag_cnc_cutting_batch');
+  if (bagCncBatchSelect) {
+    bagCncBatchSelect.value = '';
+  }
+  
+  // Hide bag CNC batch group
+  const bagCncBatchGroup = document.getElementById('bagCncBatchGroup');
+  if (bagCncBatchGroup) bagCncBatchGroup.style.display = 'none';
+  
   // Hide custom bag size input
   const customInput = document.getElementById('bag_size_custom');
   if (customInput) {
@@ -1804,6 +2463,17 @@ function clearForm() {
   // Hide bundle info
   const bundleInfo = document.getElementById('bundleInfo');
   if(bundleInfo) bundleInfo.style.display = 'none';
+  
+  const rollReferenceGroup = document.getElementById('rollReferenceGroup');
+  if (rollReferenceGroup) rollReferenceGroup.style.display = 'none';
+  const rollReferenceSearch = document.getElementById('roll_reference_search');
+  if (rollReferenceSearch) {
+    rollReferenceSearch.value = '';
+    rollReferenceSearch.disabled = true;
+  }
+  fgSelectedReferences = [];
+  renderFgSelectedReferences();
+  updateReferenceHiddenField();
   
   updateTimeAndShift();
 }
@@ -1823,6 +2493,21 @@ document.addEventListener('DOMContentLoaded', function() {
     }
   }
   
+  // Auto-select product type based on role restrictions
+  <?php if ($canAccessRoll && !$canAccessBag): ?>
+  // Only Roll access - auto-select Roll
+  const rollBtn = document.querySelector('.product-type-btn[onclick*="roll"]');
+  if (rollBtn) {
+    rollBtn.click();
+  }
+  <?php elseif (!$canAccessRoll && $canAccessBag): ?>
+  // Only Bag access - auto-select Bag
+  const bagBtn = document.querySelector('.product-type-btn[onclick*="bag"]');
+  if (bagBtn) {
+    bagBtn.click();
+  }
+  <?php endif; ?>
+  
   const inputs = ['reference_number', 'cnc_cutting_batch', 'recommended_weight', 'actual_weight', 'quality_checked', 'passed_qty', 'rejected_qty'];
   inputs.forEach(function(inputId) {
     const element = document.getElementById(inputId);
@@ -1831,6 +2516,11 @@ document.addEventListener('DOMContentLoaded', function() {
       element.addEventListener('change', updateSummary);
     }
   });
+  
+  const tripSelect = document.getElementById('trip_number');
+  if (tripSelect) {
+    tripSelect.addEventListener('change', onFgTripChange);
+  }
   
   // Debug: Log form submission attempts
   const form = document.getElementById('fgForm');

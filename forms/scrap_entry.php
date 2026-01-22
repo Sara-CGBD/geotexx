@@ -94,25 +94,30 @@ if ($editMode && $editEntry && !empty($editEntry['reference_number']) && !in_arr
 // Fetch CNC cutting batches from swing_machine_entry excluding already recorded ones for current shift
 // BUT include the current entry's batch if in edit mode
 $cncBatches = [];
-$cncQuery = "SELECT DISTINCT sme.cnc_cutting_batch 
-             FROM swing_machine_entry sme
-             LEFT JOIN scrap s ON s.cutting_batch = sme.cnc_cutting_batch 
-                 AND DATE(s.date_time) = ? 
-                 AND s.scrap_category = 'Swing Scrap'
-                 AND s.id != ?
-             WHERE sme.cnc_cutting_batch IS NOT NULL 
-                 AND s.id IS NULL
-             ORDER BY sme.date_time DESC 
-             LIMIT 50";
-$cncStmt = $conn->prepare($cncQuery);
-if ($cncStmt) {
-    $cncStmt->bind_param('si', $currentDate, $excludeId);
-    $cncStmt->execute();
-    $cncResult = $cncStmt->get_result();
-    while ($row = $cncResult->fetch_assoc()) {
-        $cncBatches[] = $row['cnc_cutting_batch'];
+$swingTableCheck = $conn->query("SHOW TABLES LIKE 'swing_machine_entry'");
+$hasSwingTable = $swingTableCheck && $swingTableCheck->num_rows > 0;
+
+if ($hasSwingTable) {
+    $cncQuery = "SELECT DISTINCT sme.cnc_cutting_batch 
+                 FROM swing_machine_entry sme
+                 LEFT JOIN scrap s ON s.cutting_batch = sme.cnc_cutting_batch 
+                     AND DATE(s.date_time) = ? 
+                     AND s.scrap_category = 'Swing Scrap'
+                     AND s.id != ?
+                 WHERE sme.cnc_cutting_batch IS NOT NULL 
+                     AND s.id IS NULL
+                 ORDER BY sme.date_time DESC 
+                 LIMIT 50";
+    $cncStmt = $conn->prepare($cncQuery);
+    if ($cncStmt) {
+        $cncStmt->bind_param('si', $currentDate, $excludeId);
+        $cncStmt->execute();
+        $cncResult = $cncStmt->get_result();
+        while ($row = $cncResult->fetch_assoc()) {
+            $cncBatches[] = $row['cnc_cutting_batch'];
+        }
+        $cncStmt->close();
     }
-    $cncStmt->close();
 }
 
 // In edit mode, ensure the current batch is in the list

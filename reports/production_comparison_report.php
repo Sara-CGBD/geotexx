@@ -191,7 +191,13 @@ $grandTotal = $totalCNC + $totalSewing + $totalBranding;
         .chart-title { font-size: 1.4em; font-weight: 700; color: #2c3e50; margin-bottom: 25px; text-align: center; }
         .chart-container { position: relative; height: 450px; }
         
-        .table-wrapper { overflow-x: auto; width: 100%; margin-bottom: 20px; -webkit-overflow-scrolling: touch; }
+            .table-wrapper { 
+                overflow: visible !important; 
+                width: 100% !important; 
+                margin-bottom: 20px !important; 
+                position: static !important;
+                clear: both !important;
+            }
         table { width: 100%; border-collapse: collapse; font-size: 0.9em; min-width: 800px; }
         th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ecf0f1; white-space: nowrap; }
         th { background: #34495e; color: white; font-weight: 600; position: sticky; top: 0; }
@@ -213,6 +219,10 @@ $grandTotal = $totalCNC + $totalSewing + $totalBranding;
         }
         
         @media print {
+            @page {
+                size: A4 landscape;
+                margin: 10mm;
+            }
             /* COMPREHENSIVE RESET - Prevent ALL overlapping */
             * {
                 box-sizing: border-box !important;
@@ -291,18 +301,52 @@ $grandTotal = $totalCNC + $totalSewing + $totalBranding;
             }
             
             .chart-card {
-                page-break-inside: avoid;
+                page-break-inside: avoid !important;
+                page-break-after: always !important;
                 position: static !important;
                 overflow: visible !important;
-                margin-bottom: 20px !important;
-                padding: 15px !important;
+                margin-bottom: 0 !important;
+                margin-top: 0 !important;
+                padding: 10px !important;
                 clear: both !important;
                 border-radius: 0 !important;
+                display: block !important;
+                min-height: 300px !important;
+                max-height: 350px !important;
+            }
+            
+            .chart-card:first-of-type {
+                page-break-before: auto;
             }
             
             .chart-title {
+                margin-bottom: 5px !important;
+                margin-top: 0 !important;
+                padding: 0 !important;
+                page-break-after: avoid !important;
+                page-break-inside: avoid !important;
+                font-size: 11px !important;
+            }
+            
+            .table-wrapper {
+                overflow: visible !important;
+                width: 100% !important;
                 margin-bottom: 10px !important;
-                page-break-after: avoid;
+                margin-top: 0 !important;
+                padding-top: 0 !important;
+                position: static !important;
+                clear: both !important;
+                page-break-before: always !important;
+                display: block !important;
+            }
+            
+            h2 {
+                page-break-after: avoid !important;
+                page-break-inside: avoid !important;
+                margin-top: 10px !important;
+                margin-bottom: 5px !important;
+                padding: 0 !important;
+                font-size: 12px !important;
             }
             
             table { 
@@ -352,20 +396,29 @@ $grandTotal = $totalCNC + $totalSewing + $totalBranding;
             }
             
             .chart-container { 
-                height: 250px !important; 
-                max-height: 250px !important;
-                min-height: 250px !important;
+                height: 280px !important; 
+                max-height: 280px !important;
+                min-height: 280px !important;
                 position: static !important;
                 overflow: visible !important;
-                page-break-inside: avoid;
+                page-break-inside: avoid !important;
+                page-break-after: avoid !important;
                 clear: both !important;
                 width: 100% !important;
+                margin-bottom: 0 !important;
+                margin-top: 5px !important;
+                padding: 0 !important;
             }
             
             canvas {
                 max-width: 100% !important;
+                max-height: 280px !important;
                 height: auto !important;
                 position: static !important;
+                display: block !important;
+                page-break-inside: avoid !important;
+                margin: 0 !important;
+                padding: 0 !important;
             }
             
             .stats-grid { 
@@ -419,6 +472,49 @@ $grandTotal = $totalCNC + $totalSewing + $totalBranding;
             div, section, article {
                 clear: both !important;
                 position: static !important;
+            }
+            
+            /* Remove all extra spacing between sections in print */
+            .stats-grid {
+                margin-bottom: 10px !important;
+            }
+            
+            form.filters {
+                display: none !important;
+            }
+            
+            .export-btn {
+                display: none !important;
+            }
+            
+            /* Ensure charts are on separate pages */
+            .chart-card + .chart-card {
+                margin-top: 0 !important;
+                page-break-before: always !important;
+            }
+            
+            /* Table should start on new page after charts */
+            .chart-card + h2,
+            h2 + .table-wrapper {
+                margin-top: 0 !important;
+            }
+            
+            /* Prevent table from breaking across pages awkwardly */
+            table {
+                page-break-inside: auto !important;
+            }
+            
+            tbody tr {
+                page-break-inside: avoid !important;
+            }
+            
+            /* Remove all unnecessary margins */
+            .container > * {
+                margin-bottom: 0 !important;
+            }
+            
+            .container > *:last-child {
+                margin-bottom: 0 !important;
             }
             
             @page {

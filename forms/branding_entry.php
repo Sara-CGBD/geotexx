@@ -295,6 +295,41 @@ $brandingId = 'BR-' . date('Ymd') . '-' . str_pad($nextBrandingNumber, 3, '0', S
 </div>
 
 <script>
+// Auto-select bag size based on value from database
+function autoSelectBagSize(bagSizeValue) {
+    if (!bagSizeValue) return;
+    
+    // Normalize the bag size value (handle case differences and spacing)
+    const normalizedValue = bagSizeValue.trim().toLowerCase();
+    
+    // Find the matching button in bagSizeGroup
+    const bagSizeButtons = document.querySelectorAll('#bagSizeGroup .btn-bag-size');
+    let found = false;
+    
+    bagSizeButtons.forEach(btn => {
+        const btnValue = btn.textContent.trim().toLowerCase();
+        if (btnValue === normalizedValue || btnValue.replace(/\s+/g, '') === normalizedValue.replace(/\s+/g, '')) {
+            // Found matching button, select it
+            selectBagSize(btn.textContent.trim(), btn);
+            found = true;
+        }
+    });
+    
+    // If no button match found, check if it's a custom size
+    if (!found) {
+        // Try to find custom button and activate custom input
+        const customBtn = document.querySelector('#bagSizeGroup .custom-bag-size-btn');
+        if (customBtn) {
+            selectBagSize('custom', customBtn);
+            const customInput = document.getElementById('bagSizeCustom');
+            if (customInput) {
+                customInput.value = bagSizeValue;
+                customInput.style.display = 'block';
+            }
+        }
+    }
+}
+
 function selectBagSize(value, btn){
   // toggle selected class
   document.querySelectorAll('#bagSizeGroup .btn-bag-size').forEach(b=>b.classList.remove('selected'));
@@ -895,8 +930,8 @@ function loadCNCCuttingBatches() {
                     }
                 }
                 
-                // Add remaining quantity (or total if remaining not available)
-                const qty = batch.remaining_qty || batch.total_sewing_qty || 0;
+                // Add remaining quantity (use exact cutting quantity from cnc_entries)
+                const qty = batch.remaining_qty || batch.total_cutting_qty || batch.total_sewing_qty || 0;
                 if (qty > 0) {
                     displayText += ` - ${formatNumber(qty)}`;
                 }
@@ -963,8 +998,8 @@ function updateReferenceFromBatch() {
             refInput.value = '';
         }
         
-        // Update print quantity limit using remaining quantity
-        const maxQty = batch.remaining_qty || batch.total_sewing_qty || 0;
+        // Update print quantity limit using remaining quantity (use exact cutting quantity from cnc_entries)
+        const maxQty = batch.remaining_qty || batch.total_cutting_qty || batch.total_sewing_qty || 0;
         if (printQtyInput && maxQty > 0) {
             printQtyInput.setAttribute('data-max-qty', maxQty);
             printQtyInput.setAttribute('max', maxQty);
@@ -1014,6 +1049,11 @@ function updateReferenceFromBatch() {
             if (availableText) {
                 availableText.style.display = 'none';
             }
+        }
+        
+        // Auto-select bag size from batch data
+        if (batch.bag_size) {
+            autoSelectBagSize(batch.bag_size);
         }
     } else {
         refInput.value = '';

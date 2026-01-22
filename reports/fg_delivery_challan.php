@@ -8,7 +8,11 @@ if (!isset($_SESSION['user_id']) || !isset($_SESSION['username'])) {
 }
 
 $user_role = strtolower(trim($_SESSION['role'] ?? ''));
-$allowed_roles = ['admin', 'management', 'agm ops', 'finance_user'];
+// Normalize AGM Operations variations
+if ($user_role === 'agm operations' || $user_role === 'agm_ops' || $user_role === 'agm_operations') {
+    $user_role = 'agm ops';
+}
+$allowed_roles = ['admin', 'management', 'agm ops', 'finance_user', 'delivery_user'];
 if (!in_array($user_role, $allowed_roles)) {
     http_response_code(403);
     die("Access Denied");
@@ -23,36 +27,61 @@ if (!$delivery_id) {
     die("No delivery ID provided");
 }
 
-// Fetch delivery details from new fg_deliveries table
-// For rolls, bag_size in fg_entry contains the roll_size
+// First, fetch the delivery to get the challan_no
+$firstQuery = "SELECT challan_no, delivery_id FROM fg_deliveries WHERE id = ?";
+$firstStmt = $conn->prepare($firstQuery);
+$firstStmt->bind_param('i', $delivery_id);
+$firstStmt->execute();
+$firstResult = $firstStmt->get_result();
+$firstDelivery = $firstResult->fetch_assoc();
+$firstStmt->close();
+
+if (!$firstDelivery) {
+    die("Delivery not found");
+}
+
+// Get challan_no from the first delivery
+$challan_no = $firstDelivery['challan_no'] ?? $firstDelivery['delivery_id'] ?? 'CH-' . str_pad($delivery_id, 5, '0', STR_PAD_LEFT);
+
+// If challan_no is empty, use delivery_id as fallback
+if (empty($challan_no)) {
+    $challan_no = $firstDelivery['delivery_id'] ?? 'CH-' . str_pad($delivery_id, 5, '0', STR_PAD_LEFT);
+}
+
+// Fetch ALL delivery details with the same challan_no
+// For rolls, get roll_size from roll_entry; for bags, get bag_size from fg_entry
 $query = "SELECT 
     d.*,
     fe.bag_size as fg_bag_size,
     fe.packaging_type as fg_packaging_type,
     fe.product_type as fg_product_type,
     p.project_name,
-    COALESCE(c.client_name, c.name, '') as client_name_from_table,
+    re.roll_size as roll_size,
+    COALESCE(c.client_name, '') as client_name_from_table,
     '' as client_phone,
     '' as client_address
 FROM fg_deliveries d
 LEFT JOIN fg_entry fe ON d.fg_entry_id = fe.id
 LEFT JOIN projects p ON fe.project_id = p.id
+LEFT JOIN roll_entry re ON d.reference_number = re.reference_number
 LEFT JOIN clients c ON d.client_id = c.id
-WHERE d.id = ?";
+WHERE d.challan_no = ?
+ORDER BY d.id ASC";
 
 $stmt = $conn->prepare($query);
-$stmt->bind_param('i', $delivery_id);
+$stmt->bind_param('s', $challan_no);
 $stmt->execute();
 $result = $stmt->get_result();
-$delivery = $result->fetch_assoc();
+$deliveries = $result->fetch_all(MYSQLI_ASSOC);
 $stmt->close();
 $conn->close();
 
-if (!$delivery) {
-    die("Delivery not found");
+if (empty($deliveries)) {
+    die("No deliveries found for this challan");
 }
 
-$challan_no = $delivery['challan_no'] ?? $delivery['delivery_id'] ?? 'CH-' . str_pad($delivery_id, 5, '0', STR_PAD_LEFT);
+// Use first delivery for common fields (client, date, etc.)
+$delivery = $deliveries[0];
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -203,16 +232,35 @@ $challan_no = $delivery['challan_no'] ?? $delivery['delivery_id'] ?? 'CH-' . str
             background: #2980b9;
         }
         @media print {
+            @page {
+                size: A4;
+                margin: 15mm;
+            }
             body { 
                 background: white; 
                 padding: 0; 
             }
             .challan-container {
                 box-shadow: none;
-                padding: 20px;
+                padding: 0;
+                max-width: 100%;
             }
             .print-btn {
                 display: none;
+            }
+            .items-table {
+                page-break-inside: avoid;
+                break-inside: avoid;
+            }
+            .items-table thead {
+                display: table-header-group;
+            }
+            .items-table tbody {
+                display: table-row-group;
+            }
+            .items-table tr {
+                page-break-inside: avoid;
+                break-inside: avoid;
             }
         }
     </style>
@@ -293,20 +341,35 @@ $challan_no = $delivery['challan_no'] ?? $delivery['delivery_id'] ?? 'CH-' . str
             </div>
         </div>
 
+        <?php 
+        // Check if any item is a roll to determine if we should show Reference Number column
+        $hasRollItems = false;
+        foreach ($deliveries as $item) {
+            $itemProductType = strtolower(trim($item['delivery_product_type'] ?? $item['fg_product_type'] ?? 'bag'));
+            if ($itemProductType === 'roll') {
+                $hasRollItems = true;
+                break;
+            }
+        }
+        
+        $productType = strtolower(trim($delivery['delivery_product_type'] ?? $delivery['fg_product_type'] ?? 'bag'));
+        $isRoll = ($productType === 'roll');
+        ?>
         <table class="items-table">
             <thead>
                 <tr>
                     <th>S.No</th>
-                    <th>Reference Number</th>
-                    <th>Project</th>
                     <?php 
-                    $productType = strtolower(trim($delivery['delivery_product_type'] ?? $delivery['fg_product_type'] ?? 'bag'));
-                    $isRoll = ($productType === 'roll');
+                    // Only show Reference Number column if there are roll items
+                    if ($hasRollItems):
                     ?>
-                    <th><?php echo $isRoll ? 'Roll Size' : 'Bag Size'; ?></th>
-                    <?php if (!$isRoll): ?>
-                    <th>Packaging</th>
+                    <th>Reference Number</th>
                     <?php endif; ?>
+                    <th><?php echo $isRoll ? 'Roll Size' : 'Bag Size'; ?></th>
+                    <?php 
+                    // Hide Packaging column for both bags and rolls
+                    // Packaging is not needed in challan
+                    ?>
                     <th>Quantity</th>
                     <th>Unit Price (৳)</th>
                     <th>Total Cost (৳)</th>
@@ -314,32 +377,54 @@ $challan_no = $delivery['challan_no'] ?? $delivery['delivery_id'] ?? 'CH-' . str
             </thead>
             <tbody>
                 <?php 
-                $unit_price = $delivery['unit_price'] ?? 0;
-                $quantity = $delivery['delivery_quantity'] ?? 0;
+                $rowNum = 1;
+                $grandTotal = 0;
+                $unit_price = $delivery['unit_price'] ?? 0; // Use unit price from first delivery
                 $deliveryUnit = $delivery['delivery_unit'] ?? 'piece';
                 $unitLabel = ($deliveryUnit === 'kg') ? 'kg' : 'pcs';
-                $total_cost = $delivery['total_cost'] ?? ($quantity * $unit_price);
                 
-                // Get size based on product type
-                // For rolls, bag_size in fg_entry contains the roll_size
-                // For bags, bag_size contains the bag size
-                $size = $delivery['bag_size'] ?: $delivery['fg_bag_size'] ?: 'N/A';
+                // Use bag size from first delivery for all items (consistent across same delivery for bags)
+                $commonBagSize = $delivery['bag_size'] ?: $delivery['fg_bag_size'] ?: 'N/A';
+                
+                foreach ($deliveries as $deliveryItem): 
+                    $quantity = $deliveryItem['delivery_quantity'] ?? 0;
+                    $itemCost = $deliveryItem['total_cost'] ?? ($quantity * $unit_price);
+                    $grandTotal += $itemCost;
+                    
+                    $isItemRoll = ($deliveryItem['delivery_product_type'] ?? 'bag') === 'roll';
+                    
+                    // For rolls, get roll size from roll_entry (where it's saved); for bags, use common bag size
+                    if ($isItemRoll) {
+                        $itemSize = $deliveryItem['roll_size'] ?: 'N/A';
+                    } else {
+                        $itemSize = $commonBagSize;
+                    }
                 ?>
                 <tr>
-                    <td>1</td>
-                    <td><?php echo htmlspecialchars($delivery['reference_number'] ?? 'N/A'); ?></td>
-                    <td><?php echo htmlspecialchars($delivery['project_name'] ?? 'N/A'); ?></td>
-                    <td><?php echo htmlspecialchars($size); ?></td>
-                    <?php if (!$isRoll): ?>
-                    <td><?php echo htmlspecialchars($delivery['packaging_type'] ?: $delivery['fg_packaging_type'] ?: 'N/A'); ?></td>
+                    <td><?php echo $rowNum++; ?></td>
+                    <?php 
+                    // Only show Reference Number for rolls, not for bags
+                    if ($hasRollItems):
+                    ?>
+                    <td><?php echo $isItemRoll ? htmlspecialchars($deliveryItem['reference_number'] ?? 'N/A') : ''; ?></td>
                     <?php endif; ?>
+                    <td><?php echo htmlspecialchars($itemSize); ?></td>
+                    <?php 
+                    // Hide Packaging column for both bags and rolls
+                    // Packaging is not needed in challan
+                    ?>
                     <td><strong><?php echo number_format($quantity, 2) . ' ' . $unitLabel; ?></strong></td>
                     <td><?php echo number_format($unit_price, 2) . ' / ' . (($deliveryUnit === 'kg') ? 'kg' : 'pc'); ?></td>
-                    <td><strong><?php echo number_format($total_cost, 2); ?></strong></td>
+                    <td><strong><?php echo number_format($itemCost, 2); ?></strong></td>
                 </tr>
+                <?php endforeach; ?>
                 <tr class="total-row">
-                    <td colspan="<?php echo $isRoll ? '6' : '7'; ?>" style="text-align: right; font-weight: 700;">Total:</td>
-                    <td><strong style="font-size: 14px;">৳ <?php echo number_format($total_cost, 2); ?></strong></td>
+                    <?php 
+                    // Calculate colspan: S.No (1) + Reference Number (1 if hasRollItems, 0 otherwise) + Size (1) + Quantity (1) + Unit Price (1) = 5 if has rolls, 4 if only bags
+                    $colspan = $hasRollItems ? 5 : 4;
+                    ?>
+                    <td colspan="<?php echo $colspan; ?>" style="text-align: right; font-weight: 700;">Total:</td>
+                    <td><strong style="font-size: 14px;">৳ <?php echo number_format($grandTotal, 2); ?></strong></td>
                 </tr>
             </tbody>
         </table>

@@ -36,27 +36,35 @@ $conn = SecurityConfig::getConnection();
 $reporter_id = $_SESSION['user_id'];
 $reporter_name = $_SESSION['username'];
 
-// Fetch reference numbers from roll_received (roll received entry) that don't have UV reports yet - support bundles
+// Fetch reference numbers from roll_entry that don't have UV reports yet - support bundles and line detection
+// Tests are done AFTER roll entry submission
 $references = [];
 $bundleReferences = [];
 
 $refQuery = $conn->query("
-    SELECT DISTINCT r.reference_number, MAX(r.created_at) as created_at
-    FROM roll_received r
-    WHERE r.reference_number IS NOT NULL 
-    AND r.is_deleted = 0
-    AND r.reference_number NOT IN (
+    SELECT DISTINCT re.reference_number, MAX(re.date_time) as created_at
+    FROM roll_entry re
+    WHERE re.reference_number IS NOT NULL 
+    AND re.reference_number NOT IN (
         SELECT DISTINCT reference 
         FROM weathering_exposure_reports 
         WHERE reference IS NOT NULL AND reference != ''
     )
-    GROUP BY r.reference_number
+    GROUP BY re.reference_number
     ORDER BY created_at DESC 
     LIMIT 50
 ");
 if ($refQuery) {
     while ($row = $refQuery->fetch_assoc()) {
         $ref = $row['reference_number'];
+        
+        // Detect line number (L1 or L2) from reference
+        $lineIndicator = '';
+        if (strpos($ref, 'L1') !== false) {
+            $lineIndicator = 'L1';
+        } elseif (strpos($ref, 'L2') !== false) {
+            $lineIndicator = 'L2';
+        }
         
         // Check if this is a bundle reference (ends with -N pattern)
         if (preg_match('/-(\d+)$/', $ref, $matches)) {
@@ -66,10 +74,16 @@ if ($refQuery) {
             $bundleReferences[] = [
                 'reference' => $ref,
                 'base_reference' => $baseRef,
-                'roll_count' => $rollCount
+                'roll_count' => $rollCount,
+                'line' => $lineIndicator,
+                'date' => $row['created_at']
             ];
         } else {
-            $references[] = $ref;
+            $references[] = [
+                'reference' => $ref,
+                'line' => $lineIndicator,
+                'date' => $row['created_at']
+            ];
         }
     }
 }
@@ -245,7 +259,7 @@ class WeatheringExposureTestHandler {
         
         // Required fields validation
         $required_fields = [
-            'sample_collected_from', 'reference', 
+            'sample_collected_from', 
             'sample_description', 'recipe', 'received_date', 'test_start_date', 
             'test_end_date', 'testing_method', 'test_name', 'test_speed', 
             'gauge_length', 'specimen_size', 'temperature', 'rh_percent', 
@@ -253,9 +267,31 @@ class WeatheringExposureTestHandler {
         ];
         
         foreach ($required_fields as $field) {
-            if (empty(trim($data[$field]))) {
+            if (empty(trim($data[$field] ?? ''))) {
                 $errors[] = ucfirst(str_replace('_', ' ', $field)) . ' is required';
             }
+        }
+        
+        // Validate reference: either 'reference', 'individual_roll_reference', or 'from_reference'/'to_reference' must be provided
+        $hasReference = false;
+        if (!empty(trim($data['individual_roll_reference'] ?? ''))) {
+            $hasReference = true;
+        } elseif (!empty(trim($data['from_reference'] ?? '')) && !empty(trim($data['to_reference'] ?? ''))) {
+            $hasReference = true;
+        } elseif (!empty(trim($data['reference'] ?? ''))) {
+            // Check if it's a range format (from|to)
+            if (strpos($data['reference'], '|') !== false) {
+                $parts = explode('|', $data['reference']);
+                if (count($parts) === 2 && !empty(trim($parts[0])) && !empty(trim($parts[1]))) {
+                    $hasReference = true;
+                }
+            } else {
+                $hasReference = true;
+            }
+        }
+        
+        if (!$hasReference) {
+            $errors[] = 'Reference is required. Please select a reference or use From/To reference selection.';
         }
         
         // Date validation
@@ -335,25 +371,111 @@ class WeatheringExposureTestHandler {
             $user_role = strtolower(trim($_SESSION['role'] ?? ''));
             $status = ($user_role === 'admin' || $user_role === 'agm ops' || $user_role === 'agm operations') ? 'approved' : 'pending';
             
+            // Generate individual roll references from from-to range (same as QC test order and characteristics test)
+            $bulk_rolls = [];
+            if (isset($data['from_reference']) && isset($data['to_reference']) && 
+                !empty($data['from_reference']) && !empty($data['to_reference'])) {
+                
+                $fromRef = trim($data['from_reference']);
+                $toRef = trim($data['to_reference']);
+                
+                // Extract base reference and roll numbers
+                $fromBaseRef = '';
+                $fromRollNum = 0;
+                $toBaseRef = '';
+                $toRollNum = 0;
+                
+                if (preg_match('/^(.+)-(\d+)$/', $fromRef, $fromMatches)) {
+                    $fromBaseRef = $fromMatches[1];
+                    $fromRollNum = (int)$fromMatches[2];
+                } else {
+                    $fromBaseRef = $fromRef;
+                    $fromRollNum = 1;
+                }
+                
+                if (preg_match('/^(.+)-(\d+)$/', $toRef, $toMatches)) {
+                    $toBaseRef = $toMatches[1];
+                    $toRollNum = (int)$toMatches[2];
+                } else {
+                    $toBaseRef = $toRef;
+                    $toRollNum = 1;
+                }
+                
+                // If same base, generate all references from fromRollNum to toRollNum
+                if ($fromBaseRef === $toBaseRef && $fromRollNum > 0 && $toRollNum > 0) {
+                    for ($roll = $fromRollNum; $roll <= $toRollNum; $roll++) {
+                        $bulk_rolls[] = $fromBaseRef . '-' . $roll;
+                    }
+                    error_log("UV Test: Generated " . count($bulk_rolls) . " individual references from range: " . $fromRef . " to " . $toRef);
+                } else {
+                    // Different bases - add both endpoints
+                    $bulk_rolls[] = $fromRef;
+                    if ($toRef !== $fromRef) {
+                        $bulk_rolls[] = $toRef;
+                    }
+                    error_log("UV Test: WARNING - Different base references in range. Generated " . count($bulk_rolls) . " references.");
+                }
+            }
+            
             // Get reference - use individual roll reference if bundle is selected
+            // Or use from_reference/to_reference if line-based selection is used
             $reference = '';
             $bundle_reference = null;
+            
             if (isset($data['individual_roll_reference']) && !empty($data['individual_roll_reference'])) {
                 $reference = trim($data['individual_roll_reference']);
                 // Get bundle reference if individual roll is selected
                 if (isset($data['reference']) && !empty($data['reference'])) {
                     $bundle_reference = trim($data['reference']); // Original bundle reference
                 }
+            } elseif (!empty($bulk_rolls)) {
+                // Range selected - bundle_reference will be set for all rolls
+                $bundle_reference = trim($data['from_reference']) . '|' . trim($data['to_reference']);
+                // reference will be set per roll in the loop
             } elseif (isset($data['reference']) && !empty($data['reference'])) {
                 $reference = trim($data['reference']);
+                // Check if this is a range format (from|to)
+                if (strpos($reference, '|') !== false) {
+                    $parts = explode('|', $reference);
+                    if (count($parts) === 2) {
+                        $reference = trim($parts[0]); // Use from reference
+                        $bundle_reference = $reference; // Store the range format
+                    }
+                }
             }
+            
+            // Process each roll in the range (or single reference)
+            $rolls_to_process = !empty($bulk_rolls) ? $bulk_rolls : [];
+            if (empty($rolls_to_process) && !empty($reference)) {
+                $rolls_to_process = [$reference];
+            }
+            
+            if (empty($rolls_to_process)) {
+                throw new Exception("No reference selected. Please select a reference or range.");
+            }
+            
+            $inserted_count = 0;
+            $report_numbers = [];
+            $base_report_number = $report_number;
+            
+            foreach ($rolls_to_process as $roll_ref) {
+                // For bulk rolls, use the individual roll as reference
+                $current_reference = !empty($bulk_rolls) ? $roll_ref : $reference;
+                
+                // Generate unique report number for each roll
+                if ($inserted_count > 0) {
+                    // Increment report number for subsequent rolls
+                    $seq = $this->generateAndIncrementReportNumber();
+                    $report_number = $seq;
+                }
+                $report_numbers[] = $report_number;
             
             // Bind types: 20 strings, 1 int (reporter_id), 2 strings
             $stmt->bind_param(
                 "ssssssssssssssssssssiss",
                 $report_number, 
                 $data['sample_collected_from'], 
-                $reference,
+                    $current_reference,
                 $bundle_reference, 
                 $data['sample_description'], 
                 $data['recipe'], 
@@ -377,16 +499,25 @@ class WeatheringExposureTestHandler {
             );
             
             if (!$stmt->execute()) {
-                throw new Exception("Error saving report: " . $stmt->error);
+                    error_log("UV Test: Failed to insert roll " . $roll_ref . ": " . $stmt->error);
+                    continue;
             }
             
-            $report_id = $this->conn->insert_id;
-            $stmt->close();
+                $inserted_count++;
 
             // Check bundle completion if this is from a bundle and was approved
             if ($bundle_reference && $status === 'approved') {
                 $this->checkAndMarkBundleComplete('weathering_exposure_reports', $bundle_reference);
             }
+            }
+            
+            $stmt->close();
+            
+            if ($inserted_count === 0) {
+                throw new Exception("Failed to save any reports. Please check your data and try again.");
+            }
+            
+            $report_id = $this->conn->insert_id;
 
             // Compatibility insert disabled
             if (false) {
@@ -489,11 +620,16 @@ class WeatheringExposureTestHandler {
             $compat->close();
             }
             
-            // Log the action
-            $this->logAction('report_created', $report_id, "Report created with number: $report_number");
+            // Log the action for the first report
+            if ($inserted_count > 0) {
+                $this->logAction('report_created', $report_id, "Report created with number: " . $report_numbers[0] . ($inserted_count > 1 ? " (and " . ($inserted_count - 1) . " more)" : ""));
+            }
             
             $this->conn->commit();
-            return ['success' => true, 'report_number' => $report_number, 'report_id' => $report_id];
+            $message = $inserted_count > 1 
+                ? "{$inserted_count} UV test reports submitted successfully! Report Numbers: " . implode(', ', array_slice($report_numbers, 0, 3)) . (count($report_numbers) > 3 ? '...' : '')
+                : "UV test report submitted successfully! Report Number: " . $report_numbers[0];
+            return ['success' => true, 'report_number' => $report_numbers[0], 'report_id' => $report_id, 'count' => $inserted_count, 'report_numbers' => $report_numbers];
             
         } catch (Exception $e) {
             $this->conn->rollback();
@@ -856,9 +992,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_report'])) {
         if ($result['success']) {
             $user_role = strtolower(trim($_SESSION['role'] ?? ''));
             if (in_array($user_role, ['admin', 'agm ops', 'agm operations'])) {
-                $_SESSION['success_message'] = "UV Test Report saved and auto-approved! Report Number: " . $result['report_number'];
+                $message_text = isset($result['count']) && $result['count'] > 1
+                    ? "{$result['count']} UV Test Reports saved and auto-approved! Report Numbers: " . implode(', ', array_slice($result['report_numbers'], 0, 3)) . (count($result['report_numbers']) > 3 ? '...' : '')
+                    : "UV Test Report saved and auto-approved! Report Number: " . $result['report_number'];
+                $_SESSION['success_message'] = $message_text;
             } else {
-                $_SESSION['success_message'] = "UV Test Report submitted successfully! Report Number: " . $result['report_number'] . " - Status: Pending Approval";
+                $message_text = isset($result['count']) && $result['count'] > 1
+                    ? "{$result['count']} UV Test Reports submitted successfully! Report Numbers: " . implode(', ', array_slice($result['report_numbers'], 0, 3)) . (count($result['report_numbers']) > 3 ? '...' : '') . " - Status: Pending Approval"
+                    : "UV Test Report submitted successfully! Report Number: " . $result['report_number'] . " - Status: Pending Approval";
+                $_SESSION['success_message'] = $message_text;
             }
             // Redirect to refresh the page and update the dropdown
             // Add timestamp to force fresh load and prevent caching
@@ -891,7 +1033,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['wf_action'])) {
     } else {
         $result = $handler->approveOrReject($wf_report_number, $wf_action, $wf_comment);
         if ($result['success']) {
-            $message = ($wf_action === 'approved' ? '✅ Approved: ' : '✅ Rejected: ') . htmlspecialchars($wf_report_number);
+            $message = ($wf_action === 'approved' ? 'Approved: ' : 'Rejected: ') . htmlspecialchars($wf_report_number);
         } else {
             $error = '❌ Error: ' . $result['error'];
         }
@@ -971,7 +1113,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['wf_action'])) {
   
   <?php if ($message): ?>
     <div class="alert alert-success" style="background:#d4edda;color:#155724;padding:12px;border-radius:6px;border:1px solid #c3e6cb;margin-bottom:15px;">
-      ✅ <?php echo htmlspecialchars($message); ?>
+      <?php echo htmlspecialchars($message); ?>
     </div>
   <?php endif; ?>
 
@@ -981,7 +1123,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['wf_action'])) {
     </div>
   <?php endif; ?>
 
-  <form method="POST" action="">
+  <form method="POST" action="" onsubmit="return validateUVForm();">
     <!-- Back to Dashboard Link -->
     <div style="margin-bottom: 15px;">
       <a href="../index.php" style="background:#e74c3c; color:#fff; text-decoration: none; padding: 6px 12px; border-radius: 4px; display: inline-block; font-size: 14px;">
@@ -1085,22 +1227,62 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['wf_action'])) {
         <label>Sample Collected From:</label>
         <input type="text" name="sample_collected_from" required>
       </div>
-      <div class="form-group">
+      <div class="form-group" style="grid-column: 1 / -1;">
         <label>Reference:</label>
-        <select name="reference" id="uv_reference" onchange="handleUVReferenceSelection(this.value)" required>
+        
+        <!-- Line Selection Buttons -->
+        <div id="uv_line_selection_buttons" style="display:flex; gap:10px; margin-bottom:10px;">
+          <button type="button" id="uv_line1_btn" class="line-btn" onclick="filterUVByLine('L1')" style="padding:8px 16px; border:2px solid #3498db; border-radius:6px; background:#e3f2fd; color:#1565C0; font-weight:600; cursor:pointer;">
+            Line 1
+          </button>
+          <button type="button" id="uv_line2_btn" class="line-btn" onclick="filterUVByLine('L2')" style="padding:8px 16px; border:2px solid #3498db; border-radius:6px; background:#e3f2fd; color:#1565C0; font-weight:600; cursor:pointer;">
+            Line 2
+          </button>
+          <button type="button" id="uv_line_all_btn" class="line-btn active" onclick="filterUVByLine('all')" style="padding:8px 16px; border:2px solid #3498db; border-radius:6px; background:#2196F3; color:#ffffff; font-weight:600; cursor:pointer;">
+            All Lines
+          </button>
+        </div>
+        
+        <!-- From/To Reference Selection (shown when line is selected) -->
+        <div id="uv_bulk_reference_selection" style="display:none; margin-bottom:10px; padding:10px; background:#f8f9fa; border:1px solid #ddd; border-radius:6px;">
+          <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+            <label style="font-weight:600; margin:0;">From Reference:</label>
+            <select id="uv_from_reference" style="min-width:250px; padding:5px; border:1px solid #ccc; border-radius:4px;" onchange="updateUVReferenceRange(true); handleUVFromToReferenceChange();">
+              <option value="">-- Select From Reference --</option>
+            </select>
+            <label style="font-weight:600; margin:0;">To Reference:</label>
+            <select id="uv_to_reference" style="min-width:250px; padding:5px; border:1px solid #ccc; border-radius:4px;" onchange="updateUVReferenceRange(false); handleUVFromToReferenceChange();">
+              <option value="">-- Select To Reference --</option>
+            </select>
+            <button type="button" onclick="applyUVBulkReferenceSelection()" style="padding:6px 12px; background:#3498db; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:600;">
+              Apply
+            </button>
+            <button type="button" onclick="clearUVBulkReferenceSelection()" style="padding:6px 12px; background:#6c757d; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:600;">
+              Clear
+            </button>
+          </div>
+          <!-- Hidden input to store the selected product_reference when line-based selection is used -->
+          <input type="hidden" id="uv_line_based_product_reference" name="product_reference" value="">
+        </div>
+        
+        <!-- Production Product Reference Dropdown (shown when "All Lines" is selected) -->
+        <select name="reference" id="uv_reference" onchange="handleUVReferenceSelection(this.value)" style="padding:10px; border:1px solid #ccc; border-radius:6px; width:100%;">
           <option value="">-- Select Reference Number --</option>
           <?php 
           // Show bundle references
           foreach($bundleReferences as $bundle): ?>
-            <option value="<?php echo htmlspecialchars($bundle['reference']); ?>" data-is-bundle="true" data-base-ref="<?php echo htmlspecialchars($bundle['base_reference']); ?>" data-roll-count="<?php echo $bundle['roll_count']; ?>">
+            <option value="<?php echo htmlspecialchars($bundle['reference']); ?>" data-is-bundle="true" data-base-ref="<?php echo htmlspecialchars($bundle['base_reference']); ?>" data-roll-count="<?php echo $bundle['roll_count']; ?>" data-line="<?php echo htmlspecialchars($bundle['line'] ?? ''); ?>">
               <?php echo htmlspecialchars($bundle['reference']); ?> (Bundle - <?php echo $bundle['roll_count']; ?> rolls)
             </option>
           <?php endforeach; ?>
           <?php 
           // Show single roll references
-          foreach($references as $ref): ?>
-            <option value="<?php echo htmlspecialchars($ref); ?>" data-is-bundle="false">
-              <?php echo htmlspecialchars($ref); ?>
+          foreach($references as $ref): 
+            $refValue = is_array($ref) ? $ref['reference'] : $ref;
+            $lineIndicator = is_array($ref) ? ($ref['line'] ?? '') : '';
+          ?>
+            <option value="<?php echo htmlspecialchars($refValue); ?>" data-is-bundle="false" data-line="<?php echo htmlspecialchars($lineIndicator); ?>">
+              <?php echo htmlspecialchars($refValue); ?>
             </option>
           <?php endforeach; ?>
         </select>
@@ -1325,8 +1507,8 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Add event listener to form submission
     document.querySelector('form').addEventListener('submit', function(event) {
-        if (!validateDates()) {
-            event.preventDefault(); // Prevent form submission if dates are invalid
+        if (!validateUVForm()) {
+            event.preventDefault(); // Prevent form submission if validation fails
         }
     });
 });
@@ -1363,6 +1545,478 @@ function validateDates() {
             return false;
         }
     }
+    return true;
+}
+
+// Filter references by Line (L1 or L2)
+function filterUVByLine(line) {
+    const productRefSelect = document.getElementById('uv_reference');
+    const bulkRefSelection = document.getElementById('uv_bulk_reference_selection');
+    
+    // Update button styles
+    const line1Btn = document.getElementById('uv_line1_btn');
+    const line2Btn = document.getElementById('uv_line2_btn');
+    const lineAllBtn = document.getElementById('uv_line_all_btn');
+    
+    if (line1Btn) line1Btn.classList.remove('active');
+    if (line2Btn) line2Btn.classList.remove('active');
+    if (lineAllBtn) lineAllBtn.classList.remove('active');
+    
+    if (line === 'L1' && line1Btn) {
+        line1Btn.classList.add('active');
+        line1Btn.style.background = '#2196F3';
+        line1Btn.style.color = '#ffffff';
+        line2Btn.style.background = '#e3f2fd';
+        line2Btn.style.color = '#1565C0';
+        lineAllBtn.style.background = '#e3f2fd';
+        lineAllBtn.style.color = '#1565C0';
+    } else if (line === 'L2' && line2Btn) {
+        line2Btn.classList.add('active');
+        line2Btn.style.background = '#2196F3';
+        line2Btn.style.color = '#ffffff';
+        line1Btn.style.background = '#e3f2fd';
+        line1Btn.style.color = '#1565C0';
+        lineAllBtn.style.background = '#e3f2fd';
+        lineAllBtn.style.color = '#1565C0';
+    } else if (line === 'all' && lineAllBtn) {
+        lineAllBtn.classList.add('active');
+        lineAllBtn.style.background = '#2196F3';
+        lineAllBtn.style.color = '#ffffff';
+        line1Btn.style.background = '#e3f2fd';
+        line1Btn.style.color = '#1565C0';
+        line2Btn.style.background = '#e3f2fd';
+        line2Btn.style.color = '#1565C0';
+    }
+    
+    if (line === 'L1' || line === 'L2') {
+        // Hide single reference dropdown
+        productRefSelect.style.display = 'none';
+        productRefSelect.value = '';
+        productRefSelect.removeAttribute('required');
+        productRefSelect.removeAttribute('name'); // Remove name temporarily so it's not submitted
+        
+        // Show From/To reference selection
+        if (bulkRefSelection) {
+            bulkRefSelection.style.display = 'block';
+            populateUVLineReferences(line);
+        }
+        
+        // Make From/To required
+        const fromRefSelect = document.getElementById('uv_from_reference');
+        const toRefSelect = document.getElementById('uv_to_reference');
+        if (fromRefSelect) {
+            fromRefSelect.setAttribute('required', 'required');
+            fromRefSelect.setAttribute('name', 'from_reference'); // Ensure name is set
+        }
+        if (toRefSelect) {
+            toRefSelect.setAttribute('required', 'required');
+            toRefSelect.setAttribute('name', 'to_reference'); // Ensure name is set
+        }
+    } else {
+        // Show single reference dropdown for "All Lines"
+        productRefSelect.style.display = 'block';
+        productRefSelect.setAttribute('required', 'required');
+        productRefSelect.setAttribute('name', 'reference'); // Ensure name is set
+        
+        // Hide From/To reference selection
+        if (bulkRefSelection) {
+            bulkRefSelection.style.display = 'none';
+            clearUVBulkReferenceSelection();
+        }
+        
+        // Remove required from From/To and remove names so they're not submitted
+        const fromRefSelect = document.getElementById('uv_from_reference');
+        const toRefSelect = document.getElementById('uv_to_reference');
+        if (fromRefSelect) {
+            fromRefSelect.removeAttribute('required');
+            fromRefSelect.removeAttribute('name');
+            fromRefSelect.value = '';
+        }
+        if (toRefSelect) {
+            toRefSelect.removeAttribute('required');
+            toRefSelect.removeAttribute('name');
+            toRefSelect.value = '';
+        }
+        
+        // Clear hidden input
+        const lineBasedProductRef = document.getElementById('uv_line_based_product_reference');
+        if (lineBasedProductRef) {
+            lineBasedProductRef.value = '';
+        }
+        
+        // Filter options for "All Lines"
+        const currentValue = productRefSelect.value;
+        Array.from(productRefSelect.options).forEach(option => {
+            if (option.value === '') {
+                option.style.display = '';
+                return;
+            }
+            option.style.display = '';
+        });
+        
+        // Clear selection if current value doesn't match filter
+        if (currentValue) {
+            const selectedOption = productRefSelect.querySelector(`option[value="${currentValue}"]`);
+            if (selectedOption && selectedOption.style.display === 'none') {
+                productRefSelect.value = '';
+                handleUVReferenceSelection('');
+            }
+        }
+    }
+}
+
+// Populate From/To reference dropdowns with references for selected line
+function populateUVLineReferences(line) {
+    const productRefSelect = document.getElementById('uv_reference');
+    const fromRefSelect = document.getElementById('uv_from_reference');
+    const toRefSelect = document.getElementById('uv_to_reference');
+    
+    if (!productRefSelect || !fromRefSelect || !toRefSelect) return;
+    
+    // Clear existing options
+    fromRefSelect.innerHTML = '<option value="">-- Select From Reference --</option>';
+    toRefSelect.innerHTML = '<option value="">-- Select To Reference --</option>';
+    
+    // Collect all references for the selected line
+    const lineReferences = [];
+    Array.from(productRefSelect.options).forEach(option => {
+        if (option.value && option.value !== '') {
+            const optionLine = option.getAttribute('data-line') || '';
+            if (optionLine === line) {
+                const isBundle = option.getAttribute('data-is-bundle') === 'true';
+                lineReferences.push({
+                    value: option.value,
+                    text: option.textContent,
+                    isBundle: isBundle,
+                    baseRef: option.getAttribute('data-base-ref') || '',
+                    rollCount: parseInt(option.getAttribute('data-roll-count')) || 1
+                });
+            }
+        }
+    });
+    
+    // Sort references by date (extract date from reference number)
+    function extractDateFromReference(ref) {
+        const monthAbbr = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+        for (let i = 0; i < monthAbbr.length; i++) {
+            const month = monthAbbr[i];
+            const pattern = new RegExp(month + '(\\d{2})');
+            const match = ref.match(pattern);
+            if (match) {
+                const day = parseInt(match[1]);
+                return ((i + 1) * 100) + day;
+            }
+        }
+        return 9999;
+    }
+    
+    // Sort by date first, then alphabetically for same date
+    lineReferences.sort((a, b) => {
+        const dateA = extractDateFromReference(a.value);
+        const dateB = extractDateFromReference(b.value);
+        if (dateA !== dateB) {
+            return dateA - dateB;
+        }
+        return a.value.localeCompare(b.value);
+    });
+    
+    // Populate both dropdowns
+    lineReferences.forEach(ref => {
+        const fromOption = document.createElement('option');
+        fromOption.value = ref.value;
+        fromOption.textContent = ref.text;
+        fromOption.setAttribute('data-is-bundle', ref.isBundle);
+        fromOption.setAttribute('data-base-ref', ref.baseRef);
+        fromOption.setAttribute('data-roll-count', ref.rollCount);
+        fromRefSelect.appendChild(fromOption);
+        
+        const toOption = document.createElement('option');
+        toOption.value = ref.value;
+        toOption.textContent = ref.text;
+        toOption.setAttribute('data-is-bundle', ref.isBundle);
+        toOption.setAttribute('data-base-ref', ref.baseRef);
+        toOption.setAttribute('data-roll-count', ref.rollCount);
+        toRefSelect.appendChild(toOption);
+    });
+}
+
+// Update To Reference dropdown based on From Reference selection
+function updateUVReferenceRange(autoSelect = true) {
+    const fromRefSelect = document.getElementById('uv_from_reference');
+    const toRefSelect = document.getElementById('uv_to_reference');
+    
+    if (!fromRefSelect || !toRefSelect) return;
+    
+    const fromValue = fromRefSelect.value;
+    if (!fromValue) {
+        const allOptions = Array.from(toRefSelect.options);
+        allOptions.forEach(option => {
+            option.style.display = '';
+        });
+        return;
+    }
+    
+    // Get the selected From reference option
+    const fromOption = fromRefSelect.options[fromRefSelect.selectedIndex];
+    const isBundle = fromOption?.getAttribute('data-is-bundle') === 'true';
+    let baseRef = fromOption?.getAttribute('data-base-ref') || '';
+    let rollCount = parseInt(fromOption?.getAttribute('data-roll-count')) || 1;
+    
+    // Extract base reference from the selected value if not provided
+    if (!baseRef) {
+        const rollMatch = fromValue.match(/^(.+)-(\d+)$/);
+        if (rollMatch) {
+            baseRef = rollMatch[1];
+        } else {
+            baseRef = fromValue;
+        }
+    }
+    
+    // Find the bundle reference to get the actual roll count
+    if (baseRef) {
+        Array.from(fromRefSelect.options).forEach(option => {
+            if (option.value && option.value !== '') {
+                const optionBaseRef = option.getAttribute('data-base-ref') || option.value.replace(/-\d+$/, '');
+                const optionIsBundle = option.getAttribute('data-is-bundle') === 'true';
+                if (optionIsBundle && optionBaseRef === baseRef) {
+                    rollCount = parseInt(option.getAttribute('data-roll-count')) || rollCount;
+                }
+            }
+        });
+    }
+    
+    // Find the index of the selected From reference in the To dropdown
+    let fromIndex = -1;
+    Array.from(toRefSelect.options).forEach((option, index) => {
+        if (option.value === fromValue) {
+            fromIndex = index;
+        }
+    });
+    
+    // If From reference is a bundle, we need to find the last roll of that bundle
+    let targetFromIndex = fromIndex;
+    if (isBundle && baseRef && rollCount > 1) {
+        const lastRollRef = baseRef + '-' + rollCount;
+        
+        let foundLastRoll = false;
+        Array.from(toRefSelect.options).forEach((option, index) => {
+            if (option.value === lastRollRef) {
+                targetFromIndex = index;
+                foundLastRoll = true;
+            }
+        });
+        
+        if (!foundLastRoll) {
+            Array.from(toRefSelect.options).forEach((option, index) => {
+                if (index > fromIndex && option.value) {
+                    const optionBaseRef = option.getAttribute('data-base-ref') || option.value.replace(/-\d+$/, '');
+                    if (optionBaseRef !== baseRef) {
+                        if (targetFromIndex === fromIndex) {
+                            targetFromIndex = index;
+                        }
+                    }
+                }
+            });
+            
+            if (targetFromIndex === fromIndex) {
+                targetFromIndex = fromIndex + 1;
+            }
+        }
+    }
+    
+    // Show only references from the target From reference onwards
+    Array.from(toRefSelect.options).forEach((option, index) => {
+        if (index === 0) {
+            option.style.display = '';
+        } else if (index >= targetFromIndex) {
+            option.style.display = '';
+        } else {
+            option.style.display = 'none';
+        }
+    });
+    
+    // Auto-select the last roll of the bundle in To dropdown
+    if (autoSelect) {
+        let actualBaseRef = baseRef;
+        let actualRollCount = rollCount;
+        
+        if (!actualBaseRef) {
+            const rollMatch = fromValue.match(/^(.+)-(\d+)$/);
+            if (rollMatch) {
+                actualBaseRef = rollMatch[1];
+            } else {
+                actualBaseRef = fromValue;
+            }
+        }
+        
+        if (actualBaseRef) {
+            Array.from(fromRefSelect.options).forEach(option => {
+                if (option.value && option.value !== '') {
+                    const optionBaseRef = option.getAttribute('data-base-ref') || option.value.replace(/-\d+$/, '');
+                    const optionIsBundle = option.getAttribute('data-is-bundle') === 'true';
+                    if (optionIsBundle && optionBaseRef === actualBaseRef) {
+                        actualRollCount = parseInt(option.getAttribute('data-roll-count')) || actualRollCount;
+                    }
+                }
+            });
+        }
+        
+        if (actualBaseRef && actualRollCount > 1) {
+            const lastRollRef = actualBaseRef + '-' + actualRollCount;
+            let found = false;
+            Array.from(toRefSelect.options).forEach(option => {
+                if (option.value === lastRollRef && option.style.display !== 'none') {
+                    toRefSelect.value = lastRollRef;
+                    found = true;
+                    return;
+                }
+            });
+            
+            // If exact match not found, find the highest roll number from this bundle that's visible
+            if (!found) {
+                let highestRoll = 0;
+                let highestRollRef = '';
+                Array.from(toRefSelect.options).forEach(option => {
+                    if (option.style.display !== 'none' && option.value) {
+                        const optionBaseRef = option.getAttribute('data-base-ref') || option.value.replace(/-\d+$/, '');
+                        if (optionBaseRef === actualBaseRef) {
+                            const rollMatch = option.value.match(/-(\d+)$/);
+                            if (rollMatch) {
+                                const rollNum = parseInt(rollMatch[1]);
+                                if (rollNum > highestRoll && rollNum <= actualRollCount) {
+                                    highestRoll = rollNum;
+                                    highestRollRef = option.value;
+                                }
+                            }
+                        }
+                    }
+                });
+                if (highestRollRef) {
+                    toRefSelect.value = highestRollRef;
+                }
+            }
+        } else if (fromIndex >= 0) {
+            // Not a bundle, just select the same reference
+            toRefSelect.value = fromValue;
+        }
+    }
+}
+
+// Apply bulk reference selection
+function applyUVBulkReferenceSelection() {
+    const fromRef = document.getElementById('uv_from_reference').value;
+    const toRef = document.getElementById('uv_to_reference').value;
+    
+    if (!fromRef || !toRef) {
+        alert('Please select both From and To references');
+        return;
+    }
+    
+    // Store the range in hidden input
+    const lineBasedProductRef = document.getElementById('uv_line_based_product_reference');
+    if (lineBasedProductRef) {
+        lineBasedProductRef.value = fromRef + ' to ' + toRef;
+    }
+    
+    // Update the main reference dropdown to show the range
+    const productRefSelect = document.getElementById('uv_reference');
+    if (productRefSelect) {
+        // Find or create an option for the range
+        let rangeOption = Array.from(productRefSelect.options).find(opt => opt.value === fromRef + '|' + toRef);
+        if (!rangeOption) {
+            rangeOption = document.createElement('option');
+            rangeOption.value = fromRef + '|' + toRef;
+            rangeOption.textContent = fromRef + ' to ' + toRef;
+            productRefSelect.appendChild(rangeOption);
+        }
+        productRefSelect.value = rangeOption.value;
+    }
+}
+
+// Clear bulk reference selection
+function clearUVBulkReferenceSelection() {
+    const fromRefSelect = document.getElementById('uv_from_reference');
+    const toRefSelect = document.getElementById('uv_to_reference');
+    const lineBasedProductRef = document.getElementById('uv_line_based_product_reference');
+    
+    if (fromRefSelect) fromRefSelect.value = '';
+    if (toRefSelect) toRefSelect.value = '';
+    if (lineBasedProductRef) lineBasedProductRef.value = '';
+    
+    // Reset To dropdown to show all options
+    if (toRefSelect) {
+        Array.from(toRefSelect.options).forEach(option => {
+            option.style.display = '';
+        });
+    }
+}
+
+// Handle From/To reference change
+function handleUVFromToReferenceChange() {
+    // This function can be extended to perform validation or other actions
+    // when From/To references change
+}
+
+// Validate form before submission
+function validateUVForm() {
+    const productRefSelect = document.getElementById('uv_reference');
+    const fromRefSelect = document.getElementById('uv_from_reference');
+    const toRefSelect = document.getElementById('uv_to_reference');
+    const individualRollSelect = document.getElementById('uv_individual_roll_reference');
+    
+    // Check if line-based selection is active (From/To visible)
+    const bulkRefSelection = document.getElementById('uv_bulk_reference_selection');
+    const isLineBased = bulkRefSelection && bulkRefSelection.style.display !== 'none';
+    
+    if (isLineBased) {
+        // Validate From/To references
+        const fromValue = fromRefSelect ? fromRefSelect.value : '';
+        const toValue = toRefSelect ? toRefSelect.value : '';
+        
+        if (!fromValue || !toValue) {
+            alert('Please select both From Reference and To Reference');
+            if (!fromValue && fromRefSelect) fromRefSelect.focus();
+            else if (!toValue && toRefSelect) toRefSelect.focus();
+            return false;
+        }
+        
+        // Ensure the reference field name is removed so it doesn't interfere
+        if (productRefSelect) {
+            productRefSelect.removeAttribute('name');
+        }
+        
+        // Ensure from/to have their names set
+        if (fromRefSelect) fromRefSelect.setAttribute('name', 'from_reference');
+        if (toRefSelect) toRefSelect.setAttribute('name', 'to_reference');
+    } else {
+        // Validate single reference or individual roll
+        const refValue = productRefSelect ? productRefSelect.value : '';
+        const individualValue = individualRollSelect && individualRollSelect.style.display !== 'none' 
+            ? individualRollSelect.value : '';
+        
+        if (!refValue && !individualValue) {
+            alert('Please select a reference');
+            if (productRefSelect) productRefSelect.focus();
+            return false;
+        }
+        
+        // Ensure the reference field has its name set
+        if (productRefSelect) {
+            productRefSelect.setAttribute('name', 'reference');
+        }
+        
+        // Remove names from from/to so they don't interfere
+        if (fromRefSelect) fromRefSelect.removeAttribute('name');
+        if (toRefSelect) toRefSelect.removeAttribute('name');
+    }
+    
+    // Also validate dates
+    if (typeof validateDates === 'function') {
+        if (!validateDates()) {
+            return false;
+        }
+    }
+    
     return true;
 }
 

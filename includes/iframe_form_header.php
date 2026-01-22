@@ -20,7 +20,7 @@ $menuItems = [
             ['text' => 'Fiber Test Report', 'link' => 'forms/fiber_test_report.php', 'icon' => 'fas fa-dna'],
             ['text' => 'Sewing Thread Report', 'link' => 'forms/sewing_thread_report.php', 'icon' => 'fas fa-scroll'],
             ['text' => 'Fiber Entry', 'link' => 'forms/fiber_entry.php', 'icon' => 'fas fa-boxes'],
-            ['text' => 'Fiber to Roll Entry', 'link' => 'forms/fiber_to_roll_entry.php', 'icon' => 'fas fa-exchange-alt'],
+            ['text' => 'Fiber Input Entry', 'link' => 'forms/fiber_to_roll_entry.php', 'icon' => 'fas fa-exchange-alt'],
             ['text' => 'Roll Entry', 'link' => 'forms/roll_entry.php', 'icon' => 'fas fa-dolly-flatbed'],
             ['text' => 'Roll Internal Transfer Entry', 'link' => 'forms/roll_transfer_entry.php', 'icon' => 'fas fa-truck-moving'],
             ['text' => 'Fiber to Roll Conversion Report', 'link' => 'reports/fiber_to_roll_conversion.php', 'icon' => 'fas fa-chart-line'],

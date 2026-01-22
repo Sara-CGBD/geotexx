@@ -48,12 +48,22 @@ try {
 // Fetch store received entries for reference dropdown (exclude only if tenacity yarn test already done)
 $storeEntries = [];
 try {
-    $storeQuery = $conn->query("SELECT sre.entry_number, sre.material_type, sre.amount_kg, sre.date_time as received_date 
+    // Use NOT EXISTS for more reliable exclusion of submitted references
+    $storeQuery = $conn->query("SELECT DISTINCT sre.entry_number, sre.material_type, sre.amount_kg, sre.date_time as received_date 
                                  FROM store_received_entries sre
-                                 WHERE sre.entry_number NOT IN (
-                                     SELECT DISTINCT store_entry_reference 
-                                     FROM tenacity_yarn_reports 
-                                     WHERE store_entry_reference IS NOT NULL
+                                 WHERE sre.entry_number IS NOT NULL 
+                                 AND sre.entry_number != ''
+                                 AND TRIM(sre.entry_number) != ''
+                                 AND NOT EXISTS (
+                                     SELECT 1 
+                                     FROM tenacity_yarn_reports tyr 
+                                     WHERE tyr.store_entry_reference IS NOT NULL
+                                     AND tyr.store_entry_reference != ''
+                                     AND (
+                                         tyr.store_entry_reference = sre.entry_number
+                                         OR FIND_IN_SET(sre.entry_number, tyr.store_entry_reference) > 0
+                                         OR FIND_IN_SET(TRIM(sre.entry_number), TRIM(tyr.store_entry_reference)) > 0
+                                     )
                                  )
                                  ORDER BY sre.date_time DESC, sre.created_at DESC 
                                  LIMIT 100");
@@ -1461,29 +1471,29 @@ $unit_options = ['dTex', 'cN/dTex', '%'];
             </option>
           <?php endforeach; ?>
           <?php 
-          $storeRefToCheck = null;
+          // Only show "Previously Selected" option in edit mode (when editing a rejected report)
+          // For new submissions, don't show already submitted references
           if ($editMode && !empty($editData['store_entry_reference'])) {
               $storeRefToCheck = $editData['store_entry_reference'];
-          } elseif (!$editMode && $lastSubmittedData && !empty($lastSubmittedData['store_entry_reference'])) {
-              $storeRefToCheck = $lastSubmittedData['store_entry_reference'];
+              
+              // Check if the store entry is not in the dropdown (already used by another report)
+              $store_found = false;
+              foreach ($storeEntries as $entry) {
+                  if ($entry['entry_number'] === $storeRefToCheck) {
+                      $store_found = true;
+                      break;
+                  }
+              }
+              // Only show "Previously Selected" if it's not in the dropdown (meaning it was used in this report being edited)
+              if (!$store_found) {
+              ?>
+              <option value="<?php echo htmlspecialchars($storeRefToCheck); ?>" selected>
+                <?php echo htmlspecialchars($storeRefToCheck); ?> (Previously Selected)
+              </option>
+              <?php 
+              }
           }
-          if ($storeRefToCheck): ?>
-            <?php
-            // Check if the store entry is not in the dropdown (already used)
-            $store_found = false;
-            foreach ($storeEntries as $entry) {
-                if ($entry['entry_number'] === $storeRefToCheck) {
-                    $store_found = true;
-                    break;
-                }
-            }
-            if (!$store_found):
-            ?>
-            <option value="<?php echo htmlspecialchars($storeRefToCheck); ?>" selected>
-              <?php echo htmlspecialchars($storeRefToCheck); ?> (Previously Selected)
-            </option>
-            <?php endif; ?>
-          <?php endif; ?>
+          ?>
         </select>
         <small style="color: #7f8c8d; font-size: 0.85em;">Select the material from store that you are testing</small>
       </div>

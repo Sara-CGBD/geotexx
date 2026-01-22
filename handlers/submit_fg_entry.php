@@ -29,6 +29,9 @@ $conn = SecurityConfig::getConnection();
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     try {
+        // Get user role for validation
+        $userRole = strtolower(trim($_SESSION['role'] ?? ''));
+        
         // Get form data
         $dateTime          = $_POST['date_time'] ?? date('Y-m-d H:i:s');
         $shift             = $_POST['shift'] ?? '';
@@ -38,6 +41,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $cncCuttingBatch   = $_POST['cnc_cutting_batch'] ?? '';
         // Get shift_in_charge value
         $shiftInCharge = trim($_POST['shift_in_charge'] ?? $_POST['qc_inspector'] ?? '');
+        
+        // Role-based validation: Check if user can submit this product type
+        if ($productType === 'roll') {
+            // Only prod_test, production_user, admin, management, agm ops can submit rolls
+            if (!in_array($userRole, ['prod_test', 'production_user', 'admin', 'management', 'agm ops'])) {
+                header("Location: ../forms/fg_entry.php?error=" . urlencode('Access Denied: Your role does not have permission to submit Roll entries.'));
+                exit();
+            }
+        } elseif ($productType === 'bag') {
+            // Only sewing_test, admin, management, agm ops can submit bags
+            if (!in_array($userRole, ['sewing_test', 'admin', 'management', 'agm ops'])) {
+                header("Location: ../forms/fg_entry.php?error=" . urlencode('Access Denied: Your role does not have permission to submit Bag entries.'));
+                exit();
+            }
+        }
         
         // Aggressively check and prevent '0' from being saved
         // Check for empty, '0', 0, or any variation
@@ -70,13 +88,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         // Handle weight fields - get from appropriate field based on product type
         // For rolls: use total_weight field (stored as actual_weight in DB)
         // For bags: use actual_weight_bag field (stored as actual_weight in DB)
+        $deliveredQuantity = trim($_POST['delivered_quantity'] ?? '0');
         if ($productType === 'roll') {
-            $actualWeight = trim($_POST['total_weight'] ?? '');
+            $actualWeight = $deliveredQuantity;
         } else {
             $actualWeight = trim($_POST['actual_weight_bag'] ?? '');
         }
         $totalArea         = trim($_POST['total_area'] ?? '');
-        $measurementType   = trim($_POST['measurement_type'] ?? '');
         $qualityChecked    = $_POST['quality_checked'] ?? '';
         $passedQty         = $_POST['passed_qty'] ?? '';
         $rejectedQty       = $_POST['rejected_qty'] ?? '';
@@ -116,11 +134,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         // Required fields validation (allow 0 values)
         $required = [
-            'fg_id', 'product_type', 'reference_number', 'shift_in_charge', 'project_id'
+            'fg_id', 'product_type', 'shift_in_charge', 'project_id'
         ];
         
         // Add product-specific required fields
         if ($productType === 'bag') {
+            // Reference number is optional for bags (can be auto-filled from CNC batch)
+            // CNC cutting batch is the primary identifier for bags
             $required[] = 'bag_size';
             $required[] = 'recommended_weight';
             $required[] = 'actual_weight_bag'; // Use the bag-specific field name
@@ -128,8 +148,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $required[] = 'passed_qty';
             $required[] = 'rejected_qty';
         } elseif ($productType === 'roll') {
-            // For rolls, require roll_size and measurement_type
-            // actual_weight or total_area will be validated separately based on measurement_type
+            // For rolls, reference_number is required
+            $required[] = 'reference_number';
+            // actual_weight or total_area was validated previously (now optional)
         }
         
         // Also accept old field name for backward compatibility
@@ -165,34 +186,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 exit();
             }
             
-            // Check measurement_type
-            if (empty($measurementType)) {
-                header("Location: ../forms/fg_entry.php?error=" . urlencode("Missing required field: measurement_type"));
-                exit();
-            }
-            
-            // Validate based on measurement type
-            if ($measurementType === 'weight') {
-                // For rolls, ensure we're getting the total_weight from the roll field
-                // Check if total_weight is provided and valid
-                if (empty($actualWeight) || $actualWeight === '' || $actualWeight === '0') {
-                    header("Location: ../forms/fg_entry.php?error=" . urlencode("Missing total weight for weight measurement. Please enter a valid weight value."));
-                    exit();
-                }
-                
-                $actualWeightFloat = floatval($actualWeight);
-                if ($actualWeightFloat <= 0 || !is_numeric($actualWeight)) {
-                    header("Location: ../forms/fg_entry.php?error=" . urlencode("Invalid total weight value. Please enter a valid weight value greater than 0."));
-                    exit();
-                }
-            } elseif ($measurementType === 'area') {
-                // Check if total_area is provided and valid
-                $totalAreaFloat = floatval($totalArea);
-                if (empty($totalArea) || $totalArea === '' || $totalArea === '0' || $totalAreaFloat <= 0 || !is_numeric($totalArea)) {
-                    header("Location: ../forms/fg_entry.php?error=" . urlencode("Missing or invalid total_area for area measurement. Please enter a valid area value greater than 0."));
-                    exit();
-                }
-            }
         }
 
         // Get FG ID from form
@@ -261,7 +254,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         if (!in_array('delivered_quantity', $existingFgCols)) {
-            $conn->query("ALTER TABLE fg_entry ADD COLUMN delivered_quantity DECIMAL(10,2) DEFAULT 0 AFTER batch_number");
+            $conn->query("ALTER TABLE fg_entry ADD COLUMN delivered_quantity DECIMAL(10,2) DEFAULT 0");
         }
         if (!in_array('total_area', $existingFgCols)) {
             $conn->query("ALTER TABLE fg_entry ADD COLUMN total_area DECIMAL(10,2) NULL AFTER actual_weight");
@@ -294,7 +287,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             INSERT INTO fg_entry (
                 fg_id, date_time, shift, product_type, roll_entry_type, reference_number, cnc_cutting_batch, 
                 shift_in_charge, project_id, bag_size, recommended_weight, actual_weight, total_area, measurement_type,
-                quality_checked, passed_qty, rejected_qty, packaging_type, batch_number
+                quality_checked, passed_qty, rejected_qty, packaging_type, delivered_quantity
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ");
 
@@ -333,7 +326,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $recommendedWeightValue = (!empty($recommendedWeight) && $recommendedWeight !== '' && $recommendedWeight !== '0') ? (float)$recommendedWeight : null;
         $totalAreaValue = (!empty($totalArea) && $totalArea !== '') ? (float)$totalArea : null;
         $actualWeightValue = (!empty($actualWeight) && $actualWeight !== '') ? (float)$actualWeight : null;
-        $measurementTypeValue = (!empty($measurementType) && $measurementType !== '') ? $measurementType : null;
+        if ($actualWeightValue === null) {
+            $actualWeightValue = 0;
+        }
+        $deliveredQuantityValue = (!empty($deliveredQuantity) && $deliveredQuantity !== '') ? (float)$deliveredQuantity : 0;
+        $measurementTypeValue = null;
+        
+        // For bags, reference_number is optional - set to empty string if not provided
+        if ($productType === 'bag' && empty($referenceNumber)) {
+            $referenceNumber = '';
+        }
         
         // Bind params: s = string, i = integer, d = decimal
         $stmt->bind_param(
@@ -360,6 +362,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         );
 
         if ($stmt->execute()) {
+            $updateStmt = $conn->prepare("UPDATE fg_entry SET delivered_quantity = ? WHERE fg_id = ?");
+            if ($updateStmt) {
+                $updateStmt->bind_param("ds", $deliveredQuantityValue, $fgId);
+                $updateStmt->execute();
+                $updateStmt->close();
+            }
             // If it's a bundle, mark all individual rolls as used in fg_entry
             if ($productType === 'roll' && $rollEntryType === 'bundle' && !empty($_POST['bundle_roll_list'])) {
                 $bundleRollList = $_POST['bundle_roll_list'];
@@ -408,17 +416,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $fgStmt->execute();
             $fgStmt->close();
             
-            // Different success message for rolls vs bags
-            if ($productType === 'roll') {
-                if ($rollEntryType === 'bundle') {
-                    $successMsg = "✅ FG Entry saved successfully! Bundle of rolls (Total Weight: " . $actualWeight . " kg)";
-                } else {
-                    $successMsg = "✅ FG Entry saved successfully! Roll (Weight: " . $actualWeight . " kg)";
-                }
-            } else {
-                $successMsg = "✅ FG Entry saved successfully! Passed Qty: " . $passedQty . " pcs";
-            }
-            
+            $successMsg = "FG Entry saved successfully!";
+
             header("Location: ../forms/fg_entry.php?success=" . urlencode($successMsg) . "&fg_id=" . urlencode($fgId));
         } else {
             header("Location: ../forms/fg_entry.php?error=database_error&message=" . urlencode($stmt->error));

@@ -316,8 +316,45 @@ $conn->close();
         }
         
         @media print {
+            @page {
+                size: A4 landscape;
+                margin: 10mm;
+            }
             body { background: white; padding: 0; }
             .top-actions, .filters { display: none; }
+            .container { max-width: 100%; padding: 10px; }
+            h1, h2 { font-size: 1.2em; }
+            .table-wrapper {
+                overflow: visible;
+                width: 100%;
+            }
+            table {
+                width: 100% !important;
+                min-width: auto !important;
+                max-width: 100%;
+                font-size: 9px;
+                page-break-inside: avoid;
+                break-inside: avoid;
+            }
+            th, td {
+                padding: 4px 3px;
+                font-size: 9px;
+                white-space: normal;
+            }
+            th {
+                font-size: 9px;
+                position: static;
+            }
+            table thead {
+                display: table-header-group;
+            }
+            table tbody {
+                display: table-row-group;
+            }
+            table tr {
+                page-break-inside: avoid;
+                break-inside: avoid;
+            }
         }
     </style>
 </head>

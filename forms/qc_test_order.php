@@ -1104,6 +1104,51 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_order'])) {
         
         $inserted_count = 0;
         
+        // If bulk reference range is selected but $bulk_rolls is empty, generate individual references from the range
+        if (empty($bulk_rolls) && isset($_POST['from_reference']) && isset($_POST['to_reference']) && 
+            !empty($_POST['from_reference']) && !empty($_POST['to_reference'])) {
+            
+            $fromRef = trim($_POST['from_reference']);
+            $toRef = trim($_POST['to_reference']);
+            
+            // Extract base reference and roll numbers
+            $fromBaseRef = '';
+            $fromRollNum = 0;
+            $toBaseRef = '';
+            $toRollNum = 0;
+            
+            if (preg_match('/^(.+)-(\d+)$/', $fromRef, $fromMatches)) {
+                $fromBaseRef = $fromMatches[1];
+                $fromRollNum = (int)$fromMatches[2];
+            } else {
+                $fromBaseRef = $fromRef;
+                $fromRollNum = 1;
+            }
+            
+            if (preg_match('/^(.+)-(\d+)$/', $toRef, $toMatches)) {
+                $toBaseRef = $toMatches[1];
+                $toRollNum = (int)$toMatches[2];
+            } else {
+                $toBaseRef = $toRef;
+                $toRollNum = 1;
+            }
+            
+            // If same base, generate all references from fromRollNum to toRollNum
+            if ($fromBaseRef === $toBaseRef && $fromRollNum > 0 && $toRollNum > 0) {
+                for ($roll = $fromRollNum; $roll <= $toRollNum; $roll++) {
+                    $bulk_rolls[] = $fromBaseRef . '-' . $roll;
+                }
+                error_log("QC Test Order: Generated " . count($bulk_rolls) . " individual references from range: " . $fromRef . " to " . $toRef);
+            } else {
+                // Different bases - add both endpoints and log warning
+                $bulk_rolls[] = $fromRef;
+                if ($toRef !== $fromRef) {
+                    $bulk_rolls[] = $toRef;
+                }
+                error_log("QC Test Order: WARNING - Different base references in range. Generated " . count($bulk_rolls) . " references.");
+            }
+        }
+        
         // If bulk rolls are selected, process each roll separately
         $rolls_to_process = !empty($bulk_rolls) ? $bulk_rolls : [null]; // null means process single reference
         $original_user_ref = $user_reference;
@@ -1133,6 +1178,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_order'])) {
             $test_data = [];
             if ($is_editing && $edit_id_post > 0 && isset($existing_test_data) && is_array($existing_test_data)) {
                 $test_data = $existing_test_data; // Start with existing data
+            }
+            
+            // IMPORTANT: Save bulk reference information BEFORE processing individual test data
+            // This ensures it's saved for ALL tests in the range, not just when bulk_rolls is populated
+            if (isset($_POST['from_reference']) && isset($_POST['to_reference']) && 
+                !empty($_POST['from_reference']) && !empty($_POST['to_reference'])) {
+                $test_data['is_bulk_reference'] = true;
+                $test_data['bulk_from_reference'] = trim($_POST['from_reference']);
+                $test_data['bulk_to_reference'] = trim($_POST['to_reference']);
+                $test_data['bulk_reference_count'] = !empty($bulk_rolls) ? count($bulk_rolls) : 0;
+                error_log("QC Test Order: [EARLY] Saving bulk reference range - From: " . $_POST['from_reference'] . ", To: " . $_POST['to_reference'] . ", Count: " . (!empty($bulk_rolls) ? count($bulk_rolls) : '0'));
             }
             
             // Debug logging to file
@@ -1187,12 +1243,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_order'])) {
             }
                 
             // Store bulk reference information if this is a bulk submission
-            if (!empty($bulk_rolls) && isset($_POST['from_reference']) && isset($_POST['to_reference'])) {
+            // Save bulk reference information if From/To references are provided
+            // This should be saved regardless of whether bulk_rolls is populated
+            if (isset($_POST['from_reference']) && isset($_POST['to_reference']) && 
+                !empty($_POST['from_reference']) && !empty($_POST['to_reference'])) {
                 $test_data['is_bulk_reference'] = true;
-                $test_data['bulk_from_reference'] = $_POST['from_reference'];
-                $test_data['bulk_to_reference'] = $_POST['to_reference'];
-                $test_data['bulk_reference_count'] = count($bulk_rolls);
-                file_put_contents('qc_debug.txt', "Saved bulk reference: " . $_POST['from_reference'] . " to " . $_POST['to_reference'] . " (" . count($bulk_rolls) . " references)\n", FILE_APPEND);
+                $test_data['bulk_from_reference'] = trim($_POST['from_reference']);
+                $test_data['bulk_to_reference'] = trim($_POST['to_reference']);
+                $test_data['bulk_reference_count'] = !empty($bulk_rolls) ? count($bulk_rolls) : 0;
+                file_put_contents('qc_debug.txt', "Saved bulk reference: " . $_POST['from_reference'] . " to " . $_POST['to_reference'] . " (" . (!empty($bulk_rolls) ? count($bulk_rolls) : '0') . " references)\n", FILE_APPEND);
+                error_log("QC Test Order: Saving bulk reference range - From: " . $_POST['from_reference'] . ", To: " . $_POST['to_reference']);
             }
                 
                 // Collect thickness test data if this is a thickness test
@@ -1392,13 +1452,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_order'])) {
                     ];
                 }
                 
+            // FINAL CHECK: Ensure bulk reference information is saved before encoding
+            // This is critical - the bulk reference info must be in test_data JSON
+            if (isset($_POST['from_reference']) && isset($_POST['to_reference']) && 
+                !empty($_POST['from_reference']) && !empty($_POST['to_reference'])) {
+                $test_data['is_bulk_reference'] = true;
+                $test_data['bulk_from_reference'] = trim($_POST['from_reference']);
+                $test_data['bulk_to_reference'] = trim($_POST['to_reference']);
+                if (!isset($test_data['bulk_reference_count']) || $test_data['bulk_reference_count'] == 0) {
+                    $test_data['bulk_reference_count'] = !empty($bulk_rolls) ? count($bulk_rolls) : 0;
+                }
+                error_log("QC Test Order: [FINAL CHECK] Ensuring bulk reference in test_data - From: " . $_POST['from_reference'] . ", To: " . $_POST['to_reference'] . ", Test: " . ($selected['test_name'] ?? 'N/A'));
+            }
+                
             $test_data_json = json_encode($test_data);
             
+            // Debug: Verify bulk reference is in the JSON
+            $test_data_check = json_decode($test_data_json, true);
+            if (isset($_POST['from_reference']) && isset($_POST['to_reference']) && 
+                !empty($_POST['from_reference']) && !empty($_POST['to_reference'])) {
+                if (isset($test_data_check['is_bulk_reference']) && $test_data_check['is_bulk_reference']) {
+                    error_log("QC Test Order: [VERIFIED] Bulk reference saved in JSON - From: " . ($test_data_check['bulk_from_reference'] ?? 'MISSING') . ", To: " . ($test_data_check['bulk_to_reference'] ?? 'MISSING'));
+                } else {
+                    error_log("QC Test Order: [ERROR] Bulk reference NOT in JSON! From: " . $_POST['from_reference'] . ", To: " . $_POST['to_reference']);
+                }
+            }
+            
             // Use user's reference if available, otherwise use generated reference
-            // For bulk rolls, use the current bulk roll reference
+            // For bulk rolls, ALWAYS use the individual bulk roll reference (each reference gets its own row)
             if (isset($bulk_roll_ref) && $bulk_roll_ref) {
+                // This is an individual reference from the bulk range - use it as sample_reference_id
                 $final_reference = $bulk_roll_ref;
+                error_log("QC Test Order: Using individual bulk roll reference: " . $final_reference);
             } else {
+                // Not processing bulk - use user reference or generated reference
                 $final_reference = !empty($user_reference) ? $user_reference : $generated_sample_ref;
             }
             
@@ -1424,6 +1511,63 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_order'])) {
                     // Resubmission after rejection: reset to pending_checker or pending_approval based on test type
                     $status = in_array($selected['test_name'], $tests_requiring_checker) ? 'pending_checker' : 'pending_approval';
                     error_log("QC Test Order: Resubmission - status set to: " . $status);
+                    
+                    // If this is a resubmission of a rejected test with bulk reference range, also resubmit all other reports in the range
+                    if (in_array($original_status, ['rejected_by_checker', 'rejected_by_approver']) && 
+                        isset($test_data['is_bulk_reference']) && $test_data['is_bulk_reference'] &&
+                        isset($test_data['bulk_from_reference']) && isset($test_data['bulk_to_reference'])) {
+                        
+                        $bulk_from = $test_data['bulk_from_reference'];
+                        $bulk_to = $test_data['bulk_to_reference'];
+                        
+                        // Find all other reports with the same bulk reference range, test, and method that are also rejected
+                        $findRelatedStmt = $conn->prepare("
+                            SELECT qto.id, qto.report_number, qto.test_data
+                            FROM qc_test_orders qto
+                            WHERE qto.test_standard_id = ?
+                            AND qto.chosen_method = ?
+                            AND qto.id != ?
+                            AND qto.status IN ('rejected_by_checker', 'rejected_by_approver')
+                        ");
+                        $findRelatedStmt->bind_param("isi", $test_standard_id, $selected['method'], $edit_id_post);
+                        $findRelatedStmt->execute();
+                        $relatedResult = $findRelatedStmt->get_result();
+                        
+                        $related_ids_to_update = [];
+                        while ($row = $relatedResult->fetch_assoc()) {
+                            $related_test_data = json_decode($row['test_data'] ?? '{}', true);
+                            if (isset($related_test_data['is_bulk_reference']) && $related_test_data['is_bulk_reference'] &&
+                                isset($related_test_data['bulk_from_reference']) && isset($related_test_data['bulk_to_reference']) &&
+                                $related_test_data['bulk_from_reference'] === $bulk_from &&
+                                $related_test_data['bulk_to_reference'] === $bulk_to) {
+                                $related_ids_to_update[] = $row['id'];
+                            }
+                        }
+                        $findRelatedStmt->close();
+                        
+                        // Update all related reports to the same status
+                        if (!empty($related_ids_to_update)) {
+                            $placeholders = str_repeat('?,', count($related_ids_to_update) - 1) . '?';
+                            $updateRelatedStmt = $conn->prepare("
+                                UPDATE qc_test_orders 
+                                SET status = ?, 
+                                    checked_by = NULL, 
+                                    checked_at = NULL, 
+                                    checker_remarks = NULL,
+                                    approved_by = NULL, 
+                                    approved_at = NULL, 
+                                    admin_remarks = NULL,
+                                    updated_at = NOW()
+                                WHERE id IN ($placeholders)
+                            ");
+                            $params = array_merge([$status], $related_ids_to_update);
+                            $types = 's' . str_repeat('i', count($related_ids_to_update));
+                            $updateRelatedStmt->bind_param($types, ...$params);
+                            $updateRelatedStmt->execute();
+                            $updateRelatedStmt->close();
+                            error_log("QC Test Order: Resubmitted " . count($related_ids_to_update) . " related reports in bulk reference range");
+                        }
+                    }
                 }
                 
                 // For forwarded external tests, don't check inspector_id (test was created by AGM, submitted by tester)
@@ -1753,6 +1897,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_order'])) {
             if ($is_forwarded_external_submit) {
                 $_SESSION['qc_success_message'] = $message;
                 header("Location: ../admin/forwarded_external_test_dashboard.php?submitted=1");
+                exit();
+            }
+            
+            // Check if we should return to rejected reports dashboard
+            $return_to = $_GET['return'] ?? $_POST['return'] ?? '';
+            if ($return_to === 'tester_rejected_reports') {
+                $_SESSION['success_message'] = $message;
+                header("Location: ../tester_rejected_reports.php");
                 exit();
             }
             
@@ -2620,7 +2772,7 @@ function generateExternalReference() {
 
                 <?php if ($message): ?>
     <div class="alert alert-success">
-      ✅ <?php echo htmlspecialchars($message); ?>
+      <?php echo htmlspecialchars($message); ?>
                     </div>
                 <?php endif; ?>
 
@@ -3451,11 +3603,11 @@ function generateExternalReference() {
               <?php endif; ?>
               <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
                 <label style="font-weight:600; margin:0;">From Reference:</label>
-                <select id="from_reference" name="from_reference" style="min-width:250px; padding:5px; border:1px solid #ccc; border-radius:4px; <?php echo $disable_refs_in_edit ? 'background:#f5f5f5; cursor:not-allowed;' : ''; ?>" onchange="updateReferenceRange(); handleFromToReferenceChange();" <?php echo $disable_refs_in_edit ? 'disabled readonly' : ''; ?> required>
+                <select id="from_reference" name="from_reference" style="min-width:250px; padding:5px; border:1px solid #ccc; border-radius:4px; <?php echo $disable_refs_in_edit ? 'background:#f5f5f5; cursor:not-allowed;' : ''; ?>" onchange="updateReferenceRange(true); handleFromToReferenceChange();" <?php echo $disable_refs_in_edit ? 'disabled readonly' : ''; ?> required>
                   <option value="">-- Select From Reference --</option>
                 </select>
                 <label style="font-weight:600; margin:0;">To Reference:</label>
-                <select id="to_reference" name="to_reference" style="min-width:250px; padding:5px; border:1px solid #ccc; border-radius:4px; <?php echo $disable_refs_in_edit ? 'background:#f5f5f5; cursor:not-allowed;' : ''; ?>" onchange="updateReferenceRange(); handleFromToReferenceChange();" <?php echo $disable_refs_in_edit ? 'disabled readonly' : ''; ?> required>
+                <select id="to_reference" name="to_reference" style="min-width:250px; padding:5px; border:1px solid #ccc; border-radius:4px; <?php echo $disable_refs_in_edit ? 'background:#f5f5f5; cursor:not-allowed;' : ''; ?>" onchange="updateReferenceRange(false); handleFromToReferenceChange();" <?php echo $disable_refs_in_edit ? 'disabled readonly' : ''; ?> required>
                   <option value="">-- Select To Reference --</option>
                 </select>
                 <button type="button" onclick="applyBulkReferenceSelection()" style="padding:6px 12px; background:#3498db; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:600; <?php echo $disable_refs_in_edit ? 'opacity:0.5; cursor:not-allowed;' : ''; ?>" <?php echo $disable_refs_in_edit ? 'disabled' : ''; ?>>
@@ -3466,6 +3618,22 @@ function generateExternalReference() {
                   Clear
                 </button>
                 <?php endif; ?>
+              </div>
+              
+              <!-- Notification area for submitted tests -->
+              <div id="submitted_tests_notification" style="display:none; margin-top:10px; padding:12px; background:#fff3cd; border:2px solid #ffc107; border-radius:6px;">
+                <div style="display:flex; align-items:flex-start; gap:10px;">
+                  <i class="fas fa-exclamation-triangle" style="color:#856404; font-size:18px; margin-top:2px;"></i>
+                  <div style="flex:1;">
+                    <strong style="color:#856404; display:block; margin-bottom:5px;">⚠️ Tests Already Submitted for This Range:</strong>
+                    <div id="submitted_tests_list" style="color:#333; font-size:14px; line-height:1.6;">
+                      <!-- List of submitted tests will be populated here -->
+                    </div>
+                    <small style="color:#856404; display:block; margin-top:8px; font-style:italic;">
+                      These tests are disabled below. You can only submit different test methods for this reference range.
+                    </small>
+                  </div>
+                </div>
               </div>
               <!-- Hidden input to store the selected product_reference when line-based selection is used -->
               <input type="hidden" id="line_based_product_reference" name="product_reference" value="">
@@ -3494,13 +3662,6 @@ function generateExternalReference() {
               <?php endif; endforeach; ?>
             </select>
             
-            <!-- Individual Roll Selector (shown when bundle is selected) -->
-            <select name="individual_roll_reference" id="individual_roll_reference" onchange="handleIndividualRollSelection(this.value)" style="display:none; margin-top:10px; padding:10px; border:2px solid #3498db; border-radius:6px; background:#f8f9fa;" <?php echo ($lock_general_fields || $disable_refs_in_edit) ? 'disabled class="readonly"' : ''; ?>>
-              <option value="">-- Select Individual Roll for Testing --</option>
-            </select>
-            <div id="bundle_info" style="display:none; margin-top:8px; padding:10px; background:#e3f2fd; border-left:4px solid #2196F3; border-radius:4px; font-size:13px; color:#1565C0;">
-              <i class="fas fa-info-circle"></i> <strong>Bundle Detected:</strong> This reference contains multiple rolls. <strong>Please select the specific roll number</strong> you want to test individually.
-            </div>
             
             <!-- External Product Reference (Manually set by AGM) -->
             <div id="external_reference_container" style="display:<?php echo ($product_type_default === 'external') ? 'block' : 'none'; ?>;">
@@ -3726,12 +3887,15 @@ function generateExternalReference() {
           }
         ?>
           <div class="test-item" style="margin-bottom: 15px; padding: 15px; border: 1px solid #ddd; border-radius: 6px; overflow: visible;">
-            <div style="display: flex; align-items: center; gap: 15px; flex-wrap: wrap; width: 100%;">
+            <div style="display: flex; align-items: center; gap: 15px; width: 100%;">
               <div style="min-width: 200px; max-width: 200px; font-weight: bold; flex-shrink: 0;">
                 <?php echo htmlspecialchars($test_name); ?>
                         </div>
               <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center; flex: 1; min-width: 300px; overflow: visible;">
-                <?php foreach ($methods as $method): ?>
+                <?php 
+                  // Display all methods as checkboxes
+                  foreach ($methods as $method):
+                ?>
                   <?php
                     if ($edit_mode && $edit_external_forward && $locked_test_method && $method !== $locked_test_method) {
                         continue;
@@ -3783,7 +3947,17 @@ function generateExternalReference() {
                         }
                     }
                   ?>
-                  <label style="display: <?php echo $is_disabled ? 'flex' : 'inline-flex'; ?>; align-items: center; flex-wrap: nowrap; gap: 6px; <?php echo $is_disabled ? 'cursor: not-allowed; width: 100%; margin-bottom: 5px;' : 'cursor: pointer;'; ?> background: <?php echo $is_disabled ? '#f9fafb' : '#f8f9fa'; ?>; padding: 8px 12px; border-radius: 6px; border: <?php echo $is_disabled ? '2px solid #e5e7eb' : '1px solid #dee2e6'; ?>; <?php echo $is_disabled ? 'border-left: 4px solid #dc3545;' : ''; ?> transition: all 0.2s ease; white-space: nowrap; <?php echo $is_disabled ? 'flex-shrink: 1;' : 'flex-shrink: 0;'; ?>" <?php echo $is_disabled ? 'onclick="showToast(\'This test method was not submitted in the bulk group. Only submitted methods can be edited.\', \'warning\', 4000); return false;"' : ''; ?>>
+                  <label style="display: <?php echo $is_disabled ? 'flex' : 'inline-flex'; ?>; align-items: center; flex-wrap: nowrap; gap: 6px; <?php echo $is_disabled ? 'cursor: not-allowed; width: 100%; margin-bottom: 5px;' : 'cursor: pointer;'; ?> background: <?php echo $is_disabled ? '#f9fafb' : '#f8f9fa'; ?>; padding: 8px 12px; border-radius: 6px; border: <?php echo $is_disabled ? '2px solid #e5e7eb' : '1px solid #dee2e6'; ?>; <?php echo $is_disabled ? 'border-left: 4px solid #dc3545;' : ''; ?> transition: all 0.2s ease; white-space: nowrap; <?php echo $is_disabled ? 'flex-shrink: 1;' : 'flex-shrink: 0;'; ?>" <?php 
+                    if ($is_disabled): 
+                        if ($is_already_submitted && !$edit_mode): 
+                            // Already submitted test - show notification
+                            echo 'onclick="event.preventDefault(); showToast(\'⚠️ This test method (' . htmlspecialchars($test_name) . ' - ' . htmlspecialchars($method) . ') has already been submitted for the selected reference. Please select a different test method.\', \'warning\', 5000); return false;"';
+                        else: 
+                            // Bulk group editing scenario
+                            echo 'onclick="showToast(\'This test method was not submitted in the bulk group. Only submitted methods can be edited.\', \'warning\', 4000); return false;"';
+                        endif;
+                    endif; 
+                  ?>>
                     <input type="checkbox" 
                            name="test_<?php echo md5($test_name . '_' . $method); ?>"
                            id="test_<?php echo md5($test_name . '_' . $method); ?>"
@@ -3792,17 +3966,47 @@ function generateExternalReference() {
                            class="test-checkbox"
                            <?php if ($is_disabled): ?>
                                disabled readonly data-already-submitted="true" 
-                               title="This test method was not submitted in the bulk group. Only submitted methods can be edited."
-                               onclick="event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation(); this.checked = false; showToast('This test method was not submitted in the bulk group.', 'warning', 4000); return false;"
-                               onchange="event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation(); this.checked = false; return false;"
+                               title="<?php echo $is_already_submitted && !$edit_mode ? 'This test method has already been submitted for the selected reference.' : 'This test method was not submitted in the bulk group. Only submitted methods can be edited.'; ?>"
+                               onclick="event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation(); this.checked = false; <?php 
+                                 if ($is_already_submitted && !$edit_mode): 
+                                     echo "showToast('⚠️ This test method (" . htmlspecialchars($test_name, ENT_QUOTES) . " - " . htmlspecialchars($method, ENT_QUOTES) . ") has already been submitted for the selected reference. Please select a different test method.', 'warning', 5000);";
+                                 else:
+                                     echo "showToast('This test method was not submitted in the bulk group.', 'warning', 4000);";
+                                 endif;
+                               ?> return false;"
+                               onchange="event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation(); this.checked = false; <?php 
+                                 if ($is_already_submitted && !$edit_mode): 
+                                     echo "showToast('⚠️ This test method (" . htmlspecialchars($test_name, ENT_QUOTES) . " - " . htmlspecialchars($method, ENT_QUOTES) . ") has already been submitted for the selected reference. Please select a different test method.', 'warning', 5000);";
+                                 else:
+                                     echo "showToast('This test method was not submitted in the bulk group.', 'warning', 4000);";
+                                 endif;
+                               ?> return false;"
                            <?php elseif ($is_checked && $edit_mode): ?>
                                checked
                            <?php elseif ($edit_mode && $edit_external_forward && (!$locked_test_method || $locked_test_method === $method)): ?>
                                checked onclick="return false;" onkeydown="return false;" data-locked-test="1"
                            <?php endif; ?>
                            style="transform: scale(1.2); <?php echo $is_disabled ? 'pointer-events: none; cursor: not-allowed;' : ''; ?>"
-                           onchange="<?php echo $is_disabled ? 'event.preventDefault(); event.stopPropagation(); this.checked = false; showToast(\'This test method was not submitted in the bulk group.\', \'warning\', 4000); return false;' : 'handleTestSelection(this)'; ?>"
-                           onclick="<?php echo $is_disabled ? 'event.preventDefault(); event.stopPropagation(); this.checked = false; showToast(\'This test method was not submitted in the bulk group.\', \'warning\', 4000); return false;' : ''; ?>">
+                           onchange="<?php 
+                             if ($is_disabled): 
+                                 if ($is_already_submitted && !$edit_mode): 
+                                     echo 'event.preventDefault(); event.stopPropagation(); this.checked = false; showToast(\'⚠️ This test method (' . htmlspecialchars($test_name, ENT_QUOTES) . ' - ' . htmlspecialchars($method, ENT_QUOTES) . ') has already been submitted for the selected reference. Please select a different test method.\', \'warning\', 5000); return false;';
+                                 else:
+                                     echo 'event.preventDefault(); event.stopPropagation(); this.checked = false; showToast(\'This test method was not submitted in the bulk group.\', \'warning\', 4000); return false;';
+                                 endif;
+                             else: 
+                                 echo 'handleTestSelection(this)';
+                             endif; 
+                           ?>"
+                           onclick="<?php 
+                             if ($is_disabled): 
+                                 if ($is_already_submitted && !$edit_mode): 
+                                     echo 'event.preventDefault(); event.stopPropagation(); this.checked = false; showToast(\'⚠️ This test method (' . htmlspecialchars($test_name, ENT_QUOTES) . ' - ' . htmlspecialchars($method, ENT_QUOTES) . ') has already been submitted for the selected reference. Please select a different test method.\', \'warning\', 5000); return false;';
+                                 else:
+                                     echo 'event.preventDefault(); event.stopPropagation(); this.checked = false; showToast(\'This test method was not submitted in the bulk group.\', \'warning\', 4000); return false;';
+                                 endif;
+                             endif; 
+                           ?>">
                     <span style="font-size: 12px; font-weight: 500; color: <?php echo $is_disabled ? '#6b7280' : '#495057'; ?>; <?php echo $is_disabled ? 'text-decoration: line-through; text-decoration-color: #dc3545; text-decoration-thickness: 2px;' : ''; ?> flex-shrink: 0; white-space: nowrap;">
                       <?php echo htmlspecialchars($method); ?>
                     </span>
@@ -3977,23 +4181,7 @@ function generateExternalReference() {
                         // Check if bundle is selected and individual roll is required (only for standard selection)
                         if (!isLineBasedSelection) {
                             const selectedOption = productReference.options[productReference.selectedIndex];
-                            const isBundle = selectedOption?.getAttribute('data-is-bundle') === 'true';
-                            const individualRollSelect = document.getElementById('individual_roll_reference');
-                            
-                            if (isBundle) {
-                                const individualRollValue = individualRollSelect?.value || '';
-                                if (!individualRollValue || individualRollValue.trim() === '') {
-                                    console.error('❌ Individual roll selection validation failed');
-                                    showToast('Individual Roll Selection Required!<br><br>This is a bundle reference containing multiple rolls.<br><br>Please select the specific roll number you want to test individually from the dropdown below.', 'error', 6000);
-                                    if (event) event.preventDefault();
-                                    if (individualRollSelect) {
-                                        individualRollSelect.focus();
-                                        individualRollSelect.style.border = '2px solid #e74c3c';
-                                    }
-                                    return false;
-                                }
-                                console.log('✅ Individual roll validated:', individualRollValue);
-                            }
+                            // Bundle detection removed - no longer required
                         }
                     }
                     
@@ -4226,99 +4414,15 @@ function loadFiberReferenceData(reference) {
 }
 
 // Update individual roll dropdown based on selected test method
+// Bundle detection functions disabled - no longer needed
 function updateIndividualRollDropdown() {
-    const productRefSelect = document.getElementById('product_reference');
-    const individualRollSelect = document.getElementById('individual_roll_reference');
-    
-    if (!productRefSelect || !individualRollSelect || individualRollSelect.style.display === 'none') {
-        return; // Not a bundle or dropdown not visible
-    }
-    
-    const selectedOption = productRefSelect.options[productRefSelect.selectedIndex];
-    const isBundle = selectedOption?.getAttribute('data-is-bundle') === 'true';
-    
-    if (!isBundle) {
-        return; // Not a bundle
-    }
-    
-    // Get selected test method
-    const selectedCheckbox = document.querySelector('.test-checkbox:checked');
-    if (!selectedCheckbox) {
-        // No test method selected yet, show all rolls
-        const baseRef = selectedOption.getAttribute('data-base-ref');
-        const rollCount = parseInt(selectedOption.getAttribute('data-roll-count')) || 1;
-        populateIndividualRolls(baseRef, rollCount, []);
+    // Function disabled - bundle detection removed
         return;
     }
     
-    const testName = selectedCheckbox.getAttribute('data-test-name');
-    const method = selectedCheckbox.getAttribute('data-method');
-    const baseRef = selectedOption.getAttribute('data-base-ref');
-    const rollCount = parseInt(selectedOption.getAttribute('data-roll-count')) || 1;
-    const bundleRef = selectedOption.value;
-    
-    // Fetch already-tested rolls for this bundle and test method
-    fetch(`api/get_tested_rolls.php?bundle_ref=${encodeURIComponent(bundleRef)}&test_name=${encodeURIComponent(testName)}&method=${encodeURIComponent(method)}`)
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                const testedRolls = data.tested_rolls || [];
-                populateIndividualRolls(baseRef, rollCount, testedRolls);
-            } else {
-                // On error, show all rolls
-                populateIndividualRolls(baseRef, rollCount, []);
-            }
-        })
-        .catch(err => {
-            console.error('Error fetching tested rolls:', err);
-            // On error, show all rolls
-            populateIndividualRolls(baseRef, rollCount, []);
-        });
-}
-
-// Populate individual roll dropdown, excluding already-tested rolls
 function populateIndividualRolls(baseRef, rollCount, testedRolls) {
-    const individualRollSelect = document.getElementById('individual_roll_reference');
-    if (!individualRollSelect) return;
-    
-    const currentValue = individualRollSelect.value; // Preserve current selection if still valid
-    individualRollSelect.innerHTML = '<option value="">-- Select Individual Roll for Testing --</option>';
-    
-    let hasAvailableRolls = false;
-    for (let i = 1; i <= rollCount; i++) {
-        const individualRef = baseRef + '-' + i;
-        
-        // Check if this roll has been tested with the selected method
-        const isTested = testedRolls.includes(individualRef);
-        
-        if (!isTested) {
-            hasAvailableRolls = true;
-            const option = document.createElement('option');
-            option.value = individualRef;
-            option.textContent = `Roll ${i} - ${individualRef}`;
-            
-            // Restore previous selection if it matches
-            if (currentValue === individualRef) {
-                option.selected = true;
-            }
-            
-            individualRollSelect.appendChild(option);
-        }
-    }
-    
-    // Show message if all rolls have been tested
-    const bundleInfo = document.getElementById('bundle_info');
-    if (bundleInfo && !hasAvailableRolls && rollCount > 0) {
-        bundleInfo.innerHTML = '<i class="fas fa-info-circle"></i> <strong>All Rolls Tested:</strong> All individual rolls from this bundle have already been tested with the selected test method. Please select a different test method or bundle.';
-        bundleInfo.style.background = '#fff3cd';
-        bundleInfo.style.borderLeftColor = '#ffc107';
-        bundleInfo.style.color = '#856404';
-    } else if (bundleInfo) {
-        bundleInfo.innerHTML = '<i class="fas fa-info-circle"></i> <strong>Bundle Detected:</strong> This reference contains multiple rolls. <strong>Please select the specific roll number</strong> you want to test individually.';
-        bundleInfo.style.background = '#e3f2fd';
-        bundleInfo.style.borderLeftColor = '#2196F3';
-        bundleInfo.style.color = '#1565C0';
-    }
+    // Function disabled - bundle detection removed
+    return;
 }
 
 // Filter references by Line (L1 or L2)
@@ -4429,8 +4533,37 @@ function populateLineReferences(line) {
         }
     });
     
-    // Sort references by value (alphabetically)
-    lineReferences.sort((a, b) => a.value.localeCompare(b.value));
+    // Sort references by date (extract date from reference number)
+    // Reference format: GSM + L + Line# + YY + MMMDD + -R + Roll# + - + Batch
+    // Example: "3.2L126JAN13-R03-GT0.9.H0.1" -> date is "JAN13" (Jan 13)
+    function extractDateFromReference(ref) {
+        // Match pattern: month abbreviation (JAN, FEB, etc.) followed by 2 digits
+        // Look for pattern after line number (L followed by digits, then month)
+        const monthAbbr = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+        for (let i = 0; i < monthAbbr.length; i++) {
+            const month = monthAbbr[i];
+            const pattern = new RegExp(month + '(\\d{2})');
+            const match = ref.match(pattern);
+            if (match) {
+                const day = parseInt(match[1]);
+                // Return a sortable number: month*100 + day
+                // This ensures chronological order (JAN06 = 106, JAN13 = 113, FEB01 = 201)
+                return ((i + 1) * 100) + day;
+            }
+        }
+        // If date can't be extracted, use a very large number so it sorts last
+        return 9999;
+    }
+    
+    // Sort by date first, then alphabetically for same date
+    lineReferences.sort((a, b) => {
+        const dateA = extractDateFromReference(a.value);
+        const dateB = extractDateFromReference(b.value);
+        if (dateA !== dateB) {
+            return dateA - dateB; // Sort by date (chronological)
+        }
+        return a.value.localeCompare(b.value); // Same date, sort alphabetically
+    });
     
     // Populate both dropdowns
     lineReferences.forEach(ref => {
@@ -4453,7 +4586,8 @@ function populateLineReferences(line) {
 }
 
 // Update To Reference dropdown based on From Reference selection
-function updateReferenceRange() {
+// autoSelect: true when called from From Reference change, false when called from To Reference change
+function updateReferenceRange(autoSelect = true) {
     const fromRefSelect = document.getElementById('from_reference');
     const toRefSelect = document.getElementById('to_reference');
     
@@ -4586,7 +4720,8 @@ function updateReferenceRange() {
         });
     }
     
-    // Auto-select the last roll of the bundle
+    // Auto-select the last roll of the bundle (only when From Reference changes)
+    if (autoSelect) {
     if (actualBaseRef && actualRollCount > 1) {
         const lastRollRef = actualBaseRef + '-' + actualRollCount;
         // Find and select the last roll in To dropdown (only if it's visible)
@@ -4625,6 +4760,7 @@ function updateReferenceRange() {
     } else if (fromValue) {
         // Single roll, auto-select the same reference
         toRefSelect.value = fromValue;
+        }
     }
 }
 
@@ -4632,25 +4768,363 @@ function updateReferenceRange() {
 function handleFromToReferenceChange() {
     const fromRefSelect = document.getElementById('from_reference');
     const toRefSelect = document.getElementById('to_reference');
+    const notificationDiv = document.getElementById('submitted_tests_notification');
     
     if (!fromRefSelect || !toRefSelect) return;
     
     const fromValue = fromRefSelect.value;
     const toValue = toRefSelect.value;
     
-    // If both From and To are selected, check submitted tests for the From reference
-    // This gives the user an indication of what tests are already submitted
-    // Note: For bulk processing, we check the From reference as a representative
-    // The actual duplicate check in PHP will verify each reference individually
-    if (fromValue && fromValue.trim() !== '') {
-        // Check submitted tests for the From reference
+    // If both From and To are selected, check submitted tests for the entire reference range
+    if (fromValue && fromValue.trim() !== '' && toValue && toValue.trim() !== '') {
+        // Check submitted tests for the reference range
+        checkAndDisableSubmittedTestsForRange(fromValue, toValue);
+    } else if (fromValue && fromValue.trim() !== '') {
+        // If only From is selected, check submitted tests for the From reference
         // In edit mode, exclude the current report ID
         const excludeReportId = <?php echo ($edit_mode && isset($edit_id)) ? $edit_id : 'null'; ?>;
         checkAndDisableSubmittedTests(fromValue, excludeReportId);
+        // Hide notification when only one reference is selected
+        if (notificationDiv) {
+            notificationDiv.style.display = 'none';
+        }
     } else if (!fromValue || fromValue.trim() === '') {
         // If From reference is cleared, enable all tests
         checkAndDisableSubmittedTests('');
+        // Hide notification when references are cleared
+        if (notificationDiv) {
+            notificationDiv.style.display = 'none';
+        }
     }
+}
+
+// Check for submitted tests in a reference range
+function checkAndDisableSubmittedTestsForRange(fromRef, toRef) {
+    if (!fromRef || !toRef) {
+        checkAndDisableSubmittedTests('');
+        return;
+    }
+    
+    const excludeReportId = <?php echo ($edit_mode && isset($edit_id)) ? $edit_id : 'null'; ?>;
+    const apiPath = window.location.pathname.includes('/forms/') ? 'api/check_submitted_tests_range.php' : 'forms/api/check_submitted_tests_range.php';
+    let apiUrl = apiPath + '?from_reference=' + encodeURIComponent(fromRef) + '&to_reference=' + encodeURIComponent(toRef);
+    if (excludeReportId) {
+        apiUrl += '&exclude_report_id=' + encodeURIComponent(excludeReportId);
+    }
+    
+    fetch(apiUrl)
+        .then(response => {
+            if (!response.ok) {
+                throw new Error('API response not OK: ' + response.status);
+            }
+            return response.json();
+        })
+        .then(data => {
+            console.log('API Response:', data);
+            const notificationDiv = document.getElementById('submitted_tests_notification');
+            const submittedTestsList = document.getElementById('submitted_tests_list');
+            
+            // Ensure parent container is visible
+            const bulkRefSelection = document.getElementById('bulk_reference_selection');
+            if (bulkRefSelection && notificationDiv) {
+                // Make sure parent is visible
+                if (bulkRefSelection.style.display === 'none') {
+                    bulkRefSelection.style.display = 'block';
+                }
+            }
+            
+            if (data.success && data.submitted_tests) {
+                // Collect submitted test names for display
+                let submittedTestNames = [];
+                const submittedTestsObj = data.submitted_tests || {};
+                
+                console.log('Submitted tests from API:', submittedTestsObj);
+                console.log('Submitted tests list from API:', data.submitted_tests_list);
+                
+                // First, try to use the list from API if available (more reliable)
+                if (data.submitted_tests_list && Array.isArray(data.submitted_tests_list) && data.submitted_tests_list.length > 0) {
+                    submittedTestNames = data.submitted_tests_list.map(test => {
+                        const testName = test.test_name || 'Unknown Test';
+                        const method = test.method || test.standard_code || 'N/A';
+                        return testName + ' (' + method + ')';
+                    });
+                    console.log('Using test list from API:', submittedTestNames);
+                } else {
+                    // Fallback: collect from test keys
+                    Object.keys(submittedTestsObj).forEach(testKey => {
+                        if (submittedTestsObj[testKey]) {
+                            // Split the key to get test name and method
+                            const parts = testKey.split('_');
+                            if (parts.length >= 2) {
+                                const method = parts.pop(); // Last part is method
+                                const testName = parts.join('_'); // Rest is test name
+                                submittedTestNames.push(testName + ' (' + method + ')');
+                            } else {
+                                // Fallback if format is different
+                                submittedTestNames.push(testKey);
+                            }
+                        }
+                    });
+                    console.log('Collected submitted test names from keys:', submittedTestNames);
+                }
+                
+                // Disable checkboxes for submitted tests
+                document.querySelectorAll('.test-checkbox').forEach(checkbox => {
+                    if (checkbox.hasAttribute('data-locked-test')) {
+                        return; // Skip locked tests
+                    }
+                    
+                    const testName = checkbox.getAttribute('data-test-name');
+                    const method = checkbox.getAttribute('data-method');
+                    const testKey = testName + '_' + method;
+                    
+                    if (submittedTestsObj[testKey]) {
+                        // Force disable and uncheck
+                        checkbox.disabled = true;
+                        checkbox.readOnly = true;
+                        checkbox.checked = false;
+                        checkbox.setAttribute('data-already-submitted', 'true');
+                        checkbox.title = 'This test has already been submitted for the selected reference range. You can only submit different test methods.';
+                        
+                        // Hide test parameters and disable inputs
+                        const testItem = checkbox.closest('.test-item');
+                        if (testItem) {
+                            const params = testItem.querySelector('.test-parameters');
+                            if (params) {
+                                params.style.display = 'none';
+                                params.querySelectorAll('input, textarea, select').forEach(input => {
+                                    input.disabled = true;
+                                    input.readOnly = true;
+                                });
+                            }
+                        }
+                        
+                        // Force disable the checkbox
+                        checkbox.setAttribute('disabled', 'disabled');
+                        checkbox.setAttribute('readonly', 'readonly');
+                        checkbox.removeAttribute('onclick');
+                        checkbox.removeAttribute('onchange');
+                        
+                        // Add multiple layers of event prevention
+                        const preventInteraction = function(e) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            e.stopImmediatePropagation();
+                            this.checked = false;
+                            
+                            const testName = this.getAttribute('data-test-name') || 'Unknown';
+                            const method = this.getAttribute('data-method') || 'Unknown';
+                            showToast(
+                                `⚠️ "${testName} (${method})" has already been submitted for this reference range and cannot be selected again. Please select a different test method.`,
+                                'warning',
+                                5000
+                            );
+                            
+                            return false;
+                        };
+                        
+                        // Remove all existing listeners by cloning (but keep attributes)
+                        const oldCheckbox = checkbox;
+                        const newCheckbox = oldCheckbox.cloneNode(false);
+                        // Copy all attributes
+                        Array.from(oldCheckbox.attributes).forEach(attr => {
+                            newCheckbox.setAttribute(attr.name, attr.value);
+                        });
+                        // Ensure it's disabled
+                        newCheckbox.disabled = true;
+                        newCheckbox.readOnly = true;
+                        newCheckbox.checked = false;
+                        newCheckbox.setAttribute('data-already-submitted', 'true');
+                        
+                        // Replace the old checkbox
+                        oldCheckbox.parentNode.replaceChild(newCheckbox, oldCheckbox);
+                        checkbox = newCheckbox;
+                        
+                        // Add event listeners with capture phase
+                        ['click', 'change', 'mousedown', 'mouseup', 'keydown', 'keyup'].forEach(eventType => {
+                            checkbox.addEventListener(eventType, preventInteraction, true);
+                        });
+                        
+                        checkbox.style.pointerEvents = 'none';
+                        checkbox.style.cursor = 'not-allowed';
+                        checkbox.style.opacity = '0.6';
+                        
+                        // Update label styling and prevent all interactions
+                        const label = checkbox.closest('label');
+                        if (label) {
+                            label.classList.add('disabled-test-label');
+                            label.style.cursor = 'not-allowed';
+                            label.style.display = 'flex';
+                            label.style.width = '100%';
+                            label.style.marginBottom = '5px';
+                            label.style.background = 'linear-gradient(135deg, #f9fafb 0%, #f3f4f6 100%)';
+                            label.style.border = '2px solid #e5e7eb';
+                            label.style.borderLeft = '4px solid #dc3545';
+                            label.style.padding = '8px 12px';
+                            label.style.borderRadius = '6px';
+                            label.style.opacity = '0.85';
+                            
+                            // Remove existing onclick and 'for' attribute to prevent label from activating checkbox
+                            label.removeAttribute('onclick');
+                            label.removeAttribute('for');
+                            
+                            // Prevent label from activating checkbox - use capture phase
+                            const preventLabelClick = function(e) {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                e.stopImmediatePropagation();
+                                
+                                // Find the checkbox (it might have been replaced)
+                                const currentCheckbox = this.querySelector('.test-checkbox') || document.getElementById(checkbox.id);
+                                if (currentCheckbox) {
+                                    currentCheckbox.checked = false;
+                                    
+                                    const testItem = currentCheckbox.closest('.test-item');
+                                    if (testItem) {
+                                        const params = testItem.querySelector('.test-parameters');
+                                        if (params) {
+                                            params.style.display = 'none';
+                                            params.querySelectorAll('input, textarea, select').forEach(input => {
+                                                input.disabled = true;
+                                                input.readOnly = true;
+                                            });
+                                        }
+                                    }
+                                    
+                                    const testName = currentCheckbox.getAttribute('data-test-name') || 'Unknown';
+                                    const method = currentCheckbox.getAttribute('data-method') || 'Unknown';
+                                    showToast(
+                                        `⚠️ "${testName} (${method})" has already been submitted for this reference range and cannot be selected again. Please select a different test method.`,
+                                        'warning',
+                                        5000
+                                    );
+                                }
+                                
+                                return false;
+                            };
+                            
+                            // Add multiple event listeners to label with capture phase
+                            ['click', 'mousedown', 'mouseup', 'touchstart'].forEach(eventType => {
+                                label.addEventListener(eventType, preventLabelClick, true);
+                            });
+                            
+                            // Use CSS to prevent pointer events on the label when checkbox is disabled
+                            label.style.userSelect = 'none';
+                            label.style.webkitUserSelect = 'none';
+                        }
+                        
+                        // Update span styling
+                        const span = checkbox.nextElementSibling;
+                        if (span) {
+                            span.style.color = '#6b7280';
+                            span.style.textDecoration = 'line-through';
+                            span.style.textDecorationColor = '#dc3545';
+                            span.style.textDecorationThickness = '2px';
+                            span.style.fontWeight = '500';
+                        }
+                    } else {
+                        // Enable checkbox if not submitted
+                        if (!checkbox.hasAttribute('data-locked-test')) {
+                            checkbox.disabled = false;
+                            checkbox.readOnly = false;
+                            checkbox.removeAttribute('data-already-submitted');
+                            checkbox.title = '';
+                            checkbox.style.pointerEvents = 'auto';
+                            checkbox.style.cursor = 'pointer';
+                            
+                            const label = checkbox.closest('label');
+                            if (label) {
+                                label.classList.remove('disabled-test-label');
+                                label.style.cursor = 'pointer';
+                                label.style.display = 'inline-flex';
+                                label.style.width = 'auto';
+                                label.style.marginBottom = '0';
+                                label.style.background = '#f8f9fa';
+                                label.style.border = '1px solid #dee2e6';
+                                label.style.borderLeft = '1px solid #dee2e6';
+                                label.style.opacity = '1';
+                                label.onclick = null;
+                                
+                                // Remove event listeners
+                                const newLabel = label.cloneNode(true);
+                                label.parentNode.replaceChild(newLabel, label);
+                            }
+                            
+                            const span = checkbox.nextElementSibling;
+                            if (span) {
+                                span.style.color = '#495057';
+                                span.style.textDecoration = 'none';
+                            }
+                        }
+                    }
+                });
+                
+                // Show notification with list of submitted tests
+                console.log('Final submitted test names count:', submittedTestNames.length);
+                console.log('Notification div exists:', !!notificationDiv);
+                console.log('Submitted tests list div exists:', !!submittedTestsList);
+                
+                if (submittedTestNames.length > 0) {
+                    if (notificationDiv && submittedTestsList) {
+                        // Remove duplicates
+                        const uniqueTests = [...new Set(submittedTestNames)];
+                        submittedTestsList.innerHTML = uniqueTests.map(test => 
+                            '<div style="padding:4px 0; border-bottom:1px solid #fecaca;"><i class="fas fa-check-circle" style="color:#dc2626; margin-right:6px;"></i>' + 
+                            htmlspecialchars(test) + '</div>'
+                        ).join('');
+                        notificationDiv.style.display = 'block';
+                        console.log('Notification displayed with', uniqueTests.length, 'tests');
+                    } else {
+                        console.error('Notification elements not found!', {
+                            notificationDiv: !!notificationDiv,
+                            submittedTestsList: !!submittedTestsList
+                        });
+                    }
+                } else {
+                    if (notificationDiv) {
+                        notificationDiv.style.display = 'none';
+                    }
+                    console.log('No submitted tests found, hiding notification');
+                }
+            } else {
+                // If API call failed or no submitted tests, re-enable all checkboxes
+                document.querySelectorAll('.test-checkbox').forEach(cb => {
+                    if (!cb.hasAttribute('data-locked-test') && !cb.hasAttribute('data-already-submitted')) {
+                        cb.style.pointerEvents = 'auto';
+                    }
+                });
+                
+                // Hide notification if no submitted tests
+                if (notificationDiv) {
+                    notificationDiv.style.display = 'none';
+                }
+            }
+        })
+        .catch(err => {
+            console.error('Error checking submitted tests for range:', err);
+            // Re-enable checkboxes on error
+            document.querySelectorAll('.test-checkbox').forEach(cb => {
+                if (!cb.hasAttribute('data-locked-test') && !cb.hasAttribute('data-already-submitted')) {
+                    cb.style.pointerEvents = 'auto';
+                }
+            });
+            
+            // Hide notification on error
+            const notificationDiv = document.getElementById('submitted_tests_notification');
+            if (notificationDiv) {
+                notificationDiv.style.display = 'none';
+            }
+            
+            // Fallback to checking just the from reference
+            checkAndDisableSubmittedTests(fromRef, excludeReportId);
+        });
+}
+
+// Helper function to escape HTML (simple version)
+function htmlspecialchars(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
 }
 
 // Apply bulk reference selection - create test orders for range of references
@@ -4670,6 +5144,16 @@ function applyBulkReferenceSelection() {
         alert('Please select both From and To references');
         return;
     }
+    
+    // Immediately disable all checkboxes to prevent clicking while checking
+    document.querySelectorAll('.test-checkbox').forEach(cb => {
+        if (!cb.hasAttribute('data-locked-test')) {
+            cb.style.pointerEvents = 'none';
+        }
+    });
+    
+    // Check for submitted tests in the reference range
+    checkAndDisableSubmittedTestsForRange(fromValue, toValue);
     
     // Get all references between From and To
     const allRefs = Array.from(fromRefSelect.options).map(opt => opt.value).filter(v => v);
@@ -4876,6 +5360,7 @@ function applyBulkReferenceSelection() {
 function clearBulkReferenceSelection() {
     const fromRefSelect = document.getElementById('from_reference');
     const toRefSelect = document.getElementById('to_reference');
+    const notificationDiv = document.getElementById('submitted_tests_notification');
     
     if (fromRefSelect) fromRefSelect.value = '';
     if (toRefSelect) {
@@ -4885,6 +5370,14 @@ function clearBulkReferenceSelection() {
             option.style.display = '';
         });
     }
+    
+    // Hide notification when references are cleared
+    if (notificationDiv) {
+        notificationDiv.style.display = 'none';
+    }
+    
+    // Re-enable all tests
+    checkAndDisableSubmittedTests('');
     
     sessionStorage.removeItem('bulk_reference_selection');
     sessionStorage.removeItem('bulk_from_ref');
@@ -4995,6 +5488,20 @@ function checkAndDisableSubmittedTests(reference, excludeReportId = null) {
                         checkbox.setAttribute('data-already-submitted', 'true');
                         checkbox.title = 'This test has already been submitted for the selected reference. You can only submit different test methods.';
                         
+                        // Hide test parameters and disable all inputs
+                        const testItem = checkbox.closest('.test-item');
+                        if (testItem) {
+                            const params = testItem.querySelector('.test-parameters');
+                            if (params) {
+                                params.style.display = 'none';
+                                // Disable all inputs within test parameters
+                                params.querySelectorAll('input, textarea, select').forEach(input => {
+                                    input.disabled = true;
+                                    input.readOnly = true;
+                                });
+                            }
+                        }
+                        
                         // Add inline event handlers to prevent checking
                         checkbox.onclick = function(e) {
                             e.preventDefault();
@@ -5002,13 +5509,26 @@ function checkAndDisableSubmittedTests(reference, excludeReportId = null) {
                             e.stopImmediatePropagation();
                             this.checked = false;
                             
+                            // Hide test parameters and disable inputs
+                            const testItem = this.closest('.test-item');
+                            if (testItem) {
+                                const params = testItem.querySelector('.test-parameters');
+                                if (params) {
+                                    params.style.display = 'none';
+                                    params.querySelectorAll('input, textarea, select').forEach(input => {
+                                        input.disabled = true;
+                                        input.readOnly = true;
+                                    });
+                                }
+                            }
+                            
                             // Modern toast notification
                             const testName = this.getAttribute('data-test-name') || 'Unknown';
                             const method = this.getAttribute('data-method') || 'Unknown';
                             showToast(
-                                `"${testName} (${method})" has already been submitted for this reference and cannot be selected again.`,
+                                `⚠️ "${testName} (${method})" has already been submitted for this reference and cannot be selected again. Please select a different test method.`,
                                 'warning',
-                                4000
+                                5000
                             );
                             
                             return false;
@@ -5018,6 +5538,20 @@ function checkAndDisableSubmittedTests(reference, excludeReportId = null) {
                             e.stopPropagation();
                             e.stopImmediatePropagation();
                             this.checked = false;
+                            
+                            // Hide test parameters and disable inputs
+                            const testItem = this.closest('.test-item');
+                            if (testItem) {
+                                const params = testItem.querySelector('.test-parameters');
+                                if (params) {
+                                    params.style.display = 'none';
+                                    params.querySelectorAll('input, textarea, select').forEach(input => {
+                                        input.disabled = true;
+                                        input.readOnly = true;
+                                    });
+                                }
+                            }
+                            
                             return false;
                         };
                         checkbox.style.pointerEvents = 'none';
@@ -5042,15 +5576,31 @@ function checkAndDisableSubmittedTests(reference, excludeReportId = null) {
                                 e.preventDefault();
                                 e.stopPropagation();
                                 
-                                // Modern toast notification
+                                // Ensure checkbox is unchecked
                                 const checkbox = label.querySelector('.test-checkbox');
                                 if (checkbox) {
+                                    checkbox.checked = false;
+                                    
+                                    // Hide test parameters and disable inputs
+                                    const testItem = checkbox.closest('.test-item');
+                                    if (testItem) {
+                                        const params = testItem.querySelector('.test-parameters');
+                                        if (params) {
+                                            params.style.display = 'none';
+                                            params.querySelectorAll('input, textarea, select').forEach(input => {
+                                                input.disabled = true;
+                                                input.readOnly = true;
+                                            });
+                                        }
+                                    }
+                                    
+                                    // Modern toast notification
                                     const testName = checkbox.getAttribute('data-test-name') || 'Unknown';
                                     const method = checkbox.getAttribute('data-method') || 'Unknown';
                                     showToast(
-                                        `"${testName} (${method})" has already been submitted for this reference and cannot be selected again.`,
+                                        `⚠️ "${testName} (${method})" has already been submitted for this reference and cannot be selected again. Please select a different test method.`,
                                         'warning',
-                                        4000
+                                        5000
                                     );
                                 }
                                 
@@ -5145,25 +5695,136 @@ function checkAndDisableSubmittedTests(reference, excludeReportId = null) {
 
 // Prevent checking disabled checkboxes
 document.addEventListener('DOMContentLoaded', function() {
+    // GLOBAL INTERCEPTOR: Continuously monitor and prevent already-submitted checkboxes from being checked
+    setInterval(function() {
+        document.querySelectorAll('.test-checkbox[data-already-submitted="true"]').forEach(checkbox => {
+            if (checkbox.checked) {
+                checkbox.checked = false;
+                checkbox.disabled = true;
+                checkbox.readOnly = true;
+                
+                const testItem = checkbox.closest('.test-item');
+                if (testItem) {
+                    const params = testItem.querySelector('.test-parameters');
+                    if (params) {
+                        params.style.display = 'none';
+                        params.querySelectorAll('input, textarea, select').forEach(input => {
+                            input.disabled = true;
+                            input.readOnly = true;
+                        });
+                    }
+                }
+            }
+        });
+    }, 100); // Check every 100ms
+    
+    // Add global event listener on document to catch ALL checkbox clicks (capture phase)
+    document.addEventListener('click', function(e) {
+        const checkbox = e.target.closest('.test-checkbox');
+        if (checkbox && (checkbox.hasAttribute('data-already-submitted') || checkbox.disabled || checkbox.readOnly)) {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            checkbox.checked = false;
+            checkbox.disabled = true;
+            checkbox.readOnly = true;
+            
+            const testName = checkbox.getAttribute('data-test-name') || 'Test';
+            const method = checkbox.getAttribute('data-method') || 'Method';
+            showToast('⚠️ This test method (' + testName + ' - ' + method + ') has already been submitted for the selected reference. Please select a different test method.', 'warning', 5000);
+            
+            const testItem = checkbox.closest('.test-item');
+            if (testItem) {
+                const params = testItem.querySelector('.test-parameters');
+                if (params) {
+                    params.style.display = 'none';
+                    params.querySelectorAll('input, textarea, select').forEach(input => {
+                        input.disabled = true;
+                        input.readOnly = true;
+                    });
+                }
+            }
+            return false;
+        }
+    }, true); // Use capture phase to catch events early
+    
+    // Add global change listener (capture phase)
+    document.addEventListener('change', function(e) {
+        const checkbox = e.target;
+        if (checkbox && checkbox.classList.contains('test-checkbox') && 
+            (checkbox.hasAttribute('data-already-submitted') || checkbox.disabled || checkbox.readOnly)) {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            checkbox.checked = false;
+            checkbox.disabled = true;
+            checkbox.readOnly = true;
+            return false;
+        }
+    }, true); // Use capture phase
+    
     // Add click prevention for disabled checkboxes
     document.querySelectorAll('.test-checkbox').forEach(checkbox => {
         checkbox.addEventListener('click', function(e) {
-            if (this.disabled || this.hasAttribute('data-already-submitted')) {
+            if (this.disabled || this.hasAttribute('data-already-submitted') || this.readOnly) {
                 e.preventDefault();
                 e.stopPropagation();
-                alert('This test has already been submitted for the selected reference and cannot be selected again.');
+                e.stopImmediatePropagation();
+                this.checked = false;
+                this.disabled = true;
+                this.readOnly = true;
+                
+                const testName = this.getAttribute('data-test-name') || 'Test';
+                const method = this.getAttribute('data-method') || 'Method';
+                showToast('⚠️ This test method (' + testName + ' - ' + method + ') has already been submitted for the selected reference. Please select a different test method.', 'warning', 5000);
+                
+                // Hide any test parameters that might have been shown
+                const testItem = this.closest('.test-item');
+                if (testItem) {
+                    const params = testItem.querySelector('.test-parameters');
+                    if (params) {
+                        params.style.display = 'none';
+                        params.querySelectorAll('input, textarea, select').forEach(input => {
+                            input.disabled = true;
+                            input.readOnly = true;
+                        });
+                    }
+                }
+                
                 return false;
             }
-        });
+        }, true); // Use capture phase
         
         checkbox.addEventListener('change', function(e) {
-            if (this.disabled || this.hasAttribute('data-already-submitted')) {
+            if (this.disabled || this.hasAttribute('data-already-submitted') || this.readOnly) {
                 e.preventDefault();
                 e.stopPropagation();
+                e.stopImmediatePropagation();
                 this.checked = false;
+                this.disabled = true;
+                this.readOnly = true;
+                
+                const testName = this.getAttribute('data-test-name') || 'Test';
+                const method = this.getAttribute('data-method') || 'Method';
+                showToast('⚠️ This test method (' + testName + ' - ' + method + ') has already been submitted for the selected reference. Please select a different test method.', 'warning', 5000);
+                
+                // Hide any test parameters that might have been shown
+                const testItem = this.closest('.test-item');
+                if (testItem) {
+                    const params = testItem.querySelector('.test-parameters');
+                    if (params) {
+                        params.style.display = 'none';
+                        // Disable all inputs within test parameters
+                        params.querySelectorAll('input, textarea, select').forEach(input => {
+                            input.disabled = true;
+                            input.readOnly = true;
+                        });
+                    }
+                }
+                
                 return false;
             }
-        });
+        }, true); // Use capture phase
     });
     
     // Check submitted tests on page load if reference is already selected
@@ -5223,26 +5884,9 @@ function handleReferenceSelection(selectedValue) {
     
     // Get the selected option
     const selectedOption = productRefSelect.options[productRefSelect.selectedIndex];
-    const isBundle = selectedOption.getAttribute('data-is-bundle') === 'true';
     
-    if (isBundle) {
-        // Show individual roll selector
-        const baseRef = selectedOption.getAttribute('data-base-ref');
-        const rollCount = parseInt(selectedOption.getAttribute('data-roll-count')) || 1;
-        
-        if (individualRollSelect) {
-            individualRollSelect.style.display = 'block';
-            individualRollSelect.setAttribute('required', 'required');
-        }
-        if (bundleInfo) bundleInfo.style.display = 'block';
-        
-        // Update dropdown based on selected test method
-        updateIndividualRollDropdown();
-        
-        // Don't load reference data yet - wait for individual roll selection
-        loadQCReferenceData('');
-    } else {
-        // Hide individual roll selector
+    // Bundle detection removed - always load reference data directly
+    // Hide individual roll selector if it exists
         if (individualRollSelect) {
             individualRollSelect.style.display = 'none';
             individualRollSelect.value = '';
@@ -5250,12 +5894,11 @@ function handleReferenceSelection(selectedValue) {
         }
         if (bundleInfo) bundleInfo.style.display = 'none';
         
-        // Load reference data for single roll
+    // Load reference data for the selected reference
         loadQCReferenceData(selectedValue);
         
         // Check and disable submitted tests for this reference
         checkAndDisableSubmittedTests(selectedValue);
-    }
 }
 
 // Handle individual roll selection from bundle
@@ -6663,12 +7306,24 @@ function updateSampleReferenceId() {
             if (checkbox.disabled || checkbox.hasAttribute('data-already-submitted') || checkbox.readOnly) {
                 console.warn('⚠️ BLOCKED: Attempted to select disabled/already-submitted test:', checkbox.getAttribute('data-test-name'), checkbox.getAttribute('data-method'));
                 checkbox.checked = false;
-                alert('This test has already been submitted for the selected reference and cannot be selected again.');
+                checkbox.disabled = true;
+                checkbox.readOnly = true;
+                
+                const testName = checkbox.getAttribute('data-test-name') || 'Test';
+                const method = checkbox.getAttribute('data-method') || 'Method';
+                showToast('⚠️ This test method (' + testName + ' - ' + method + ') has already been submitted for the selected reference. Please select a different test method.', 'warning', 5000);
+                
                 // Hide any test parameters that might have been shown
                 const testItem = checkbox.closest('.test-item');
                 if (testItem) {
                     const params = testItem.querySelector('.test-parameters');
-                    if (params) params.style.display = 'none';
+                    if (params) {
+                        params.style.display = 'none';
+                        params.querySelectorAll('input, textarea, select').forEach(input => {
+                            input.disabled = true;
+                            input.readOnly = true;
+                        });
+                    }
                 }
                 return false;
             }
@@ -6687,6 +7342,14 @@ function updateSampleReferenceId() {
             <?php endif; ?>
             
             if (checkbox.checked) {
+                // DOUBLE CHECK: Make sure it's not already submitted (in case it was checked before this function ran)
+                if (checkbox.hasAttribute('data-already-submitted') || checkbox.disabled || checkbox.readOnly) {
+                    checkbox.checked = false;
+                    checkbox.disabled = true;
+                    checkbox.readOnly = true;
+                    return false;
+                }
+                
                 // For production products, enforce single selection
                 // For external products, allow multiple selections
                 if (!isExternalProduct) {
@@ -6708,8 +7371,7 @@ function updateSampleReferenceId() {
                     // Filter reference dropdowns based on selected test method
                     filterReferencesByTestMethod(checkbox);
                     
-                    // Update individual roll dropdown if bundle is selected
-                    updateIndividualRollDropdown();
+                    // Bundle detection removed - no longer needed
                 } else {
                     // External product: allow multiple selections, show all selected items
                     const selectedItem = checkbox.closest('.test-item');
@@ -6726,7 +7388,18 @@ function updateSampleReferenceId() {
                 }
             }
             // Only show test parameters for testers, not AGM
+            // Check again before showing parameters to prevent already-submitted tests
+            if (!checkbox.disabled && !checkbox.hasAttribute('data-already-submitted') && !checkbox.readOnly) {
             showTestParameters(checkbox);
+            } else {
+                // If somehow the checkbox is checked but disabled, uncheck it and hide parameters
+                checkbox.checked = false;
+                const testItem = checkbox.closest('.test-item');
+                if (testItem) {
+                    const params = testItem.querySelector('.test-parameters');
+                    if (params) params.style.display = 'none';
+                }
+            }
             toggleOtherInfoForGsmOnly();
             toggleGeneralInfoVisibility();
             updateSelectionCount();
@@ -6928,6 +7601,18 @@ function updateSampleReferenceId() {
             <?php if ($is_admin): ?>
             return;
             <?php endif; ?>
+            
+            // CRITICAL: Prevent showing parameters for disabled/already-submitted tests
+            if (checkbox.disabled || checkbox.hasAttribute('data-already-submitted') || checkbox.readOnly) {
+                console.warn('⚠️ BLOCKED: Attempted to show parameters for disabled/already-submitted test');
+                checkbox.checked = false;
+                const testItem = checkbox.closest('.test-item');
+                if (testItem) {
+                    const params = testItem.querySelector('.test-parameters');
+                    if (params) params.style.display = 'none';
+                }
+                return;
+            }
             
             console.log('showTestParameters called');
             const testName = checkbox.getAttribute('data-test-name');

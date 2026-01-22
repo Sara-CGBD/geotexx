@@ -236,6 +236,10 @@ $lines = $conn->query("SELECT DISTINCT line_no FROM swing_machine_entry WHERE li
         .export-btn { background: #27ae60; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-weight: 600; margin-bottom: 20px; margin-right: 10px; }
         
         @media print {
+            @page {
+                size: A4 landscape;
+                margin: 10mm;
+            }
             * { 
                 box-sizing: border-box;
                 -webkit-print-color-adjust: exact;

@@ -1146,6 +1146,7 @@ $conn->close();
                             }
                             // Update dashboard sections dynamically
                             updateDashboardSections();
+                            toggle.disabled = false;
                         } else {
                             throw new Error(data.message || 'Failed to auto-approve reports');
                         }
@@ -1158,6 +1159,7 @@ $conn->close();
                     }
                     // Update dashboard sections dynamically
                     updateDashboardSections();
+                    toggle.disabled = false;
                 }
             } else {
                 throw new Error(results.find(r => !r.success)?.message || 'Failed to update settings');
@@ -1170,6 +1172,233 @@ $conn->close();
             toggle.checked = !enabled;
             toggle.disabled = false;
         });
+    }
+    
+    // Update dashboard sections dynamically without page refresh
+    function updateDashboardSections() {
+        fetch('api/get_dashboard_sections.php')
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    // Show/hide auto-approved section
+                    const autoApprovedSection = document.getElementById('auto_approved_section');
+                    if (data.auto_approve_gsm || data.auto_approve_lc) {
+                        autoApprovedSection.style.display = 'block';
+                        // Update auto-approved content
+                        updateAutoApprovedSection(data);
+                    } else {
+                        autoApprovedSection.style.display = 'none';
+                    }
+                    
+                    // Update pending sections
+                    updatePendingGSMSection(data.gsm_checks);
+                    updatePendingLCSection(data.lc_calibrations);
+                }
+            })
+            .catch(error => {
+                console.error('Error updating dashboard:', error);
+                // Fallback to page reload if AJAX fails
+                location.reload();
+            });
+    }
+    
+    function updateAutoApprovedSection(data) {
+        const section = document.getElementById('auto_approved_section');
+        let html = '<h2 style="color: #15803d;"><i class="fas fa-check-circle"></i> Auto-Approved Reports</h2>';
+        
+        if (data.auto_approve_gsm) {
+            const totalGsm = Object.values(data.gsm_auto_approved).reduce((sum, tests) => sum + tests.length, 0);
+            html += `<div style="margin-bottom: 30px;">
+                <h3 style="color: #15803d; margin-bottom: 15px; font-size: 18px;">
+                    <i class="fas fa-weight"></i> Auto-Approved GSM Checks (${totalGsm})
+                </h3>`;
+            
+            if (Object.keys(data.gsm_auto_approved).length > 0) {
+                for (const [refNumber, tests] of Object.entries(data.gsm_auto_approved)) {
+                    html += renderAutoApprovedTable('gsm', refNumber, tests);
+                }
+            } else {
+                html += '<div class="empty-state"><i class="fas fa-inbox"></i><p>No auto-approved GSM checks</p></div>';
+            }
+            html += '</div>';
+        }
+        
+        if (data.auto_approve_lc) {
+            const totalLc = Object.values(data.lc_auto_approved).reduce((sum, tests) => sum + tests.length, 0);
+            html += `<div>
+                <h3 style="color: #15803d; margin-bottom: 15px; font-size: 18px;">
+                    <i class="fas fa-ruler"></i> Auto-Approved Length Calibrations (${totalLc})
+                </h3>`;
+            
+            if (Object.keys(data.lc_auto_approved).length > 0) {
+                for (const [refNumber, tests] of Object.entries(data.lc_auto_approved)) {
+                    html += renderAutoApprovedTable('lc', refNumber, tests);
+                }
+            } else {
+                html += '<div class="empty-state"><i class="fas fa-inbox"></i><p>No auto-approved length calibrations</p></div>';
+            }
+            html += '</div>';
+        }
+        
+        section.innerHTML = html;
+    }
+    
+    function renderAutoApprovedTable(type, refNumber, tests) {
+        const viewUrl = type === 'gsm' 
+            ? `view_gsm_check.php?id=${encodeURIComponent(tests[0].entry_id)}&approval_dashboard=1`
+            : `view_length_calibration.php?id=${encodeURIComponent(tests[0].entry_id)}&approval_dashboard=1`;
+        
+        let html = `<div style="margin-bottom: 30px; border: 2px solid #27ae60; border-radius: 8px; padding: 15px; background: white;">
+            <h3 style="color: #15803d; margin: 0 0 15px 0; font-size: 16px;">
+                <i class="fas fa-barcode"></i> Reference: <strong>${escapeHtml(refNumber)}</strong>
+                <span style="font-size: 14px; color: #666; font-weight: normal;">(${tests.length} test${tests.length > 1 ? 's' : ''})</span>
+            </h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Entry ID</th>
+                        <th>Roll No</th>
+                        <th>Date & Time</th>
+                        <th>Shift</th>
+                        <th>Line Number</th>
+                        <th>Inspector</th>
+                        <th>Approved At</th>
+                        <th>Status</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>`;
+        
+        tests.forEach(item => {
+            const dateTime = formatDateTime(item.date_time);
+            const approvedAt = item.approved_at ? formatDateTime(item.approved_at) : 'N/A';
+            html += `<tr>
+                <td><strong>${escapeHtml(item.entry_id)}</strong></td>
+                <td>${escapeHtml(item.roll_no || 'N/A')}</td>
+                <td>${dateTime}</td>
+                <td>${escapeHtml(item.shift)}</td>
+                <td>${escapeHtml(item.line_number)}</td>
+                <td>${escapeHtml(item.inspector)}</td>
+                <td>${approvedAt}</td>
+                <td><span class="badge-auto-approved"><i class="fas fa-check-circle"></i> Auto-Approved</span></td>
+                <td><a href="${viewUrl}" class="btn btn-view" target="_blank"><i class="fas fa-eye"></i> View</a></td>
+            </tr>`;
+        });
+        
+        html += '</tbody></table></div>';
+        return html;
+    }
+    
+    function updatePendingGSMSection(gsmChecks) {
+        const section = document.getElementById('pending_gsm_section');
+        const total = Object.values(gsmChecks).reduce((sum, tests) => sum + tests.length, 0);
+        
+        let html = `<h2><i class="fas fa-weight"></i> Pending Daily GSM Checks (${total})</h2>`;
+        
+        if (Object.keys(gsmChecks).length > 0) {
+            for (const [refNumber, tests] of Object.entries(gsmChecks)) {
+                html += renderPendingTable('gsm', refNumber, tests);
+            }
+        } else {
+            html += '<div class="empty-state"><i class="fas fa-inbox"></i><p>No pending GSM checks</p></div>';
+        }
+        
+        section.innerHTML = html;
+    }
+    
+    function updatePendingLCSection(lcCalibrations) {
+        const section = document.getElementById('pending_lc_section');
+        const total = Object.values(lcCalibrations).reduce((sum, tests) => sum + tests.length, 0);
+        
+        let html = `<h2><i class="fas fa-ruler"></i> Pending Length Calibrations (${total})</h2>`;
+        
+        if (Object.keys(lcCalibrations).length > 0) {
+            for (const [refNumber, tests] of Object.entries(lcCalibrations)) {
+                html += renderPendingTable('lc', refNumber, tests);
+            }
+        } else {
+            html += '<div class="empty-state"><i class="fas fa-inbox"></i><p>No pending length calibrations</p></div>';
+        }
+        
+        section.innerHTML = html;
+    }
+    
+    function renderPendingTable(type, refNumber, tests) {
+        const viewUrl = type === 'gsm' 
+            ? `view_gsm_check.php?id=${encodeURIComponent(tests[0].entry_id)}&approval_dashboard=1`
+            : `view_length_calibration.php?id=${encodeURIComponent(tests[0].entry_id)}&approval_dashboard=1`;
+        
+        let html = `<div style="margin-bottom: 30px; border: 2px solid #667eea; border-radius: 8px; padding: 15px; background: #f8f9ff;">
+            <h3 style="color: #667eea; margin: 0 0 15px 0; font-size: 16px;">
+                <i class="fas fa-barcode"></i> Reference: <strong>${escapeHtml(refNumber)}</strong>
+                <span style="font-size: 14px; color: #666; font-weight: normal;">(${tests.length} test${tests.length > 1 ? 's' : ''})</span>
+            </h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Entry ID</th>
+                        <th>Roll No</th>
+                        <th>Date & Time</th>
+                        <th>Shift</th>
+                        <th>Line Number</th>
+                        <th>Inspector</th>
+                        <th>Submitted At</th>
+                        <th>Status</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>`;
+        
+        tests.forEach(item => {
+            const dateTime = formatDateTime(item.date_time);
+            const submittedAt = formatDateTime(item.created_at);
+            const approveFunc = type === 'gsm' ? `approveGSM('${escapeJs(item.entry_id)}')` : `approveLC('${escapeJs(item.entry_id)}')`;
+            const rejectFunc = type === 'gsm' ? `rejectGSM('${escapeJs(item.entry_id)}')` : `rejectLC('${escapeJs(item.entry_id)}')`;
+            
+            html += `<tr>
+                <td><strong>${escapeHtml(item.entry_id)}</strong></td>
+                <td>${escapeHtml(item.roll_no || 'N/A')}</td>
+                <td>${dateTime}</td>
+                <td>${escapeHtml(item.shift)}</td>
+                <td>${escapeHtml(item.line_number)}</td>
+                <td>${escapeHtml(item.inspector)}</td>
+                <td>${submittedAt}</td>
+                <td><span class="badge">Pending</span></td>
+                <td>
+                    <a href="${viewUrl}" class="btn btn-view" target="_blank"><i class="fas fa-eye"></i> View</a>
+                    <button class="btn btn-approve" onclick="${approveFunc}"><i class="fas fa-check"></i> Approve</button>
+                    <button class="btn btn-reject" onclick="${rejectFunc}"><i class="fas fa-times"></i> Reject</button>
+                </td>
+            </tr>`;
+        });
+        
+        html += '</tbody></table></div>';
+        return html;
+    }
+    
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+    
+    function escapeJs(text) {
+        return String(text).replace(/'/g, "\\'").replace(/"/g, '\\"');
+    }
+    
+    function formatDateTime(dateTimeStr) {
+        if (!dateTimeStr) return 'N/A';
+        const date = new Date(dateTimeStr);
+        const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        const day = date.getDate();
+        const month = months[date.getMonth()];
+        const year = date.getFullYear();
+        const hours = date.getHours();
+        const minutes = date.getMinutes();
+        const ampm = hours >= 12 ? 'PM' : 'AM';
+        const displayHours = hours % 12 || 12;
+        const displayMinutes = minutes < 10 ? '0' + minutes : minutes;
+        return `${day} ${month} ${year}, ${displayHours}:${displayMinutes} ${ampm}`;
     }
     
     let currentRejectEntryId = '';

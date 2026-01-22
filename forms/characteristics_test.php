@@ -32,25 +32,33 @@ $reporter_name = $_SESSION['username'];
         $reporter_full_name = $reporter_name;
     }
     
-    // Fetch reference numbers from roll_received (roll received entry) - support bundles
+    // Fetch reference numbers from roll_entry - support bundles and line detection
+    // Tests are done AFTER roll entry submission
     $references = [];
     $bundleReferences = [];
     
     try {
-        $refQuery = $conn->query("SELECT DISTINCT r.reference_number, MAX(r.created_at) as created_at
-            FROM roll_received r 
-            LEFT JOIN characteristics_tests ct ON r.reference_number = ct.reference_number 
+        $refQuery = $conn->query("SELECT DISTINCT re.reference_number, MAX(re.date_time) as created_at
+            FROM roll_entry re 
+            LEFT JOIN characteristics_tests ct ON re.reference_number = ct.reference_number 
                 AND ct.status IN ('pending', 'checked', 'approved')
-            WHERE r.reference_number IS NOT NULL 
-                AND r.reference_number != ''
-                AND r.is_deleted = 0
+            WHERE re.reference_number IS NOT NULL 
+                AND re.reference_number != ''
                 AND ct.reference_number IS NULL
-            GROUP BY r.reference_number
+            GROUP BY re.reference_number
             ORDER BY created_at DESC 
             LIMIT 100");
         if ($refQuery) {
             while ($row = $refQuery->fetch_assoc()) {
                 $ref = $row['reference_number'];
+                
+                // Detect line number (L1 or L2) from reference
+                $lineIndicator = '';
+                if (strpos($ref, 'L1') !== false) {
+                    $lineIndicator = 'L1';
+                } elseif (strpos($ref, 'L2') !== false) {
+                    $lineIndicator = 'L2';
+                }
                 
                 // Check if this is a bundle reference (ends with -N pattern)
                 if (preg_match('/-(\d+)$/', $ref, $matches)) {
@@ -61,10 +69,15 @@ $reporter_name = $_SESSION['username'];
                         'reference' => $ref,
                         'base_reference' => $baseRef,
                         'roll_count' => $rollCount,
-                        'date' => $row['created_at']
+                        'date' => $row['created_at'],
+                        'line' => $lineIndicator
                     ];
                 } else {
-                    $references[] = $ref;
+                    $references[] = [
+                        'reference' => $ref,
+                        'line' => $lineIndicator,
+                        'date' => $row['created_at']
+                    ];
                 }
             }
         }
@@ -311,7 +324,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ct_action'], $_POST['
                 }
                 $bundleCheck->close();
                 
-                $_SESSION['success_message'] = "✅ Test approved successfully!";
+                $_SESSION['success_message'] = "Test approved successfully!";
                 $stmt->close();
                 // Prevent caching and redirect to refresh the page
                 header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
@@ -376,17 +389,82 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_test'])) {
         $test_date = date('Y-m-d');
         $gsm = null; // No longer required
         $roll_number = null; // No longer required
+        
+        // Generate individual roll references from from-to range (same as QC test order)
+        $bulk_rolls = [];
+        if (isset($_POST['from_reference']) && isset($_POST['to_reference']) && 
+            !empty($_POST['from_reference']) && !empty($_POST['to_reference'])) {
+            
+            $fromRef = trim($_POST['from_reference']);
+            $toRef = trim($_POST['to_reference']);
+            
+            // Extract base reference and roll numbers
+            $fromBaseRef = '';
+            $fromRollNum = 0;
+            $toBaseRef = '';
+            $toRollNum = 0;
+            
+            if (preg_match('/^(.+)-(\d+)$/', $fromRef, $fromMatches)) {
+                $fromBaseRef = $fromMatches[1];
+                $fromRollNum = (int)$fromMatches[2];
+            } else {
+                $fromBaseRef = $fromRef;
+                $fromRollNum = 1;
+            }
+            
+            if (preg_match('/^(.+)-(\d+)$/', $toRef, $toMatches)) {
+                $toBaseRef = $toMatches[1];
+                $toRollNum = (int)$toMatches[2];
+            } else {
+                $toBaseRef = $toRef;
+                $toRollNum = 1;
+            }
+            
+            // If same base, generate all references from fromRollNum to toRollNum
+            if ($fromBaseRef === $toBaseRef && $fromRollNum > 0 && $toRollNum > 0) {
+                for ($roll = $fromRollNum; $roll <= $toRollNum; $roll++) {
+                    $bulk_rolls[] = $fromBaseRef . '-' . $roll;
+                }
+                error_log("Characteristics Test: Generated " . count($bulk_rolls) . " individual references from range: " . $fromRef . " to " . $toRef);
+            } else {
+                // Different bases - add both endpoints
+                $bulk_rolls[] = $fromRef;
+                if ($toRef !== $fromRef) {
+                    $bulk_rolls[] = $toRef;
+                }
+                error_log("Characteristics Test: WARNING - Different base references in range. Generated " . count($bulk_rolls) . " references.");
+            }
+        }
+        
         // Get reference number - use individual roll reference if bundle is selected
+        // Or use from_reference/to_reference if line-based selection is used
         $reference_number = '';
+        $bundle_reference = null;
+        
         if (isset($_POST['individual_roll_reference']) && !empty($_POST['individual_roll_reference'])) {
             $reference_number = trim($_POST['individual_roll_reference']);
+            // Get bundle reference if individual roll is selected
+            if (isset($_POST['reference_number']) && !empty($_POST['reference_number'])) {
+                $bundle_reference = trim($_POST['reference_number']); // Original bundle reference
+            }
+        } elseif (!empty($bulk_rolls)) {
+            // Range selected - bundle_reference will be set for all rolls
+            $bundle_reference = trim($_POST['from_reference']) . '|' . trim($_POST['to_reference']);
+            // reference_number will be set per roll in the loop
         } elseif (isset($_POST['reference_number']) && !empty($_POST['reference_number'])) {
             $reference_number = trim($_POST['reference_number']);
+            // Check if this is a range format (from|to)
+            if (strpos($reference_number, '|') !== false) {
+                $parts = explode('|', $reference_number);
+                if (count($parts) === 2) {
+                    $reference_number = trim($parts[0]); // Use from reference
+                    $bundle_reference = $reference_number; // Store the range format
+                }
+            }
         }
         
         // Simple report number format: CT-YYYYMMDD-XXXXX
         $date_formatted = date('Ymd');
-        $report_number = "CT-{$date_formatted}-" . str_pad($generated_lab_test_no, 3, '0', STR_PAD_LEFT);
         
         // Collect sieve analysis data (dynamic rows up to 20)
         $sieve_data = [];
@@ -422,14 +500,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_test'])) {
         // Checker approval (separate action) will change status from 'pending' to 'checked'
         // Admin approval (separate action) will change status from 'checked' to 'approved'
         
-        // Get bundle reference if individual roll is selected
-        $bundle_reference = null;
-        if (isset($_POST['individual_roll_reference']) && !empty($_POST['individual_roll_reference']) 
-            && isset($_POST['reference_number']) && !empty($_POST['reference_number'])) {
-            $bundle_reference = trim($_POST['reference_number']); // Original bundle reference
-        }
+        // Bundle reference is now set above when processing from_reference/to_reference
         
-        // Insert into database
+        // Prepare the insert statement
         $stmt = $conn->prepare(
             "INSERT INTO characteristics_tests 
             (report_number, lab_test_number, test_standard, test_materials, reference_number, bundle_reference, gsm, roll_number, sample_id,
@@ -456,13 +529,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_test'])) {
             $approver_name = $_POST['approved_by'] ?? $reporter_full_name;
         }
         
+        // Process each roll in the range (or single reference)
+        $rolls_to_process = !empty($bulk_rolls) ? $bulk_rolls : [];
+        if (empty($rolls_to_process) && !empty($reference_number)) {
+            $rolls_to_process = [$reference_number];
+        }
+        
+        if (empty($rolls_to_process)) {
+            throw new Exception("No reference selected. Please select a reference or range.");
+        }
+        
+        $inserted_count = 0;
+        $report_numbers = [];
+        
+        foreach ($rolls_to_process as $roll_ref) {
+            // For bulk rolls, use the individual roll as reference_number
+            $current_reference_number = !empty($bulk_rolls) ? $roll_ref : $reference_number;
+            
+            // Generate unique report number for each roll
+            $current_lab_test_no = $generated_lab_test_no + $inserted_count;
+            $report_number = "CT-{$date_formatted}-" . str_pad($current_lab_test_no, 3, '0', STR_PAD_LEFT);
+            $report_numbers[] = $report_number;
+        
         $stmt->bind_param(
             "sssssssdssdssdsdssssssssiss",
             $report_number,                  // s
-            $generated_lab_test_no,          // s
+                $current_lab_test_no,            // s
             $test_standard,                  // s
             $_POST['test_materials'],        // s
-            $reference_number,               // s
+                $current_reference_number,       // s
             $bundle_reference,               // s (NULL if not bundle)
             $gsm,                            // d (NULL)
             $roll_number,                    // s (NULL)
@@ -488,11 +583,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_test'])) {
         );
         
         if ($stmt->execute()) {
+                $inserted_count++;
+            } else {
+                error_log("Characteristics Test: Failed to insert roll " . $roll_ref . ": " . $stmt->error);
+            }
+        }
+        
+        if ($inserted_count > 0) {
             $conn->commit();
             if ($submit_status === 'approved') {
-                $message = "✅ Test submitted and auto-approved! Report Number: " . $report_number . " | Status: Approved";
+                $message = $inserted_count > 1 
+                    ? "{$inserted_count} tests submitted and auto-approved! Report Numbers: " . implode(', ', array_slice($report_numbers, 0, 3)) . (count($report_numbers) > 3 ? '...' : '') . " | Status: Approved"
+                    : "Test submitted and auto-approved! Report Number: " . $report_numbers[0] . " | Status: Approved";
             } else {
-                $message = "✅ Test submitted successfully! Report Number: " . $report_number . " | Status: Pending";
+                $message = $inserted_count > 1 
+                    ? "{$inserted_count} tests submitted successfully! Report Numbers: " . implode(', ', array_slice($report_numbers, 0, 3)) . (count($report_numbers) > 3 ? '...' : '') . " | Status: Pending"
+                    : "Test submitted successfully! Report Number: " . $report_numbers[0] . " | Status: Pending";
             }
             
             // Check bundle completion if this is from a bundle and was approved
@@ -559,7 +665,7 @@ $generated_lab_test_no = generateLabTestNumber($conn);
   <h1>Determination of the Characteristics Test (ISO 12956)</h1>
 
   <?php if ($message): ?>
-    <div class="alert alert-success">✅ <?php echo $message; ?></div>
+    <div class="alert alert-success"><?php echo $message; ?></div>
   <?php endif; ?>
 
   <?php if ($error): ?>
@@ -567,7 +673,7 @@ $generated_lab_test_no = generateLabTestNumber($conn);
   <?php endif; ?>
 
   <div style="margin-bottom: 15px;">
-    <a href="../index.php" style="background:#e74c3c; color:#fff; text-decoration: none; padding: 6px 12px; border-radius: 4px; display: inline-block; font-size: 14px;">
+    <a href="../admin/lab_testing_dashboard.php" style="background:#e74c3c; color:#fff; text-decoration: none; padding: 6px 12px; border-radius: 4px; display: inline-block; font-size: 14px;">
       ← Back to Dashboard
     </a>
   </div>
@@ -731,20 +837,60 @@ $generated_lab_test_no = generateLabTestNumber($conn);
     <div class="form-row">
       <div class="form-group" style="grid-column: 1 / -1;">
         <label>Reference: <span style="color:red;">*</span></label>
+        
+        <!-- Line Selection Buttons -->
+        <div id="char_line_selection_buttons" style="display:flex; gap:10px; margin-bottom:10px;">
+          <button type="button" id="char_line1_btn" class="line-btn" onclick="filterCharByLine('L1')" style="padding:8px 16px; border:2px solid #3498db; border-radius:6px; background:#e3f2fd; color:#1565C0; font-weight:600; cursor:pointer;">
+            Line 1
+          </button>
+          <button type="button" id="char_line2_btn" class="line-btn" onclick="filterCharByLine('L2')" style="padding:8px 16px; border:2px solid #3498db; border-radius:6px; background:#e3f2fd; color:#1565C0; font-weight:600; cursor:pointer;">
+            Line 2
+          </button>
+          <button type="button" id="char_line_all_btn" class="line-btn active" onclick="filterCharByLine('all')" style="padding:8px 16px; border:2px solid #3498db; border-radius:6px; background:#2196F3; color:#ffffff; font-weight:600; cursor:pointer;">
+            All Lines
+          </button>
+        </div>
+        
+        <!-- From/To Reference Selection (shown when line is selected) -->
+        <div id="char_bulk_reference_selection" style="display:none; margin-bottom:10px; padding:10px; background:#f8f9fa; border:1px solid #ddd; border-radius:6px;">
+          <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+            <label style="font-weight:600; margin:0;">From Reference:</label>
+            <select id="char_from_reference" name="from_reference" style="min-width:250px; padding:5px; border:1px solid #ccc; border-radius:4px;" onchange="updateCharReferenceRange(true); handleCharFromToReferenceChange();">
+              <option value="">-- Select From Reference --</option>
+            </select>
+            <label style="font-weight:600; margin:0;">To Reference:</label>
+            <select id="char_to_reference" name="to_reference" style="min-width:250px; padding:5px; border:1px solid #ccc; border-radius:4px;" onchange="updateCharReferenceRange(false); handleCharFromToReferenceChange();">
+              <option value="">-- Select To Reference --</option>
+            </select>
+            <button type="button" onclick="applyCharBulkReferenceSelection()" style="padding:6px 12px; background:#3498db; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:600;">
+              Apply
+            </button>
+            <button type="button" onclick="clearCharBulkReferenceSelection()" style="padding:6px 12px; background:#6c757d; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:600;">
+              Clear
+            </button>
+          </div>
+          <!-- Hidden input to store the selected product_reference when line-based selection is used -->
+          <input type="hidden" id="char_line_based_product_reference" name="product_reference" value="">
+        </div>
+        
+        <!-- Production Product Reference Dropdown (shown when "All Lines" is selected) -->
         <select name="reference_number" id="char_reference_number" onchange="handleCharReferenceSelection(this.value)" required style="padding:10px; border:1px solid #ccc; border-radius:6px; width:100%;">
           <option value="">Select Reference</option>
           <?php 
           // Show bundle references
           foreach($bundleReferences as $bundle): ?>
-            <option value="<?php echo htmlspecialchars($bundle['reference']); ?>" data-is-bundle="true" data-base-ref="<?php echo htmlspecialchars($bundle['base_reference']); ?>" data-roll-count="<?php echo $bundle['roll_count']; ?>">
+            <option value="<?php echo htmlspecialchars($bundle['reference']); ?>" data-is-bundle="true" data-base-ref="<?php echo htmlspecialchars($bundle['base_reference']); ?>" data-roll-count="<?php echo $bundle['roll_count']; ?>" data-line="<?php echo htmlspecialchars($bundle['line'] ?? ''); ?>">
               <?php echo htmlspecialchars($bundle['reference']); ?> (Bundle - <?php echo $bundle['roll_count']; ?> rolls)
             </option>
           <?php endforeach; ?>
           <?php 
           // Show single roll references
-          foreach($references as $ref): ?>
-            <option value="<?php echo htmlspecialchars($ref); ?>" data-is-bundle="false">
-              <?php echo htmlspecialchars($ref); ?>
+          foreach($references as $ref): 
+            $refValue = is_array($ref) ? $ref['reference'] : $ref;
+            $lineIndicator = is_array($ref) ? ($ref['line'] ?? '') : '';
+          ?>
+            <option value="<?php echo htmlspecialchars($refValue); ?>" data-is-bundle="false" data-line="<?php echo htmlspecialchars($lineIndicator); ?>">
+              <?php echo htmlspecialchars($refValue); ?>
             </option>
           <?php endforeach; ?>
         </select>
@@ -1037,6 +1183,406 @@ function handleCharReferenceSelection(selectedValue) {
         // Generate Report ID for single roll
         generateReportID();
     }
+}
+
+// Filter references by Line (L1 or L2)
+function filterCharByLine(line) {
+    const productRefSelect = document.getElementById('char_reference_number');
+    const bulkRefSelection = document.getElementById('char_bulk_reference_selection');
+    
+    // Update button styles
+    const line1Btn = document.getElementById('char_line1_btn');
+    const line2Btn = document.getElementById('char_line2_btn');
+    const lineAllBtn = document.getElementById('char_line_all_btn');
+    
+    if (line1Btn) line1Btn.classList.remove('active');
+    if (line2Btn) line2Btn.classList.remove('active');
+    if (lineAllBtn) lineAllBtn.classList.remove('active');
+    
+    if (line === 'L1' && line1Btn) {
+        line1Btn.classList.add('active');
+        line1Btn.style.background = '#2196F3';
+        line1Btn.style.color = '#ffffff';
+        line2Btn.style.background = '#e3f2fd';
+        line2Btn.style.color = '#1565C0';
+        lineAllBtn.style.background = '#e3f2fd';
+        lineAllBtn.style.color = '#1565C0';
+    } else if (line === 'L2' && line2Btn) {
+        line2Btn.classList.add('active');
+        line2Btn.style.background = '#2196F3';
+        line2Btn.style.color = '#ffffff';
+        line1Btn.style.background = '#e3f2fd';
+        line1Btn.style.color = '#1565C0';
+        lineAllBtn.style.background = '#e3f2fd';
+        lineAllBtn.style.color = '#1565C0';
+    } else if (line === 'all' && lineAllBtn) {
+        lineAllBtn.classList.add('active');
+        lineAllBtn.style.background = '#2196F3';
+        lineAllBtn.style.color = '#ffffff';
+        line1Btn.style.background = '#e3f2fd';
+        line1Btn.style.color = '#1565C0';
+        line2Btn.style.background = '#e3f2fd';
+        line2Btn.style.color = '#1565C0';
+    }
+    
+    if (line === 'L1' || line === 'L2') {
+        // Hide single reference dropdown
+        productRefSelect.style.display = 'none';
+        productRefSelect.value = '';
+        productRefSelect.removeAttribute('required');
+        
+        // Show From/To reference selection
+        if (bulkRefSelection) {
+            bulkRefSelection.style.display = 'block';
+            populateCharLineReferences(line);
+        }
+        
+        // Make From/To required
+        const fromRefSelect = document.getElementById('char_from_reference');
+        const toRefSelect = document.getElementById('char_to_reference');
+        if (fromRefSelect) fromRefSelect.setAttribute('required', 'required');
+        if (toRefSelect) toRefSelect.setAttribute('required', 'required');
+    } else {
+        // Show single reference dropdown for "All Lines"
+        productRefSelect.style.display = 'block';
+        productRefSelect.setAttribute('required', 'required');
+        
+        // Remove required from From/To
+        const fromRefSelect = document.getElementById('char_from_reference');
+        const toRefSelect = document.getElementById('char_to_reference');
+        if (fromRefSelect) {
+            fromRefSelect.removeAttribute('required');
+            fromRefSelect.value = '';
+        }
+        if (toRefSelect) {
+            toRefSelect.removeAttribute('required');
+            toRefSelect.value = '';
+        }
+        
+        // Hide From/To reference selection
+        if (bulkRefSelection) {
+            bulkRefSelection.style.display = 'none';
+            clearCharBulkReferenceSelection();
+        }
+        
+        // Clear hidden input
+        const lineBasedProductRef = document.getElementById('char_line_based_product_reference');
+        if (lineBasedProductRef) {
+            lineBasedProductRef.value = '';
+        }
+        
+        // Filter options for "All Lines"
+        const currentValue = productRefSelect.value;
+        Array.from(productRefSelect.options).forEach(option => {
+            if (option.value === '') {
+                option.style.display = '';
+                return;
+            }
+            option.style.display = '';
+        });
+        
+        // Clear selection if current value doesn't match filter
+        if (currentValue) {
+            const selectedOption = productRefSelect.querySelector(`option[value="${currentValue}"]`);
+            if (selectedOption && selectedOption.style.display === 'none') {
+                productRefSelect.value = '';
+                handleCharReferenceSelection('');
+            }
+        }
+    }
+}
+
+// Populate From/To reference dropdowns with references for selected line
+function populateCharLineReferences(line) {
+    const productRefSelect = document.getElementById('char_reference_number');
+    const fromRefSelect = document.getElementById('char_from_reference');
+    const toRefSelect = document.getElementById('char_to_reference');
+    
+    if (!productRefSelect || !fromRefSelect || !toRefSelect) return;
+    
+    // Clear existing options
+    fromRefSelect.innerHTML = '<option value="">-- Select From Reference --</option>';
+    toRefSelect.innerHTML = '<option value="">-- Select To Reference --</option>';
+    
+    // Collect all references for the selected line
+    const lineReferences = [];
+    Array.from(productRefSelect.options).forEach(option => {
+        if (option.value && option.value !== '') {
+            const optionLine = option.getAttribute('data-line') || '';
+            if (optionLine === line) {
+                const isBundle = option.getAttribute('data-is-bundle') === 'true';
+                lineReferences.push({
+                    value: option.value,
+                    text: option.textContent,
+                    isBundle: isBundle,
+                    baseRef: option.getAttribute('data-base-ref') || '',
+                    rollCount: parseInt(option.getAttribute('data-roll-count')) || 1
+                });
+            }
+        }
+    });
+    
+    // Sort references by date (extract date from reference number)
+    // Reference format: GSM + L + Line# + YY + MMMDD + -R + Roll# + - + Batch
+    function extractDateFromReference(ref) {
+        const monthAbbr = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+        for (let i = 0; i < monthAbbr.length; i++) {
+            const month = monthAbbr[i];
+            const pattern = new RegExp(month + '(\\d{2})');
+            const match = ref.match(pattern);
+            if (match) {
+                const day = parseInt(match[1]);
+                return ((i + 1) * 100) + day;
+            }
+        }
+        return 9999;
+    }
+    
+    // Sort by date first, then alphabetically for same date
+    lineReferences.sort((a, b) => {
+        const dateA = extractDateFromReference(a.value);
+        const dateB = extractDateFromReference(b.value);
+        if (dateA !== dateB) {
+            return dateA - dateB;
+        }
+        return a.value.localeCompare(b.value);
+    });
+    
+    // Populate both dropdowns
+    lineReferences.forEach(ref => {
+        const fromOption = document.createElement('option');
+        fromOption.value = ref.value;
+        fromOption.textContent = ref.text;
+        fromOption.setAttribute('data-is-bundle', ref.isBundle);
+        fromOption.setAttribute('data-base-ref', ref.baseRef);
+        fromOption.setAttribute('data-roll-count', ref.rollCount);
+        fromRefSelect.appendChild(fromOption);
+        
+        const toOption = document.createElement('option');
+        toOption.value = ref.value;
+        toOption.textContent = ref.text;
+        toOption.setAttribute('data-is-bundle', ref.isBundle);
+        toOption.setAttribute('data-base-ref', ref.baseRef);
+        toOption.setAttribute('data-roll-count', ref.rollCount);
+        toRefSelect.appendChild(toOption);
+    });
+}
+
+// Update To Reference dropdown based on From Reference selection
+function updateCharReferenceRange(autoSelect = true) {
+    const fromRefSelect = document.getElementById('char_from_reference');
+    const toRefSelect = document.getElementById('char_to_reference');
+    
+    if (!fromRefSelect || !toRefSelect) return;
+    
+    const fromValue = fromRefSelect.value;
+    if (!fromValue) {
+        const allOptions = Array.from(toRefSelect.options);
+        allOptions.forEach(option => {
+            option.style.display = '';
+        });
+        return;
+    }
+    
+    // Get the selected From reference option
+    const fromOption = fromRefSelect.options[fromRefSelect.selectedIndex];
+    const isBundle = fromOption?.getAttribute('data-is-bundle') === 'true';
+    let baseRef = fromOption?.getAttribute('data-base-ref') || '';
+    let rollCount = parseInt(fromOption?.getAttribute('data-roll-count')) || 1;
+    
+    // Extract base reference from the selected value if not provided
+    if (!baseRef) {
+        const rollMatch = fromValue.match(/^(.+)-(\d+)$/);
+        if (rollMatch) {
+            baseRef = rollMatch[1];
+        } else {
+            baseRef = fromValue;
+        }
+    }
+    
+    // Find the bundle reference to get the actual roll count
+    if (baseRef) {
+        Array.from(fromRefSelect.options).forEach(option => {
+            if (option.value && option.value !== '') {
+                const optionBaseRef = option.getAttribute('data-base-ref') || option.value.replace(/-\d+$/, '');
+                const optionIsBundle = option.getAttribute('data-is-bundle') === 'true';
+                if (optionIsBundle && optionBaseRef === baseRef) {
+                    rollCount = parseInt(option.getAttribute('data-roll-count')) || rollCount;
+                }
+            }
+        });
+    }
+    
+    // Find the index of the selected From reference in the To dropdown
+    let fromIndex = -1;
+    Array.from(toRefSelect.options).forEach((option, index) => {
+        if (option.value === fromValue) {
+            fromIndex = index;
+        }
+    });
+    
+    // If From reference is a bundle, we need to find the last roll of that bundle
+    let targetFromIndex = fromIndex;
+    if (isBundle && baseRef && rollCount > 1) {
+        const lastRollRef = baseRef + '-' + rollCount;
+        
+        let foundLastRoll = false;
+        Array.from(toRefSelect.options).forEach((option, index) => {
+            if (option.value === lastRollRef) {
+                targetFromIndex = index;
+                foundLastRoll = true;
+            }
+        });
+        
+        if (!foundLastRoll) {
+            Array.from(toRefSelect.options).forEach((option, index) => {
+                if (index > fromIndex && option.value) {
+                    const optionBaseRef = option.getAttribute('data-base-ref') || option.value.replace(/-\d+$/, '');
+                    if (optionBaseRef !== baseRef) {
+                        if (targetFromIndex === fromIndex) {
+                            targetFromIndex = index;
+                        }
+                    }
+                }
+            });
+            
+            if (targetFromIndex === fromIndex) {
+                targetFromIndex = fromIndex + 1;
+            }
+        }
+    }
+    
+    // Show only references from the target From reference onwards
+    Array.from(toRefSelect.options).forEach((option, index) => {
+        if (index === 0) {
+            option.style.display = '';
+        } else if (index >= targetFromIndex) {
+            option.style.display = '';
+        } else {
+            option.style.display = 'none';
+        }
+    });
+    
+    // Auto-select the last roll of the bundle in To dropdown
+    if (autoSelect) {
+        let actualBaseRef = baseRef;
+        let actualRollCount = rollCount;
+        
+        if (!actualBaseRef) {
+            const rollMatch = fromValue.match(/^(.+)-(\d+)$/);
+            if (rollMatch) {
+                actualBaseRef = rollMatch[1];
+            } else {
+                actualBaseRef = fromValue;
+            }
+        }
+        
+        if (actualBaseRef) {
+            Array.from(fromRefSelect.options).forEach(option => {
+                if (option.value && option.value !== '') {
+                    const optionBaseRef = option.getAttribute('data-base-ref') || option.value.replace(/-\d+$/, '');
+                    const optionIsBundle = option.getAttribute('data-is-bundle') === 'true';
+                    if (optionIsBundle && optionBaseRef === actualBaseRef) {
+                        actualRollCount = parseInt(option.getAttribute('data-roll-count')) || actualRollCount;
+                    }
+                }
+            });
+        }
+        
+        if (actualBaseRef && actualRollCount > 1) {
+            const lastRollRef = actualBaseRef + '-' + actualRollCount;
+            let found = false;
+            Array.from(toRefSelect.options).forEach(option => {
+                if (option.value === lastRollRef && option.style.display !== 'none') {
+                    toRefSelect.value = lastRollRef;
+                    found = true;
+                    return;
+                }
+            });
+            
+            // If exact match not found, find the highest roll number from this bundle that's visible
+            if (!found) {
+                let highestRoll = 0;
+                let highestRollRef = '';
+                Array.from(toRefSelect.options).forEach(option => {
+                    if (option.style.display !== 'none' && option.value) {
+                        const optionBaseRef = option.getAttribute('data-base-ref') || option.value.replace(/-\d+$/, '');
+                        if (optionBaseRef === actualBaseRef) {
+                            const rollMatch = option.value.match(/-(\d+)$/);
+                            if (rollMatch) {
+                                const rollNum = parseInt(rollMatch[1]);
+                                if (rollNum > highestRoll && rollNum <= actualRollCount) {
+                                    highestRoll = rollNum;
+                                    highestRollRef = option.value;
+                                }
+                            }
+                        }
+                    }
+                });
+                if (highestRollRef) {
+                    toRefSelect.value = highestRollRef;
+                }
+            }
+        } else if (fromIndex >= 0) {
+            // Not a bundle, just select the same reference
+            toRefSelect.value = fromValue;
+        }
+    }
+}
+
+// Apply bulk reference selection
+function applyCharBulkReferenceSelection() {
+    const fromRef = document.getElementById('char_from_reference').value;
+    const toRef = document.getElementById('char_to_reference').value;
+    
+    if (!fromRef || !toRef) {
+        alert('Please select both From and To references');
+        return;
+    }
+    
+    // Store the range in hidden input
+    const lineBasedProductRef = document.getElementById('char_line_based_product_reference');
+    if (lineBasedProductRef) {
+        lineBasedProductRef.value = fromRef + ' to ' + toRef;
+    }
+    
+    // Update the main reference dropdown to show the range
+    const productRefSelect = document.getElementById('char_reference_number');
+    if (productRefSelect) {
+        // Find or create an option for the range
+        let rangeOption = Array.from(productRefSelect.options).find(opt => opt.value === fromRef + '|' + toRef);
+        if (!rangeOption) {
+            rangeOption = document.createElement('option');
+            rangeOption.value = fromRef + '|' + toRef;
+            rangeOption.textContent = fromRef + ' to ' + toRef;
+            productRefSelect.appendChild(rangeOption);
+        }
+        productRefSelect.value = rangeOption.value;
+    }
+}
+
+// Clear bulk reference selection
+function clearCharBulkReferenceSelection() {
+    const fromRefSelect = document.getElementById('char_from_reference');
+    const toRefSelect = document.getElementById('char_to_reference');
+    const lineBasedProductRef = document.getElementById('char_line_based_product_reference');
+    
+    if (fromRefSelect) fromRefSelect.value = '';
+    if (toRefSelect) toRefSelect.value = '';
+    if (lineBasedProductRef) lineBasedProductRef.value = '';
+    
+    // Reset To dropdown to show all options
+    if (toRefSelect) {
+        Array.from(toRefSelect.options).forEach(option => {
+            option.style.display = '';
+        });
+    }
+}
+
+// Handle From/To reference change
+function handleCharFromToReferenceChange() {
+    // This function can be extended to perform validation or other actions
+    // when From/To references change
 }
 
 // Handle individual roll selection from bundle

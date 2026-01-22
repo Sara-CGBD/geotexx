@@ -8,6 +8,28 @@ if (!isset($_SESSION['user_id']) || !isset($_SESSION['username'])) {
     exit();
 }
 
+// Role-based access control - Only admin and agm ops can access this reporting dashboard
+$user_role = strtolower(trim($_SESSION['role'] ?? ''));
+
+// Normalize role names
+if ($user_role === 'prod_test') {
+    $user_role = 'prod_user';
+}
+if ($user_role === 'agm operations' || $user_role === 'agm_ops') {
+    $user_role = 'agm ops';
+}
+
+// Only allow admin and agm ops to access this dashboard
+$allowedRoles = ['admin', 'agm ops'];
+if (!in_array($user_role, $allowedRoles, true)) {
+    http_response_code(403);
+    die("<div style='font-family: Arial; max-width: 600px; margin: 100px auto; padding: 30px; border: 2px solid #e74c3c; border-radius: 10px; background: #ffe8e8;'>
+        <h2 style='color: #e74c3c;'>🚫 Access Denied</h2>
+        <p>You do not have permission to access this reporting dashboard. Only Admin and AGM Operations can view this dashboard.</p>
+        <a href='../index.php' style='display: inline-block; margin-top: 20px; padding: 10px 20px; background: #3498db; color: white; text-decoration: none; border-radius: 5px;'>Return to Dashboard</a>
+        </div>");
+}
+
 date_default_timezone_set('Asia/Dhaka');
 $conn = SecurityConfig::getConnection();
 

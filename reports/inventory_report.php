@@ -49,7 +49,7 @@ foreach (['reference', 'reference_number', 'entry_number', 'ref_number'] as $can
 $usedSumExpr = ($amountCol && $refCol) ? "COALESCE(SUM(fe2.$amountCol), 0)" : "0";
 $usedWhere = $feHasIsDeleted ? "AND fe2.is_deleted = 0" : "";
 
-// Build used_amount projection safely
+// Build used_amount projection safely (from fiber_entries)
 if ($amountCol && $refCol) {
     $usedSubquery = "(SELECT $usedSumExpr 
          FROM fiber_entries fe2 
@@ -57,6 +57,18 @@ if ($amountCol && $refCol) {
          $usedWhere) as used_amount";
 } else {
     $usedSubquery = "0 as used_amount";
+}
+
+// Build deducted_amount from material issue entries
+// Check if store_issue_entries table exists and has deduction_details column
+$issueTableExists = false;
+$issueColCheck = $conn->query("SHOW TABLES LIKE 'store_issue_entries'");
+if ($issueColCheck && $issueColCheck->num_rows > 0) {
+    $issueTableExists = true;
+    $deductionColCheck = $conn->query("SHOW COLUMNS FROM store_issue_entries LIKE 'deduction_details'");
+    if ($deductionColCheck && $deductionColCheck->num_rows > 0) {
+        // deduction_details column exists - we'll calculate deductions in PHP after fetching
+    }
 }
 
 // Fetch inventory data with usage tracking
@@ -89,9 +101,43 @@ $query = "
 
 $result = $conn->query($query);
 $inventory = [];
+
+// Pre-fetch all deduction details from material issue entries for efficiency
+$allDeductions = [];
+if ($issueTableExists) {
+    $deductionQuery = "SELECT deduction_details 
+                      FROM store_issue_entries 
+                      WHERE deduction_details IS NOT NULL 
+                      AND deduction_details != '' 
+                      AND deduction_details != 'null'";
+    $deductionResult = $conn->query($deductionQuery);
+    if ($deductionResult) {
+        while ($deductionRow = $deductionResult->fetch_assoc()) {
+            $deductionDetails = json_decode($deductionRow['deduction_details'], true);
+            if (is_array($deductionDetails)) {
+                foreach ($deductionDetails as $entryNumber => $deductedAmount) {
+                    if (!isset($allDeductions[$entryNumber])) {
+                        $allDeductions[$entryNumber] = 0;
+                    }
+                    $allDeductions[$entryNumber] += floatval($deductedAmount);
+                }
+            }
+        }
+    }
+}
+
 if ($result) {
     while ($row = $result->fetch_assoc()) {
-        // remaining_amount comes from the database (current stock)
+        // Calculate deducted amount from material issue entries
+        $deductedAmount = isset($allDeductions[$row['entry_number']]) ? $allDeductions[$row['entry_number']] : 0;
+        
+        $row['deducted_amount'] = $deductedAmount; // Store separately for reference if needed
+        $usageFromFibers = floatval($row['used_amount']);
+        $totalUsed = $usageFromFibers + $deductedAmount;
+        $row['used_amount'] = max(0, $totalUsed);
+
+        $originalAmount = floatval($row['original_amount'] ?? 0);
+        $row['remaining_amount'] = max(0, $originalAmount - $row['used_amount']);
         $inventory[] = $row;
     }
 }

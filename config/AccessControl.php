@@ -31,6 +31,7 @@ class AccessControl {
     const MODULE_PLANNING = 'planning';
     const MODULE_FINANCE = 'finance';
     const MODULE_ADMIN = 'admin_panel';
+    const MODULE_MATERIAL_REQUEST = 'material_request';
     
     // Permission levels
     const PERMISSION_NONE = 0;
@@ -84,6 +85,7 @@ class AccessControl {
             self::ROLE_FINANCE_USER => self::PERMISSION_VIEW,
             self::ROLE_PLANNING_USER => self::PERMISSION_VIEW,
             self::ROLE_DELIVERY_USER => self::PERMISSION_ENTRY,
+            self::ROLE_SEWING_TEST => self::PERMISSION_ENTRY,
         ],
         self::MODULE_RECYCLE => [
             self::ROLE_ADMIN => self::PERMISSION_FULL,
@@ -101,6 +103,10 @@ class AccessControl {
             self::ROLE_ADMIN => self::PERMISSION_FULL,
             self::ROLE_MANAGEMENT => self::PERMISSION_VIEW,
             self::ROLE_FINANCE_USER => self::PERMISSION_FULL,
+        ],
+        self::MODULE_MATERIAL_REQUEST => [
+            self::ROLE_ADMIN => self::PERMISSION_FULL,
+            self::ROLE_PRODUCTION_USER => self::PERMISSION_ENTRY,
         ],
         self::MODULE_ADMIN => [
             self::ROLE_ADMIN => self::PERMISSION_FULL,
@@ -148,6 +154,11 @@ class AccessControl {
         // Handle variations
         if ($role === 'agm operations' || $role === 'agm_ops' || $role === 'agm_operations') {
             return self::ROLE_AGM_OPS;
+        }
+        
+        // Normalize prod_test to production_user
+        if ($role === 'prod_test') {
+            return self::ROLE_PRODUCTION_USER;
         }
         
         return $role;

@@ -27,9 +27,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     $action = $_POST['action'];
     $checker_name = $_SESSION['full_name'] ?? $_SESSION['username'];
     
+    // Get bundle_reference for this report to find all reports in the same range
+    $getBundleStmt = $conn->prepare("SELECT bundle_reference FROM characteristics_tests WHERE id = ?");
+    $getBundleStmt->bind_param("i", $report_id);
+    $getBundleStmt->execute();
+    $bundleResult = $getBundleStmt->get_result();
+    $bundleRow = $bundleResult->fetch_assoc();
+    $bundle_reference = $bundleRow['bundle_reference'] ?? null;
+    $getBundleStmt->close();
+    
+    // If bundle_reference exists and contains a range (|), update all reports with the same bundle_reference
+    $whereClause = "id = ?";
+    $params = [$report_id];
+    $types = "i";
+    
+    if ($bundle_reference && strpos($bundle_reference, '|') !== false) {
+        // It's a range - update all reports with the same bundle_reference
+        $whereClause = "bundle_reference = ? AND status = 'pending'";
+        $params = [$bundle_reference];
+        $types = "s";
+    } else {
+        // Single report - update only this one
+        $whereClause = "id = ? AND status = 'pending'";
+        $params = [$report_id];
+        $types = "i";
+    }
+    
     if ($action === 'approve') {
-        $stmt = $conn->prepare("UPDATE characteristics_tests SET status = 'checked', checker_name = ?, checked_at = NOW() WHERE id = ? AND status = 'pending'");
-        $stmt->bind_param("si", $checker_name, $report_id);
+        $stmt = $conn->prepare("UPDATE characteristics_tests SET status = 'checked', checker_name = ?, checked_at = NOW() WHERE $whereClause");
+        if ($types === "s") {
+            $stmt->bind_param("ss", $checker_name, $params[0]);
+        } else {
+            $stmt->bind_param("si", $checker_name, $params[0]);
+        }
         if ($stmt->execute() && $stmt->affected_rows > 0) {
             $_SESSION['success_message'] = "✅ Test approved and forwarded to AGM!";
             $stmt->close();
@@ -44,21 +74,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     try {
                         window.opener.postMessage({ type: "report_processed", action: "approved", report_type: "characteristics", report_id: ' . $report_id . ' }, window.location.origin);
                     } catch(e) {}
-                    // Also refresh parent directly as fallback
-                    window.opener.location.href = window.opener.location.href.split("?")[0] + "?t=" + new Date().getTime();
+                    // Also refresh parent directly as fallback - redirect to Lab Testing Dashboard
+                    window.opener.location.href = "lab_testing_dashboard.php?t=" + new Date().getTime();
                     setTimeout(function() { window.close(); }, 100);
                 } else {
-                    window.location.href = "../forms/characteristics_test.php?t=" + new Date().getTime();
+                    window.location.href = "lab_testing_dashboard.php?t=" + new Date().getTime();
                 }
-            </script></head><body><p>Approved! Closing window...</p></body></html>';
+            </script></head><body><p>Approved! Redirecting to Lab Testing Dashboard...</p></body></html>';
             exit();
         }
         $stmt->close();
     } elseif ($action === 'reject') {
         $reject_reason = trim($_POST['reject_reason'] ?? '');
         
-        // Handle rejection reasons checkboxes
-        if (isset($_POST['rejection_reasons']) && is_array($_POST['rejection_reasons'])) {
+        // Handle rejection reasons checkboxes - require at least one
+        if (isset($_POST['rejection_reasons']) && is_array($_POST['rejection_reasons']) && count($_POST['rejection_reasons']) > 0) {
             $rejection_reasons = array_map('trim', $_POST['rejection_reasons']);
             $reasons_text = "Rejection Reasons: " . implode(', ', $rejection_reasons);
             // Append additional comments if provided
@@ -67,10 +97,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             } else {
                 $reject_reason = $reasons_text;
             }
+        } else {
+            // No rejection reasons selected - show error and don't process
+            $error = "Please select at least one reason for rejection.";
+            $_SESSION['error_message'] = $error;
+            header("Location: check_characteristics.php?id=" . $report_id);
+            exit();
         }
         
-        $stmt = $conn->prepare("UPDATE characteristics_tests SET status = 'rejected', remarks = ?, checker_name = ? WHERE id = ? AND status = 'pending'");
-        $stmt->bind_param("ssi", $reject_reason, $checker_name, $report_id);
+        // Use the same where clause logic for rejection
+        $stmt = $conn->prepare("UPDATE characteristics_tests SET status = 'rejected', remarks = ?, checker_name = ? WHERE $whereClause");
+        if ($types === "s") {
+            $stmt->bind_param("sss", $reject_reason, $checker_name, $params[0]);
+        } else {
+            $stmt->bind_param("ssi", $reject_reason, $checker_name, $params[0]);
+        }
         if ($stmt->execute() && $stmt->affected_rows > 0) {
             $_SESSION['success_message'] = "❌ Test rejected and returned to tester!";
             $stmt->close();
@@ -85,13 +126,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     try {
                         window.opener.postMessage({ type: "report_processed", action: "rejected", report_type: "characteristics", report_id: ' . $report_id . ' }, window.location.origin);
                     } catch(e) {}
-                    // Also refresh parent directly as fallback
-                    window.opener.location.href = window.opener.location.href.split("?")[0] + "?t=" + new Date().getTime();
+                    // Also refresh parent directly as fallback - redirect to Lab Testing Dashboard
+                    window.opener.location.href = "lab_testing_dashboard.php?t=" + new Date().getTime();
                     setTimeout(function() { window.close(); }, 100);
                 } else {
-                    window.location.href = "../forms/characteristics_test.php?t=" + new Date().getTime();
+                    window.location.href = "lab_testing_dashboard.php?t=" + new Date().getTime();
                 }
-            </script></head><body><p>Rejected! Closing window...</p></body></html>';
+            </script></head><body><p>Rejected! Redirecting to Lab Testing Dashboard...</p></body></html>';
             exit();
         }
         $stmt->close();
@@ -155,8 +196,16 @@ $test_data = json_decode($report['test_results'], true);
     <div class="alert alert-success"><?php echo $message; ?></div>
   <?php endif; ?>
   
+  <?php if (isset($_SESSION['success_message'])): ?>
+    <div class="alert alert-success"><?php echo $_SESSION['success_message']; unset($_SESSION['success_message']); ?></div>
+  <?php endif; ?>
+  
   <?php if ($error): ?>
     <div class="alert alert-error"><?php echo $error; ?></div>
+  <?php endif; ?>
+  
+  <?php if (isset($_SESSION['error_message'])): ?>
+    <div class="alert alert-error"><?php echo $_SESSION['error_message']; unset($_SESSION['error_message']); ?></div>
   <?php endif; ?>
   
   <div class="info-grid">
@@ -289,7 +338,7 @@ $test_data = json_decode($report['test_results'], true);
   <button onclick="document.getElementById('rejectForm').style.display='block'" class="btn btn-reject">✗ Reject</button>
   
   <div id="rejectForm" style="display:none; margin-top:15px; padding:15px; background:#fff3cd; border:1px solid #ffc107; border-radius:6px;">
-    <form method="POST" action="" onsubmit="return validateRejection()">
+    <form method="POST" action="" onsubmit="return validateRejection(event)">
       <input type="hidden" name="action" value="reject">
       <label style="font-weight:600; display:block; margin-bottom:10px;">Reason for Rejection (Select at least one):</label>
       <div style="margin-bottom:8px;">
@@ -320,17 +369,75 @@ $test_data = json_decode($report['test_results'], true);
   </div>
   
   <script>
-    function validateRejection() {
+    function validateRejection(event) {
       const checkboxes = document.querySelectorAll('input[name="rejection_reasons[]"]');
       const checked = Array.from(checkboxes).filter(cb => cb.checked);
       
       if (checked.length === 0) {
         alert('❌ Please select at least one reason for rejection!');
+        if (event) {
+          event.preventDefault();
+        }
         return false;
       }
       
-      return confirm('Are you sure you want to reject this test?');
+      if (!confirm('Are you sure you want to reject this test?')) {
+        if (event) {
+          event.preventDefault();
+        }
+        return false;
+      }
+      
+      // Disable submit button to prevent double submission
+      const submitBtn = document.querySelector('#rejectForm button[type="submit"]');
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Submitting...';
+      }
+      
+      // Allow form to submit naturally
+      return true;
     }
+    
+    // Also add a direct click handler as fallback
+    document.addEventListener('DOMContentLoaded', function() {
+      const rejectForm = document.getElementById('rejectForm');
+      if (rejectForm) {
+        const form = rejectForm.querySelector('form');
+        const submitBtn = rejectForm.querySelector('button[type="submit"]');
+        if (form && submitBtn) {
+          // Remove any existing listeners by cloning
+          const newSubmitBtn = submitBtn.cloneNode(true);
+          submitBtn.parentNode.replaceChild(newSubmitBtn, submitBtn);
+          
+          // Add click handler to the new button
+          newSubmitBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            
+            const checkboxes = document.querySelectorAll('input[name="rejection_reasons[]"]');
+            const checked = Array.from(checkboxes).filter(cb => cb.checked);
+            
+            if (checked.length === 0) {
+              alert('❌ Please select at least one reason for rejection!');
+              return false;
+            }
+            
+            if (!confirm('Are you sure you want to reject this test?')) {
+              return false;
+    }
+            
+            // Disable button and show loading
+            this.disabled = true;
+            this.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Submitting...';
+            
+            // Submit the form
+            form.submit();
+            return false;
+          });
+        }
+      }
+    });
   </script>
   <?php else: ?>
   <div style="background:#d4edda; padding:15px; border-radius:6px; margin-top:20px;">
@@ -339,7 +446,7 @@ $test_data = json_decode($report['test_results'], true);
   <?php endif; ?>
 
   <div style="margin-top:20px;">
-    <a href="../forms/characteristics_test.php" class="btn btn-back">← Back to Dashboard</a>
+    <a href="lab_testing_dashboard.php" class="btn btn-back">← Back to Dashboard</a>
     <button onclick="closeWindow()" class="btn btn-back">Close Window</button>
   </div>
 </div>

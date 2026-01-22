@@ -576,7 +576,7 @@ $operator_name = $_SESSION['username'];
     <div class="form-group">
       <label>To</label>
       <div class="btn-group" id="toLocationGroup">
-        <button type="button" class="btn" data-value="Swing" onclick="selectBtn(this, 'toLocationGroup')">Swing</button>
+        <button type="button" class="btn" data-value="Sewing" onclick="selectBtn(this, 'toLocationGroup')">Sewing</button>
         <button type="button" class="btn" data-value="FG" onclick="selectBtn(this, 'toLocationGroup')">FG</button>
       </div>
       <input type="hidden" id="to_location" name="to_location" value="">
@@ -799,7 +799,7 @@ function filterReferencesByDestination() {
   // Map UI values to database values
   const destinationMap = {
     'FG': 'fg_production',
-    'Swing': 'bag_production'
+    'Sewing': 'bag_production'
   };
   
   const dbDestination = destinationMap[selectedDestination];
@@ -882,7 +882,7 @@ if (typeof window.selectedReferences === 'undefined') {
 function showReferenceDropdown() {
   const toLocation = document.getElementById('to_location');
   if (!toLocation || !toLocation.value) {
-    alert('Please select a destination (To: FG or Swing) first.');
+    alert('Please select a destination (To: FG or Sewing) first.');
     const searchInput = document.getElementById('reference_search');
     if (searchInput) {
       searchInput.blur();
@@ -907,7 +907,7 @@ function filterReferences() {
   // Map UI values to database values
   const destinationMap = {
     'FG': 'fg_production',
-    'Swing': 'bag_production'
+    'Sewing': 'bag_production'
   };
   const dbDestination = selectedDestination ? destinationMap[selectedDestination] : null;
   

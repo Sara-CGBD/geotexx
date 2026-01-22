@@ -51,9 +51,9 @@ $end_date = $_GET['end_date'] ?? date('Y-m-d');
 $scrap_type_filter = $_GET['scrap_type'] ?? '';
 
 // Query scrap data with simplified formula
-// Formula: Gross Loss Value (à§³) = Scrap Qty (kg) Ã— Rate per kg
+// Formula: Gross Loss Value (৳) = Scrap Qty (kg) Ã— Rate per kg
 // Formula: Net Loss Qty (kg) = Scrap Qty â€“ Recycled Qty
-// Formula: Net Loss Value (à§³) = Net Loss Qty Ã— Rate per kg
+// Formula: Net Loss Value (৳) = Net Loss Qty Ã— Rate per kg
 $query = "
     SELECT 
         DATE(s.date_time) as scrap_date,
@@ -63,13 +63,13 @@ $query = "
         COALESCE((SELECT SUM(recycled_qty) FROM scrap_recycle WHERE scrap_id = s.id), 0) as recycled_qty,
         COALESCE(stc.cost_per_kg, 50.00) as cost_per_kg,
         
-        -- Gross Loss Value (à§³) = Scrap Qty (kg) Ã— Rate per kg
+        -- Gross Loss Value (৳) = Scrap Qty (kg) Ã— Rate per kg
         COALESCE(SUM(s.qty), 0) * COALESCE(stc.cost_per_kg, 50.00) as gross_loss_value,
         
         -- Net Loss Qty (kg) = Scrap Qty â€“ Recycled Qty
         COALESCE(SUM(s.qty), 0) - COALESCE((SELECT SUM(recycled_qty) FROM scrap_recycle WHERE scrap_id = s.id), 0) as net_loss_qty,
         
-        -- Net Loss Value (à§³) = Net Loss Qty Ã— Rate per kg
+        -- Net Loss Value (৳) = Net Loss Qty Ã— Rate per kg
         (COALESCE(SUM(s.qty), 0) - COALESCE((SELECT SUM(recycled_qty) FROM scrap_recycle WHERE scrap_id = s.id), 0)) * COALESCE(stc.cost_per_kg, 50.00) as net_loss_value
         
     FROM scrap s
@@ -302,8 +302,45 @@ $cumulative_data = array_reverse($cumulative_data);
         }
         
         @media print {
+            @page {
+                size: A4 landscape;
+                margin: 10mm;
+            }
             body { background: white; padding: 0; }
             .action-buttons, .filters { display: none; }
+            .container { max-width: 100%; padding: 10px; }
+            h1, h2 { font-size: 1.2em; }
+            .table-wrapper {
+                overflow: visible;
+                width: 100%;
+            }
+            table {
+                width: 100% !important;
+                min-width: auto !important;
+                max-width: 100%;
+                font-size: 9px;
+                page-break-inside: avoid;
+                break-inside: avoid;
+            }
+            th, td {
+                padding: 4px 3px;
+                font-size: 9px;
+                white-space: normal;
+            }
+            th {
+                font-size: 9px;
+                position: static;
+            }
+            table thead {
+                display: table-header-group;
+            }
+            table tbody {
+                display: table-row-group;
+            }
+            table tr {
+                page-break-inside: avoid;
+                break-inside: avoid;
+            }
         }
     </style>
 </head>
@@ -342,12 +379,12 @@ $cumulative_data = array_reverse($cumulative_data);
             <div class="stat-value" id="total_net_loss_qty"><?php echo number_format($total_net_loss_qty, 2); ?></div>
         </div>
         <div class="stat-card">
-            <div class="stat-label">Gross Loss Value (à§³)</div>
-            <div class="stat-value" id="total_gross_loss_value">à§³<?php echo number_format($total_gross_loss_value, 2); ?></div>
+            <div class="stat-label">Gross Loss Value (৳)</div>
+            <div class="stat-value" id="total_gross_loss_value">৳<?php echo number_format($total_gross_loss_value, 2); ?></div>
         </div>
         <div class="stat-card dark-red">
-            <div class="stat-label">Net Loss Value (à§³)</div>
-            <div class="stat-value" id="total_net_loss_value">à§³<?php echo number_format($total_net_loss_value, 2); ?></div>
+            <div class="stat-label">Net Loss Value (৳)</div>
+            <div class="stat-value" id="total_net_loss_value">৳<?php echo number_format($total_net_loss_value, 2); ?></div>
         </div>
     </div>
 
@@ -407,10 +444,10 @@ $cumulative_data = array_reverse($cumulative_data);
                     <th>Product</th>
                     <th>Scrap Qty (kg)</th>
                     <th>Recycled (kg)</th>
-                    <th>Rate per kg (à§³)</th>
-                    <th>Gross Loss Value (à§³)</th>
+                    <th>Rate per kg (৳)</th>
+                    <th>Gross Loss Value (৳)</th>
                     <th>Net Loss Qty (kg)</th>
-                    <th>Net Loss Value (à§³)</th>
+                    <th>Net Loss Value (৳)</th>
                 </tr>
             </thead>
             <tbody>
@@ -425,10 +462,10 @@ $cumulative_data = array_reverse($cumulative_data);
                         <td><?php echo htmlspecialchars($row['scrap_product'] ?? 'N/A'); ?></td>
                         <td><?php echo number_format($row['scrap_qty'], 2); ?></td>
                         <td><?php echo number_format($row['recycled_qty'], 2); ?></td>
-                        <td>à§³<?php echo number_format($row['cost_per_kg'], 2); ?></td>
-                        <td>à§³<?php echo number_format($row['gross_loss_value'], 2); ?></td>
+                        <td>৳<?php echo number_format($row['cost_per_kg'], 2); ?></td>
+                        <td>৳<?php echo number_format($row['gross_loss_value'], 2); ?></td>
                         <td><?php echo number_format($row['net_loss_qty'], 2); ?></td>
-                        <td class="loss-cell">à§³<?php echo number_format($row['net_loss_value'], 2); ?></td>
+                        <td class="loss-cell">৳<?php echo number_format($row['net_loss_value'], 2); ?></td>
                     </tr>
                 <?php endforeach; ?>
                 <tr class="total-row">
@@ -436,9 +473,9 @@ $cumulative_data = array_reverse($cumulative_data);
                     <td><strong><?php echo number_format($total_scrap_qty, 2); ?> kg</strong></td>
                     <td><strong><?php echo number_format($total_recycled_qty, 2); ?> kg</strong></td>
                     <td></td>
-                    <td><strong>à§³<?php echo number_format($total_gross_loss_value, 2); ?></strong></td>
+                    <td><strong>৳<?php echo number_format($total_gross_loss_value, 2); ?></strong></td>
                     <td><strong><?php echo number_format($total_net_loss_qty, 2); ?> kg</strong></td>
-                    <td class="loss-cell"><strong>à§³<?php echo number_format($total_net_loss_value, 2); ?></strong></td>
+                    <td class="loss-cell"><strong>৳<?php echo number_format($total_net_loss_value, 2); ?></strong></td>
                 </tr>
             </tbody>
         </table>
@@ -463,7 +500,7 @@ currentChart = new Chart(ctx, {
             ?>
         ],
         datasets: [{
-            label: 'Cumulative Loss Value (à§³)',
+            label: 'Cumulative Loss Value (৳)',
             data: [
                 <?php 
                 foreach ($cumulative_data as $item) {
@@ -495,7 +532,7 @@ currentChart = new Chart(ctx, {
                 beginAtZero: true,
                 ticks: {
                     callback: function(value) {
-                        return 'à§³' + value.toLocaleString();
+                        return '৳' + value.toLocaleString();
                     }
                 }
             }
@@ -548,8 +585,8 @@ function updateSummaryCards(summary) {
     document.getElementById('total_scrap_qty').textContent = summary.total_scrap_qty;
     document.getElementById('total_recycled_qty').textContent = summary.total_recycled_qty;
     document.getElementById('total_net_loss_qty').textContent = summary.total_net_loss_qty;
-    document.getElementById('total_gross_loss_value').textContent = 'à§³' + summary.total_gross_loss_value;
-    document.getElementById('total_net_loss_value').textContent = 'à§³' + summary.total_net_loss_value;
+    document.getElementById('total_gross_loss_value').textContent = '৳' + summary.total_gross_loss_value;
+    document.getElementById('total_net_loss_value').textContent = '৳' + summary.total_net_loss_value;
 }
 
 function updateTable(data, hasFullAccess) {
@@ -569,10 +606,10 @@ function updateTable(data, hasFullAccess) {
             <td>${row.scrap_product || 'N/A'}</td>
             <td>${parseFloat(row.scrap_qty).toFixed(2)}</td>
             <td>${parseFloat(row.recycled_qty).toFixed(2)}</td>
-            <td>à§³${parseFloat(row.cost_per_kg).toFixed(2)}</td>
-            <td>à§³${parseFloat(row.gross_loss_value).toFixed(2)}</td>
+            <td>৳${parseFloat(row.cost_per_kg).toFixed(2)}</td>
+            <td>৳${parseFloat(row.gross_loss_value).toFixed(2)}</td>
             <td>${parseFloat(row.net_loss_qty).toFixed(2)}</td>
-            <td class="loss-cell">à§³${parseFloat(row.net_loss_value).toFixed(2)}</td>
+            <td class="loss-cell">৳${parseFloat(row.net_loss_value).toFixed(2)}</td>
         </tr>
     `).join('');
 }
@@ -590,7 +627,7 @@ function updateChart(cumulativeData) {
         data: {
             labels: cumulativeData.map(d => d.date),
             datasets: [{
-                label: 'Cumulative Loss (à§³)',
+                label: 'Cumulative Loss (৳)',
                 data: cumulativeData.map(d => d.cumulative),
                 borderColor: 'rgba(231, 76, 60, 1)',
                 backgroundColor: 'rgba(231, 76, 60, 0.1)',
@@ -615,7 +652,7 @@ function updateChart(cumulativeData) {
                     beginAtZero: true,
                     ticks: {
                         callback: function(value) {
-                            return 'à§³' + value.toLocaleString();
+                            return '৳' + value.toLocaleString();
                         }
                     }
                 }

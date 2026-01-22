@@ -207,7 +207,15 @@ $conn->close();
     $return_page = $_GET['return'] ?? '';
     $back_url = '../forms/qc_test_order.php';
     $back_text = 'Back to QC Test Order';
-    if ($return_page === 'qc_test_approval_dashboard') {
+    
+    // For checkers, default to lab testing dashboard if no return parameter is specified
+    if ($is_checker && !$is_admin && empty($return_page)) {
+        $back_url = 'lab_testing_dashboard.php';
+        $back_text = 'Back to Dashboard';
+    } elseif ($return_page === 'lab_testing_dashboard') {
+        $back_url = 'lab_testing_dashboard.php';
+        $back_text = 'Back to Dashboard';
+    } elseif ($return_page === 'qc_test_approval_dashboard') {
         $back_url = '../admin/qc_test_approval_dashboard.php';
         $back_text = 'Back to QC Test Approval Dashboard';
     } elseif ($return_page === 'external_checker_dashboard') {
@@ -1403,6 +1411,9 @@ $conn->close();
         <?php else: ?>
         <p style="margin-bottom:15px; color:#666;">Review the test data above and approve or reject this report:</p>
         <?php endif; ?>
+        <p style="margin:0 0 15px 0; padding:12px; background:#fff3cd; border-left:4px solid #ffc107; border-radius:4px; color:#856404; font-size:14px;">
+            <i class="fas fa-info-circle"></i> <strong>Note:</strong> After approval, this test will be forwarded to AGM for final approval and routing.
+        </p>
         <form method="POST" action="../admin/lab_testing_dashboard.php" style="display:inline; margin-right:10px;" id="checkerApproveForm">
             <input type="hidden" name="report_type" value="qc_test_order">
             <input type="hidden" name="report_number" value="<?php echo htmlspecialchars($report['report_number']); ?>">
@@ -1428,6 +1439,9 @@ $conn->close();
         <?php else: ?>
         <p style="margin-bottom:15px; color:#666;">Review the test data above and approve or reject this report:</p>
         <?php endif; ?>
+        <p style="margin:0 0 15px 0; padding:12px; background:#e8f6ec; border-left:4px solid #28a745; border-radius:4px; color:#065f46; font-size:14px;">
+            <i class="fas fa-info-circle"></i> <strong>Note:</strong> After approval, this test will appear in the "Approved Tests with Routing" section of the QC Test Approval Dashboard where you can set the routing destination (FG or Bag Production).
+        </p>
         <button type="button" id="approveBtn" style="padding:12px 24px; background:#28a745; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:15px; font-weight:500; margin-right:10px;">
             <i class="fas fa-check"></i> <?php echo !empty($related_report_numbers) ? 'Approve All (' . (count($related_report_numbers) + 1) . ')' : 'Approve This Report'; ?>
         </button>
@@ -1653,9 +1667,17 @@ function approveReport(reportType, reportNumber, relatedReports = []) {
     .then(data => {
         if (data.success) {
             const totalReports = relatedReports ? relatedReports.length + 1 : 1;
-            const successMsg = totalReports > 1 
-                ? `✅ Successfully approved ${totalReports} report(s)!`
-                : data.message;
+            const isChecker = <?php echo ($is_checker && !$is_admin) ? 'true' : 'false'; ?>;
+            let successMsg;
+            if (isChecker) {
+                successMsg = totalReports > 1 
+                    ? `Successfully approved ${totalReports} report(s)!\n\nThe approved test(s) will be forwarded to AGM for final approval and routing.`
+                    : data.message + '\n\nThe approved test will be forwarded to AGM for final approval and routing.';
+            } else {
+                successMsg = totalReports > 1 
+                    ? `Successfully approved ${totalReports} report(s)!\n\nThe approved test(s) will appear in the routing section of the QC Test Approval Dashboard where you can set the routing destination.`
+                    : data.message + '\n\nThe approved test will appear in the routing section of the QC Test Approval Dashboard where you can set the routing destination.';
+            }
             
             // Notify parent window to remove this report
             if (typeof notifyParentDashboard === 'function') {
@@ -1670,7 +1692,8 @@ function approveReport(reportType, reportNumber, relatedReports = []) {
                 // Redirect back to QC Test Approval Dashboard
                 window.location.href = '../admin/qc_test_approval_dashboard.php?success=' + encodeURIComponent(successMsg);
             } else {
-                // Reload the page immediately to show updated status
+                // Show alert and reload
+                alert('✅ ' + successMsg);
                 window.location.reload();
             }
         } else {
@@ -1746,10 +1769,12 @@ function rejectReport(reportType, reportNumber, event) {
             if (window.opener && !window.opener.closed) {
                 window.close();
             } else {
-                if (returnPage === 'qc_test_approval_dashboard') {
-                    window.location.href = '../admin/qc_test_approval_dashboard.php';
+                // Default to QC Test Approval Dashboard
+                const defaultUrl = '../admin/qc_test_approval_dashboard.php';
+                if (returnPage === 'qc_test_approval_dashboard' || !returnPage) {
+                    window.location.href = defaultUrl;
                 } else {
-                    window.location.href = '../admin/qc_reports_dashboard.php';
+                    window.location.href = '../admin/' + returnPage;
                 }
             }
         } else {
@@ -1818,20 +1843,90 @@ function showCheckerRejectModal(reportNumber, relatedReports = []) {
     } else {
         document.getElementById('checkerRejectRelatedReports').value = '';
     }
+    
+    // Reset form - uncheck all checkboxes and clear textarea
+    const checkboxes = document.querySelectorAll('#checkerRejectModal input[name="qc_rejection_reasons[]"]');
+    checkboxes.forEach(cb => cb.checked = false);
+    const textarea = document.querySelector('#checkerRejectModal textarea[name="comments"]');
+    if (textarea) textarea.value = '';
+    
+    // Reset submit button to disabled state
+    const submitBtn = document.getElementById('checkerRejectSubmitBtn');
+    submitBtn.disabled = true;
+    submitBtn.style.cursor = 'not-allowed';
+    submitBtn.style.opacity = '0.6';
+    
     document.getElementById('checkerRejectModal').style.display = 'flex';
     
-    // Enable/disable submit button based on checkbox selection
-    const checkboxes = document.querySelectorAll('#checkerRejectModal input[name="qc_rejection_reasons[]"]');
-    const submitBtn = document.getElementById('checkerRejectSubmitBtn');
+    // Add event listeners to all checkboxes to enable/disable submit button
+    const allCheckboxes = document.querySelectorAll('#checkerRejectModal input[name="qc_rejection_reasons[]"]');
+    const updateSubmitButton = function() {
+        const anyChecked = Array.from(allCheckboxes).some(c => c.checked);
+        const btn = document.getElementById('checkerRejectSubmitBtn');
+        if (btn) {
+            btn.disabled = !anyChecked;
+            btn.style.cursor = anyChecked ? 'pointer' : 'not-allowed';
+            btn.style.opacity = anyChecked ? '1' : '0.6';
+        }
+    };
     
-    checkboxes.forEach(cb => {
-        cb.addEventListener('change', function() {
-            const anyChecked = Array.from(checkboxes).some(c => c.checked);
-            submitBtn.disabled = !anyChecked;
-            submitBtn.style.cursor = anyChecked ? 'pointer' : 'not-allowed';
-            submitBtn.style.opacity = anyChecked ? '1' : '0.6';
-        });
+    // Remove old listeners and add new ones
+    allCheckboxes.forEach(cb => {
+        // Remove all existing listeners by cloning
+        const newCb = cb.cloneNode(true);
+        cb.parentNode.replaceChild(newCb, cb);
     });
+    
+    // Get fresh checkboxes after cloning
+    const freshCheckboxes = document.querySelectorAll('#checkerRejectModal input[name="qc_rejection_reasons[]"]');
+    freshCheckboxes.forEach(cb => {
+        cb.addEventListener('change', updateSubmitButton);
+    });
+    
+    // Also add a direct click handler to the submit button as a fallback
+    const finalSubmitBtn = document.getElementById('checkerRejectSubmitBtn');
+    if (finalSubmitBtn) {
+        // Remove any existing click listeners by cloning
+        const newBtn = finalSubmitBtn.cloneNode(true);
+        finalSubmitBtn.parentNode.replaceChild(newBtn, finalSubmitBtn);
+        
+        // Add click handler to the new button
+        const btn = document.getElementById('checkerRejectSubmitBtn');
+        if (btn) {
+            btn.addEventListener('click', function(e) {
+                const checkedBoxes = document.querySelectorAll('#checkerRejectModal input[name="qc_rejection_reasons[]"]:checked');
+                if (checkedBoxes.length === 0) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    alert('Please select at least one rejection reason.');
+                    return false;
+                }
+                // If checkboxes are checked, ensure button is enabled and allow form to submit
+                btn.disabled = false;
+            });
+        }
+    }
+}
+
+function validateCheckerRejectForm(event) {
+    const checkboxes = document.querySelectorAll('#checkerRejectModal input[name="qc_rejection_reasons[]"]:checked');
+    if (checkboxes.length === 0) {
+        if (event) {
+            event.preventDefault();
+        }
+        alert('Please select at least one rejection reason.');
+        return false;
+    }
+    
+    // Ensure button is enabled before submission
+    const submitBtn = document.getElementById('checkerRejectSubmitBtn');
+    if (submitBtn) {
+        submitBtn.disabled = false; // Ensure it's enabled
+        submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Submitting...';
+    }
+    
+    // Allow normal form submission
+    return true;
 }
 
 function closeCheckerRejectModal() {
@@ -1927,7 +2022,7 @@ document.addEventListener('DOMContentLoaded', function() {
       ❌ Reject QC Test Report (Checker Review)
     </h3>
     
-    <form id="checkerRejectForm" method="POST" action="../admin/lab_testing_dashboard.php">
+    <form id="checkerRejectForm" method="POST" action="../admin/lab_testing_dashboard.php" onsubmit="return validateCheckerRejectForm(event)">
       <input type="hidden" name="report_type" value="qc_test_order">
       <input type="hidden" id="checkerRejectReportNumber" name="report_number" value="">
       <input type="hidden" id="checkerRejectRelatedReports" name="related_report_numbers" value="">

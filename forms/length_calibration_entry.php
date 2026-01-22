@@ -102,24 +102,63 @@ if ($hasLcRoll) {
     }
 }
 
-// Fetch roll numbers from fiber_to_roll_entry - exclude only if approved or pending test exists for this specific ref+roll+line
+// Fetch roll numbers from gsm_roll_entry (primary source) and fiber_to_roll_entry (fallback)
 $rollNumbers = [];
-$rollQuery = $conn->query("
-    SELECT f.roll_no, f.reference_number, f.line_no 
-    FROM fiber_to_roll_entry f
-    WHERE f.roll_no IS NOT NULL 
-    {$lcExistsClause}
-    ORDER BY f.created_at DESC 
-    LIMIT 100
-");
-if ($rollQuery) {
-    while ($row = $rollQuery->fetch_assoc()) {
-        $rollNumbers[] = [
-            'roll_no' => $row['roll_no'],
-            'reference' => $row['reference_number'],
-            'line_no' => $row['line_no'],
-            'display' => "Roll {$row['roll_no']} ({$row['reference_number']})"
-        ];
+
+// First, try to fetch from gsm_roll_entry table
+$tableExists = false;
+$tableCheck = $conn->query("SHOW TABLES LIKE 'gsm_roll_entry'");
+if ($tableCheck && $tableCheck->num_rows > 0) {
+    $tableExists = true;
+}
+
+if ($tableExists) {
+    // Fetch from gsm_roll_entry
+    $rollQuery = $conn->query("
+        SELECT g.reference, g.roll_no, g.line_number as line_no
+        FROM gsm_roll_entry g
+        WHERE g.reference IS NOT NULL 
+        AND g.reference != ''
+        AND g.roll_no IS NOT NULL
+        AND NOT EXISTS (
+            SELECT 1 FROM length_calibrations lc 
+            WHERE lc.roll_no = g.roll_no
+            {$lcStatusFilter}
+        )
+        ORDER BY g.created_at DESC 
+        LIMIT 100
+    ");
+    if ($rollQuery) {
+        while ($row = $rollQuery->fetch_assoc()) {
+            $rollNumbers[] = [
+                'roll_no' => $row['roll_no'],
+                'reference' => $row['reference'],
+                'line_no' => $row['line_no'],
+                'display' => "Roll {$row['roll_no']}"
+            ];
+        }
+    }
+}
+
+// If no results from gsm_roll_entry, fallback to fiber_to_roll_entry
+if (empty($rollNumbers)) {
+    $rollQuery = $conn->query("
+        SELECT f.roll_no, f.reference_number, f.line_no 
+        FROM fiber_to_roll_entry f
+        WHERE f.roll_no IS NOT NULL 
+        {$lcExistsClause}
+        ORDER BY f.created_at DESC 
+        LIMIT 100
+    ");
+    if ($rollQuery) {
+        while ($row = $rollQuery->fetch_assoc()) {
+            $rollNumbers[] = [
+                'roll_no' => $row['roll_no'],
+                'reference' => $row['reference_number'],
+                'line_no' => $row['line_no'],
+                'display' => "Roll {$row['roll_no']}"
+            ];
+        }
     }
 }
 

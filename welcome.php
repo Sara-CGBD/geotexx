@@ -77,6 +77,12 @@ $roleConfig = [
         'icon' => 'fas fa-cogs',
         'access' => 'Bag Production module (Roll Received Entry, CNC Machine Entry, Sewing Machine Entry, Branding Entry, and related reports)'
     ],
+    'prod_user' => [
+        'title' => 'Production',
+        'badge' => 'Production User',
+        'icon' => 'fas fa-cogs',
+        'access' => 'Limited production access'
+    ],
     'user' => [
         'title' => 'User',
         'badge' => 'General User',

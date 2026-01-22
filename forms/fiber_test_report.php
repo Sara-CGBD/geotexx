@@ -654,7 +654,7 @@ $acceptance_criteria = [
 </head>
 <body>
 <div class="container">
-  <h1>🧪 Fiber Test Report</h1>
+  <h1>Fiber Test Report</h1>
 
   <?php 
   // Check for session-based success message (from edit page)

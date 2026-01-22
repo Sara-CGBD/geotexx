@@ -214,6 +214,195 @@ if ($cres) {
 if (empty($clients)) {
     error_log("FG Delivery: No clients found in database (client_name/name missing or empty).");
 }
+
+// Fetch trip numbers and reference numbers from roll_transfer where to_location = 'FG'
+$fgTripNumbers = array();
+$fgRollReferences = array(); // Reference numbers that were transferred to FG
+$hasRollTransfer = $conn->query("SHOW TABLES LIKE 'roll_transfer'")->num_rows > 0;
+if ($hasRollTransfer) {
+    $hasToLocation = $conn->query("SHOW COLUMNS FROM roll_transfer LIKE 'to_location'")->num_rows > 0;
+    $hasTrip = $conn->query("SHOW COLUMNS FROM roll_transfer LIKE 'trip'")->num_rows > 0;
+    $hasReferenceNumber = $conn->query("SHOW COLUMNS FROM roll_transfer LIKE 'reference_number'")->num_rows > 0;
+    
+    if ($hasToLocation && $hasTrip) {
+        // Fetch trip numbers - only trips that have references in fg_received_entry
+        $hasFgReceived = $conn->query("SHOW TABLES LIKE 'fg_received_entry'")->num_rows > 0;
+        $tripFilter = "";
+        
+        if ($hasFgReceived) {
+            $hasRefCol = $conn->query("SHOW COLUMNS FROM fg_received_entry LIKE 'reference_number'")->num_rows > 0;
+            $hasProductType = $conn->query("SHOW COLUMNS FROM fg_received_entry LIKE 'product_type'")->num_rows > 0;
+            $hasTripCol = $conn->query("SHOW COLUMNS FROM fg_received_entry LIKE 'trip_number'")->num_rows > 0;
+            
+            if ($hasRefCol && $hasProductType) {
+                // Only include trips that have at least one reference in fg_received_entry
+                // Use a correlated subquery that checks if any reference from this trip exists in fg_received_entry
+                $tripFilter = "AND EXISTS (
+                    SELECT 1 
+                    FROM roll_transfer rt2
+                    INNER JOIN fg_received_entry fre ON (
+                        fre.reference_number = rt2.reference_number
+                        OR FIND_IN_SET(rt2.reference_number, REPLACE(fre.reference_number, ', ', ',')) > 0
+                        OR fre.reference_number LIKE CONCAT(rt2.reference_number, ',%')
+                        OR fre.reference_number LIKE CONCAT('%, ', rt2.reference_number, ',%')
+                        OR fre.reference_number LIKE CONCAT('%, ', rt2.reference_number)
+                    )
+                    WHERE rt2.trip = rt.trip
+                      AND rt2.to_location = 'FG'
+                      AND fre.product_type = 'roll'
+                      AND fre.reference_number IS NOT NULL 
+                      AND fre.reference_number != ''
+                )";
+            }
+        }
+        
+        $tripQuery = $conn->query("
+            SELECT DISTINCT rt.trip, MAX(rt.date_time) as last_transfer_date
+            FROM roll_transfer rt
+            WHERE rt.to_location = 'FG' 
+              AND rt.trip IS NOT NULL
+              {$tripFilter}
+            GROUP BY rt.trip
+            ORDER BY rt.trip DESC
+            LIMIT 50
+        ");
+        if ($tripQuery) {
+            while ($row = $tripQuery->fetch_assoc()) {
+                $fgTripNumbers[] = [
+                    'trip' => (int)$row['trip'],
+                    'last_transfer_date' => $row['last_transfer_date']
+                ];
+            }
+        }
+    }
+    
+    // Fetch reference numbers that were transferred to FG
+    // Only include references that have been submitted in fg_received_entry
+    if ($hasToLocation && $hasReferenceNumber) {
+        // Check if fg_received_entry table exists
+        $hasFgReceived = $conn->query("SHOW TABLES LIKE 'fg_received_entry'")->num_rows > 0;
+        $fgReceivedFilter = "";
+        
+        if ($hasFgReceived) {
+            $hasRefCol = $conn->query("SHOW COLUMNS FROM fg_received_entry LIKE 'reference_number'")->num_rows > 0;
+            $hasProductType = $conn->query("SHOW COLUMNS FROM fg_received_entry LIKE 'product_type'")->num_rows > 0;
+            
+            if ($hasRefCol && $hasProductType) {
+                // Only include references that exist in fg_received_entry for rolls
+                // Check if reference exists (exact match or in comma-separated list)
+                $fgReceivedFilter = "AND EXISTS (
+                    SELECT 1 
+                    FROM fg_received_entry fre
+                    WHERE fre.product_type = 'roll'
+                      AND fre.reference_number IS NOT NULL 
+                      AND fre.reference_number != ''
+                      AND (
+                        fre.reference_number = rt.reference_number
+                        OR FIND_IN_SET(rt.reference_number, REPLACE(TRIM(fre.reference_number), ' ', '')) > 0
+                        OR fre.reference_number LIKE CONCAT(rt.reference_number, ',%')
+                        OR fre.reference_number LIKE CONCAT('%, ', rt.reference_number, ',%')
+                        OR fre.reference_number LIKE CONCAT('%, ', rt.reference_number)
+                      )
+                )";
+            } else {
+                // If columns don't exist, don't show any references
+                $fgReceivedFilter = "AND 1 = 0";
+            }
+        } else {
+            // If table doesn't exist, don't show any references
+            $fgReceivedFilter = "AND 1 = 0";
+        }
+        
+        // Check if fg_deliveries table exists for calculating remaining quantity
+        $hasFgDeliveries = $conn->query("SHOW TABLES LIKE 'fg_deliveries'")->num_rows > 0;
+        $hasDeliveryQty = false;
+        $hasDeliveryRef = false;
+        $hasDeliveryIsDeleted = false;
+        $deliveryQtyCol = 'delivery_quantity';
+        
+        if ($hasFgDeliveries) {
+            $hasDeliveryQty = $conn->query("SHOW COLUMNS FROM fg_deliveries LIKE 'delivery_quantity'")->num_rows > 0;
+            if (!$hasDeliveryQty) {
+                $hasDeliveryQty = $conn->query("SHOW COLUMNS FROM fg_deliveries LIKE 'delivery_qty'")->num_rows > 0;
+                if ($hasDeliveryQty) {
+                    $deliveryQtyCol = 'delivery_qty';
+                }
+            }
+            $hasDeliveryRef = $conn->query("SHOW COLUMNS FROM fg_deliveries LIKE 'reference_number'")->num_rows > 0;
+            $hasFgEntryId = $conn->query("SHOW COLUMNS FROM fg_deliveries LIKE 'fg_entry_id'")->num_rows > 0;
+            $hasDeliveryIsDeleted = $conn->query("SHOW COLUMNS FROM fg_deliveries LIKE 'is_deleted'")->num_rows > 0;
+        }
+        
+        // Build remaining quantity calculation
+        $remainingQtyExpr = "fre.received_quantity";
+        if ($hasFgDeliveries && $hasDeliveryQty && $hasFgEntryId) {
+            $remainingQtyExpr = "(fre.received_quantity - COALESCE(SUM(fd.{$deliveryQtyCol}), 0))";
+        }
+        
+        // Build the LEFT JOIN for fg_deliveries with conditional is_deleted check
+        $deliveriesJoin = "";
+        if ($hasFgDeliveries && $hasDeliveryQty && $hasFgEntryId) {
+            $deliveriesJoin = "LEFT JOIN fg_deliveries fd ON fre.id = fd.fg_entry_id 
+                AND fd.delivery_product_type = 'roll'";
+            if ($hasDeliveryIsDeleted) {
+                $deliveriesJoin .= " AND (fd.is_deleted = 0 OR fd.is_deleted IS NULL)";
+            }
+        }
+        
+        $refQuery = $conn->query("
+            SELECT DISTINCT 
+                rt.reference_number,
+                rt.trip,
+                rt.amount_kg,
+                rt.date_time,
+                MAX(rt.date_time) as last_transfer_date,
+                COALESCE(re.total_area, 0) as total_area,
+                fre.received_quantity,
+                {$remainingQtyExpr} as remaining_quantity
+            FROM roll_transfer rt
+            INNER JOIN fg_received_entry fre ON (
+                fre.product_type = 'roll'
+                AND fre.reference_number IS NOT NULL 
+                AND fre.reference_number != ''
+                AND (
+                    fre.reference_number = rt.reference_number
+                    OR FIND_IN_SET(rt.reference_number, REPLACE(TRIM(fre.reference_number), ' ', '')) > 0
+                    OR fre.reference_number LIKE CONCAT(rt.reference_number, ',%')
+                    OR fre.reference_number LIKE CONCAT('%, ', rt.reference_number, ',%')
+                    OR fre.reference_number LIKE CONCAT('%, ', rt.reference_number)
+                )
+            )
+            LEFT JOIN roll_entry re ON rt.reference_number = re.reference_number 
+                AND (re.is_deleted = 0 OR re.is_deleted IS NULL)
+            {$deliveriesJoin}
+            WHERE rt.to_location = 'FG' 
+              AND rt.reference_number IS NOT NULL
+              AND rt.reference_number != ''
+              {$fgReceivedFilter}
+            GROUP BY rt.reference_number, rt.trip, rt.amount_kg, rt.date_time, re.total_area, fre.received_quantity, fre.id
+            HAVING remaining_quantity > 0
+            ORDER BY rt.date_time DESC, rt.reference_number ASC
+            LIMIT 200
+        ");
+        if ($refQuery) {
+            while ($row = $refQuery->fetch_assoc()) {
+                $remainingQty = (float)($row['remaining_quantity'] ?? 0);
+                // Only add if there's remaining quantity
+                if ($remainingQty > 0) {
+                    $fgRollReferences[] = [
+                        'reference_number' => $row['reference_number'],
+                        'trip' => (int)($row['trip'] ?? 0),
+                        'amount_kg' => (float)($row['amount_kg'] ?? 0),
+                        'total_area' => (float)($row['total_area'] ?? 0),
+                        'date_time' => $row['date_time'],
+                        'last_transfer_date' => $row['last_transfer_date'],
+                        'remaining_quantity' => $remainingQty
+                    ];
+                }
+            }
+        }
+    }
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -264,6 +453,80 @@ if (empty($clients)) {
   }
   .clear-btn:hover {
     background: linear-gradient(135deg, #c0392b 0%, #a93226 100%);
+  }
+  
+  /* Modern Add Button Styles - Minimal Size */
+  .modern-add-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 8px 16px;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: #ffffff;
+    border: none;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    position: relative;
+    overflow: hidden;
+    height: 38px;
+    margin-top: 0;
+    flex-shrink: 0;
+  }
+  
+  .modern-add-btn::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
+    transition: left 0.5s;
+  }
+  
+  .modern-add-btn:hover::before {
+    left: 100%;
+  }
+  
+  .modern-add-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+    background: linear-gradient(135deg, #764ba2 0%, #667eea 100%);
+  }
+  
+  .modern-add-btn:active {
+    transform: translateY(0);
+    box-shadow: 0 1px 6px rgba(102, 126, 234, 0.3);
+  }
+  
+  .modern-add-btn .btn-icon-wrapper {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 50%;
+    transition: all 0.3s ease;
+  }
+  
+  .modern-add-btn:hover .btn-icon-wrapper {
+    background: rgba(255, 255, 255, 0.3);
+    transform: rotate(90deg);
+  }
+  
+  .modern-add-btn .btn-icon-wrapper i {
+    font-size: 10px;
+  }
+  
+  .modern-add-btn .btn-text {
+    letter-spacing: 0.3px;
   }
   .alert { padding:12px; border-radius:6px; margin-bottom:20px; text-align:center; font-weight:600; }
   .alert-success { background:#d4edda; color:#155724; border:1px solid #c3e6cb; }
@@ -582,10 +845,10 @@ if (empty($clients)) {
     <div class="form-group">
       <label>Product Type: <span style="color:red;">*</span></label>
       <div class="btn-group" id="deliveryProductTypeGroup" style="display:flex; gap:10px; flex-wrap:wrap;">
-        <button type="button" class="btn delivery-product-type-btn" onclick="selectDeliveryProductType('roll')" style="background:#e0e0e0;color:#333; border:2px solid #ccc;">
+        <button type="button" class="btn delivery-product-type-btn" data-type="roll" onclick="selectDeliveryProductType('roll', this)" style="background:#e0e0e0;color:#333; border:2px solid #ccc;">
           <i class="fas fa-scroll"></i> Roll
         </button>
-        <button type="button" class="btn delivery-product-type-btn" onclick="selectDeliveryProductType('bag')" style="background:#e0e0e0;color:#333; border:2px solid #ccc;">
+        <button type="button" class="btn delivery-product-type-btn" data-type="bag" onclick="selectDeliveryProductType('bag', this)" style="background:#e0e0e0;color:#333; border:2px solid #ccc;">
           <i class="fas fa-shopping-bag"></i> Bag
         </button>
       </div>
@@ -593,37 +856,73 @@ if (empty($clients)) {
       <input type="hidden" id="delivery_unit" name="delivery_unit" value="piece">
     </div>
 
-    <!-- Roll Entry Type (Individual or Bundle) - Shown only when Roll is selected -->
-    <div class="form-group" id="deliveryRollEntryTypeGroup" style="display:none;">
-      <label>Entry Type: <span style="color:red;">*</span></label>
-      <div class="btn-group" style="display:flex; gap:10px; flex-wrap:wrap;">
-        <button type="button" class="btn delivery-roll-entry-type-btn" onclick="selectDeliveryRollEntryType('individual')" style="background:#e0e0e0;color:#333; border:2px solid #ccc;">
-          <i class="fas fa-circle"></i> Individual Roll
-        </button>
-        <button type="button" class="btn delivery-roll-entry-type-btn" onclick="selectDeliveryRollEntryType('bundle')" style="background:#e0e0e0;color:#333; border:2px solid #ccc;">
-          <i class="fas fa-layer-group"></i> Bundle
-        </button>
-      </div>
-      <input type="hidden" id="delivery_roll_entry_type" name="delivery_roll_entry_type" value="">
+    <!-- Trip Number - Shown only when Roll is selected -->
+    <div class="form-group" id="deliveryTripNumberGroup" style="display:none;">
+      <label>Trip Number: <span style="color:red;">*</span></label>
+      <select id="delivery_trip_number" name="delivery_trip_number" onchange="onTripNumberChange()">
+        <option value="">-- Select Trip Number --</option>
+      </select>
+      <small style="color:#6c757d; display:block; margin-top:8px;">
+        Select a trip number from roll transfers submitted as FG
+      </small>
     </div>
 
-    <!-- All fields below this will be hidden until product/entry type is selected -->
+    <!-- Delivery Quantity Unit Selection (Only for Rolls, after Trip Number) -->
+    <div class="form-group" id="deliveryUnitGroup" style="display:none;">
+      <label>Delivery Quantity Unit: <span style="color:red;">*</span></label>
+      <div class="btn-group" style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:10px;">
+        <button type="button" class="btn delivery-unit-btn" data-unit="kg" onclick="selectDeliveryUnit('kg', this)" style="background:#e0e0e0;color:#333; border:2px solid #ccc;">
+          <i class="fas fa-weight"></i> KG
+        </button>
+        <button type="button" class="btn delivery-unit-btn" data-unit="sqm" onclick="selectDeliveryUnit('sqm', this)" style="background:#e0e0e0;color:#333; border:2px solid #ccc;">
+          <i class="fas fa-ruler-combined"></i> SQM
+        </button>
+      </div>
+      <input type="hidden" id="delivery_quantity_unit" name="delivery_quantity_unit" value="">
+      <small style="color:#6c757d; display:block; margin-top:8px;">
+        Select the unit for delivery quantity. References will be shown based on your selection.
+      </small>
+    </div>
+
+    <!-- All fields below this will be hidden until product type is selected -->
     <div id="deliveryFieldsContainer" style="display:none;">
 
     <!-- Product -->
     <!-- Reference Number (Only for Rolls) -->
     <div class="form-group" id="referenceNumberGroup">
-      <label>Reference Number:</label>
-      <select id="reference_number" name="reference_number" onchange="updateCNCBatchFromRef()">
-        <option value="">-- Select Product Type First --</option>
-      </select>
+      <label>Reference Number: <span style="color:red;">*</span></label>
+      <div style="display:flex; gap:15px; align-items:flex-start; margin-bottom:10px;">
+        <div style="flex:1; position:relative;">
+          <input type="text" id="delivery_reference_search" placeholder="Search or type reference number..." 
+                 style="padding:10px; border:1px solid #ccc; border-radius:6px; width:100%;"
+                 onkeyup="filterDeliveryReferences()" onfocus="showDeliveryReferenceDropdown()">
+          <div id="delivery_reference_dropdown" style="display:none; max-height:200px; overflow-y:auto; border:1px solid #ccc; border-radius:6px; background:#fff; position:absolute; z-index:1000; width:100%; top:100%; box-shadow:0 4px 6px rgba(0,0,0,0.1); margin-top:2px;">
+            <div id="delivery_no_references_message" style="display:none; padding:15px; text-align:center; color:#999; font-style:italic;">
+              No references available. Please ensure references have been transferred to FG.
+            </div>
+          </div>
+        </div>
+        <div style="display:flex; align-items:center; padding-top:0;">
+          <button type="button" onclick="addDeliveryReference()" class="modern-add-btn">
+            <span class="btn-icon-wrapper">
+              <i class="fas fa-plus"></i>
+            </span>
+            <span class="btn-text">Add</span>
+          </button>
+        </div>
+      </div>
+      <div id="delivery_selected_reference" style="margin-top:10px; min-height:30px;">
+        <!-- Selected reference will appear here -->
+      </div>
+      <input type="hidden" id="reference_number" name="reference_number" value="" required>
+      <input type="hidden" id="reference_quantities" name="reference_quantities" value="">
       <small id="delivery_reference_hint" style="color:#6c757d; display:block; margin-top:5px;"></small>
     </div>
 
     <!-- CNC Cutting Batch (Dropdown for Bags) -->
     <div class="form-group" id="cncBatchGroup" style="display:none;">
       <label>CNC Cutting Batch: <span style="color:red;">*</span></label>
-      <select id="cnc_cutting_batch" name="cnc_cutting_batch" required onchange="updateFromCNCBatch()">
+      <select id="cnc_cutting_batch" name="cnc_cutting_batch" onchange="updateFromCNCBatch()">
         <option value="">-- Select CNC Cutting Batch --</option>
       </select>
       <small id="cnc_batch_hint" style="color:#6c757d; display:block; margin-top:5px;"></small>
@@ -640,8 +939,8 @@ if (empty($clients)) {
 
     <!-- Delivery Quantity (User can edit) -->
     <div class="form-group">
-      <label id="delivery_qty_label">Delivery Quantity (pcs):</label>
-      <input type="number" id="delivery_qty" name="delivery_qty" required min="1" step="0.01" placeholder="Enter quantity to deliver" oninput="validateDeliveryQty()">
+      <label id="delivery_qty_label">Delivery Quantity:</label>
+      <input type="number" id="delivery_qty" name="delivery_qty" required min="1" step="1" placeholder="" readonly style="background:#ecf0f1;">
       <small style="color: #7f8c8d; font-size: 0.9em; display: none;" id="qty_hint"></small>
     </div>
 
@@ -679,7 +978,7 @@ if (empty($clients)) {
       <label>Lighthouse Challan Number:</label>
       <div style="display: flex; gap: 10px; align-items: center;">
         <input type="text" id="challan_no" name="challan_no" value="<?php echo htmlspecialchars($pre_challan_no); ?>" readonly class="readonly" style="flex: 1;">
-        <button type="button" class="btn" onclick="enableManualChallan()" style="background: linear-gradient(135deg, #718A95 0%, #5A6F7A 100%); color: white; padding: 10px 20px; white-space: nowrap; border-color: #5A6F7A; box-shadow: 0 2px 6px rgba(114, 132, 143, 0.3);">
+        <button type="button" id="manualChallanBtn" class="btn" onclick="enableManualChallan(this)" style="background: linear-gradient(135deg, #718A95 0%, #5A6F7A 100%); color: white; padding: 10px 20px; white-space: nowrap; border-color: #5A6F7A; box-shadow: 0 2px 6px rgba(114, 132, 143, 0.3);">
           ✏️ Manual Entry
         </button>
       </div>
@@ -689,7 +988,7 @@ if (empty($clients)) {
     <!-- Unit Price (auto-filled from BOM or manual for custom bags) -->
     <div class="form-group">
       <label>Unit Price (৳ per pcs):</label>
-      <input type="number" id="unit_price" name="unit_price" step="0.01" min="0" required>
+      <input type="number" id="unit_price" name="unit_price" step="1" min="0" required>
       <small style="color: #7f8c8d; font-size: 0.9em;" id="price_hint">Auto-filled from BOM</small>
     </div>
 
@@ -743,13 +1042,15 @@ const queryError = <?php echo json_encode($queryError); ?>;
 
 // Clients data from PHP
 const clientsData = <?php echo json_encode($clients); ?>;
+const fgTripNumbers = <?php echo json_encode($fgTripNumbers); ?>;
+const fgRollReferences = <?php echo json_encode($fgRollReferences); ?>;
 // Debug: Log clients count
 console.log('Clients loaded:', clientsData.length, clientsData);
 
 // Minimal debug logging
 // Data loaded from PHP
 
-function selectDeliveryProductType(type) {
+function selectDeliveryProductType(type, buttonElement = null) {
   // Remove selected styling from all product type buttons
   const allBtns = document.querySelectorAll('.delivery-product-type-btn');
   allBtns.forEach(btn => {
@@ -760,10 +1061,13 @@ function selectDeliveryProductType(type) {
   });
   
   // Add selected styling to clicked button (blue)
-  event.target.style.background = '#2196F3';
-  event.target.style.color = '#fff';
-  event.target.style.border = '2px solid #1976D2';
-  event.target.classList.add('selected');
+  const clickedButton = buttonElement || document.querySelector(`.delivery-product-type-btn[data-type="${type}"]`);
+  if (clickedButton) {
+    clickedButton.style.background = '#2196F3';
+    clickedButton.style.color = '#fff';
+    clickedButton.style.border = '2px solid #1976D2';
+    clickedButton.classList.add('selected');
+  }
   
   // Set hidden input
   document.getElementById('delivery_product_type').value = type;
@@ -781,47 +1085,687 @@ function selectDeliveryProductType(type) {
   // Show/hide CNC cutting batch field (only for bags)
   const cncBatchGroup = document.getElementById('cncBatchGroup');
   const referenceNumberGroup = document.getElementById('referenceNumberGroup');
+  const cncBatchField = document.getElementById('cnc_cutting_batch');
+  
+  // Show/hide trip number and fields container
+  const tripNumberGroup = document.getElementById('deliveryTripNumberGroup');
+  const deliveryFieldsContainer = document.getElementById('deliveryFieldsContainer');
+  const deliveryUnitGroup = document.getElementById('deliveryUnitGroup');
   
   if (type === 'roll') {
-    // For rolls, use kg, show reference number, hide CNC batch dropdown
-    if (availableQtyLabel) availableQtyLabel.textContent = 'Available Quantity (kg):';
-    if (deliveryQtyLabel) deliveryQtyLabel.textContent = 'Delivery Quantity (kg):';
+    // For rolls, show trip number dropdown, unit selector, and all fields immediately
+    if(tripNumberGroup) tripNumberGroup.style.display = 'block';
+    if(deliveryUnitGroup) deliveryUnitGroup.style.display = 'block';
+    if(deliveryFieldsContainer) deliveryFieldsContainer.style.display = 'block';
+    
+    // Set trip number as required for rolls
+    const tripNumberField = document.getElementById('delivery_trip_number');
+    if (tripNumberField) {
+      tripNumberField.required = true;
+    }
+    
+    // Load trip numbers
+    loadFGTripNumbers();
+    
+    // For rolls, show reference number, hide CNC batch dropdown
+    if (availableQtyLabel) availableQtyLabel.textContent = 'Available Quantity:';
+    if (deliveryQtyLabel) deliveryQtyLabel.textContent = 'Delivery Quantity:';
     if (referenceNumberGroup) referenceNumberGroup.style.display = 'block';
     if (cncBatchGroup) cncBatchGroup.style.display = 'none';
-    // Clear CNC batch value for rolls
-    const cncBatchField = document.getElementById('cnc_cutting_batch');
     if (cncBatchField) cncBatchField.value = '';
+    if (cncBatchField) cncBatchField.required = false;
+    
+    // Set default unit to KG
+    selectDeliveryUnit('kg');
+    
+    // Load roll references (no entry type filtering)
+    loadRollDeliveryReferences();
   } else if (type === 'bag') {
+    // For bags, hide trip number and unit selector, show all fields immediately
+    if(tripNumberGroup) tripNumberGroup.style.display = 'none';
+    if(deliveryUnitGroup) deliveryUnitGroup.style.display = 'none';
+    if(deliveryFieldsContainer) deliveryFieldsContainer.style.display = 'block';
+    
+    // Remove required attribute from trip number for bags (field is hidden)
+    const tripNumberField = document.getElementById('delivery_trip_number');
+    if (tripNumberField) {
+      tripNumberField.required = false;
+      tripNumberField.value = ''; // Clear value when hidden
+    }
+    
     // For bags, use pcs, hide reference number, show CNC batch dropdown
     if (availableQtyLabel) availableQtyLabel.textContent = 'Available Quantity (pcs):';
     if (deliveryQtyLabel) deliveryQtyLabel.textContent = 'Delivery Quantity (pcs):';
     if (referenceNumberGroup) referenceNumberGroup.style.display = 'none';
     if (cncBatchGroup) cncBatchGroup.style.display = 'block';
+    if (cncBatchField) cncBatchField.required = true;
     // Load CNC batches from branding entries
     loadBrandingCNCBatches();
-  }
-  
-  // Show/hide roll entry type selection
-  const rollEntryTypeGroup = document.getElementById('deliveryRollEntryTypeGroup');
-  const deliveryFieldsContainer = document.getElementById('deliveryFieldsContainer');
-  
-  if (type === 'roll') {
-    // For rolls, show entry type selection first
-    if(rollEntryTypeGroup) rollEntryTypeGroup.style.display = 'block';
-    if(deliveryFieldsContainer) deliveryFieldsContainer.style.display = 'none'; // Wait for entry type
-  } else if (type === 'bag') {
-    // For bags, show all fields immediately
-    if(rollEntryTypeGroup) rollEntryTypeGroup.style.display = 'none';
-    if(deliveryFieldsContainer) deliveryFieldsContainer.style.display = 'block';
-    loadBagDeliveryReferences();
   }
   
   updateSummary();
 }
 
-function selectDeliveryRollEntryType(entryType) {
-  // Remove selected styling from all entry type buttons
-  const allBtns = document.querySelectorAll('.delivery-roll-entry-type-btn');
+// Function called when trip number is selected
+function onTripNumberChange() {
+  const tripNumber = document.getElementById('delivery_trip_number').value;
+  const deliveryUnitGroup = document.getElementById('deliveryUnitGroup');
+  const referenceNumberGroup = document.getElementById('referenceNumberGroup');
+  
+  if (tripNumber && tripNumber.trim() !== '') {
+    // Show unit selector after trip is selected
+    if (deliveryUnitGroup) deliveryUnitGroup.style.display = 'block';
+    // Hide reference group until unit is selected
+    if (referenceNumberGroup) referenceNumberGroup.style.display = 'none';
+    
+    // Clear previous selections
+    const unitField = document.getElementById('delivery_quantity_unit');
+    if (unitField) unitField.value = '';
+    window.deliverySelectedReferences = [];
+    renderSelectedReferences();
+    updateAvailableQuantity();
+    updateTotalDeliveryQuantity();
+    
+    // Reset unit buttons
+    const allUnitBtns = document.querySelectorAll('.delivery-unit-btn');
+    allUnitBtns.forEach(btn => {
+      btn.style.background = '#e0e0e0';
+      btn.style.color = '#333';
+      btn.style.border = '2px solid #ccc';
+      btn.classList.remove('selected');
+    });
+  } else {
+    // Hide unit selector and reference group if trip is cleared
+    if (deliveryUnitGroup) deliveryUnitGroup.style.display = 'none';
+    if (referenceNumberGroup) referenceNumberGroup.style.display = 'none';
+    
+    // Clear selections
+    const unitField = document.getElementById('delivery_quantity_unit');
+    if (unitField) unitField.value = '';
+    window.deliverySelectedReferences = [];
+    renderSelectedReferences();
+    updateAvailableQuantity();
+    updateTotalDeliveryQuantity();
+  }
+}
+
+// Removed selectDeliveryRollEntryType function - Entry Type field has been removed
+
+// Function to load FG Trip Numbers into dropdown
+function loadFGTripNumbers() {
+  const tripSelect = document.getElementById('delivery_trip_number');
+  if (!tripSelect) return;
+  
+  tripSelect.innerHTML = '<option value="">-- Select Trip Number --</option>';
+  
+  if (fgTripNumbers && fgTripNumbers.length > 0) {
+    fgTripNumbers.forEach(tripData => {
+      const option = document.createElement('option');
+      option.value = tripData.trip;
+      const dateStr = tripData.last_transfer_date ? new Date(tripData.last_transfer_date).toLocaleDateString() : '';
+      option.textContent = 'Trip ' + tripData.trip + (dateStr ? ' (Last: ' + dateStr + ')' : '');
+      tripSelect.appendChild(option);
+    });
+  } else {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = 'No trips found';
+    option.disabled = true;
+    tripSelect.appendChild(option);
+  }
+}
+
+function loadRollDeliveryReferences() {
+  const dropdown = document.getElementById('delivery_reference_dropdown');
+  const referenceHint = document.getElementById('delivery_reference_hint');
+  if (!dropdown) return;
+  
+  // Get selected trip number and unit
+  const tripNumber = document.getElementById('delivery_trip_number').value;
+  const unitField = document.getElementById('delivery_quantity_unit');
+  const selectedUnit = unitField ? unitField.value : '';
+  
+  // Clear existing options
+  dropdown.innerHTML = '';
+  
+  // If trip number or unit is not selected, don't show references
+  if (!tripNumber || tripNumber.trim() === '' || !selectedUnit) {
+    if (referenceHint) {
+      referenceHint.textContent = 'Please select a trip number and delivery quantity unit first.';
+    }
+    return;
+  }
+  
+  // Use reference numbers from roll_transfer where to_location = 'FG' and trip matches
+  if (fgRollReferences && fgRollReferences.length > 0) {
+    // Get unique reference numbers for the selected trip
+    const uniqueRefs = {};
+    fgRollReferences.forEach(ref => {
+      // Filter by selected trip number
+      if (ref.trip && ref.trip.toString() !== tripNumber.toString()) {
+        return; // Skip references not in selected trip
+      }
+      
+      const refNum = ref.reference_number;
+      if (!uniqueRefs[refNum]) {
+        uniqueRefs[refNum] = {
+          reference_number: refNum,
+          trips: [],
+          total_amount: 0,
+          total_area: ref.total_area || 0,
+          last_transfer_date: ref.last_transfer_date || ref.date_time
+        };
+      }
+      if (ref.trip && !uniqueRefs[refNum].trips.includes(ref.trip)) {
+        uniqueRefs[refNum].trips.push(ref.trip);
+      }
+      uniqueRefs[refNum].total_amount += ref.amount_kg;
+      // Use the maximum total_area if multiple entries exist
+      if (ref.total_area && ref.total_area > (uniqueRefs[refNum].total_area || 0)) {
+        uniqueRefs[refNum].total_area = ref.total_area;
+      }
+    });
+    
+    // Convert to array and sort by last transfer date
+    const refArray = Object.values(uniqueRefs).sort((a, b) => {
+      return new Date(b.last_transfer_date) - new Date(a.last_transfer_date);
+    });
+    
+    // Fetch real-time available quantities for all references
+    const refPromises = refArray.map(ref => {
+      return fetch(`api/get_fg_received_available_qty.php?reference=${encodeURIComponent(ref.reference_number)}`)
+        .then(response => response.json())
+        .then(data => {
+          // Get available quantity based on selected unit
+          let availableQty = 0;
+          if (selectedUnit === 'kg') {
+            availableQty = data.success ? (parseFloat(data.remaining_quantity) || 0) : ref.total_amount;
+          } else if (selectedUnit === 'sqm') {
+            // For sqm, use remaining_sqm if available, otherwise use area_sqm
+            availableQty = data.success ? (parseFloat(data.remaining_sqm) || parseFloat(data.area_sqm) || 0) : (ref.total_area || 0);
+          } else {
+            availableQty = data.success ? (parseFloat(data.remaining_quantity) || 0) : ref.total_amount;
+          }
+          
+          return {
+            ref: ref,
+            availableQty: availableQty,
+            remainingSqm: data.success ? (parseFloat(data.remaining_sqm) || parseFloat(data.area_sqm) || 0) : (ref.total_area || 0)
+          };
+        })
+        .catch(error => {
+          console.error('Error fetching available quantity for ' + ref.reference_number + ':', error);
+          return {
+            ref: ref,
+            availableQty: selectedUnit === 'sqm' ? (ref.total_area || 0) : ref.total_amount,
+            remainingSqm: ref.total_area || 0
+          };
+        });
+    });
+    
+    // Wait for all API calls to complete, then render options
+    Promise.all(refPromises).then(results => {
+      // Clear dropdown first
+      dropdown.innerHTML = '';
+      
+      // Filter out references based on selected unit
+      // For kg: check availableQty > 0
+      // For sqm: check total_area > 0
+      const validResults = results.filter(result => {
+        const availableQty = parseFloat(result.availableQty) || 0;
+        const remainingSqm = parseFloat(result.remainingSqm) || 0;
+        
+        if (selectedUnit === 'kg') {
+          // For kg unit, check if available quantity > 0
+          return availableQty > 0;
+        } else if (selectedUnit === 'sqm') {
+          // For sqm unit, check if remaining sqm > 0
+          return remainingSqm > 0;
+        } else {
+          // Default: check if either is available
+          return availableQty > 0 || remainingSqm > 0;
+        }
+      });
+      
+      validResults.forEach(result => {
+        const ref = result.ref;
+        const availableQty = parseFloat(result.availableQty) || 0;
+        const remainingSqm = parseFloat(result.remainingSqm) || 0;
+        
+        // Skip based on selected unit
+        if (selectedUnit === 'kg' && availableQty <= 0) {
+          return;
+        } else if (selectedUnit === 'sqm' && remainingSqm <= 0) {
+          return;
+        } else if (!selectedUnit && availableQty <= 0 && remainingSqm <= 0) {
+          return;
+        }
+        
+        const option = document.createElement('div');
+        option.className = 'delivery-reference-option';
+        const tripText = ref.trips.length > 1 ? 'Trips: ' + ref.trips.sort((a,b) => a-b).join(', ') : 'Trip: ' + ref.trips[0];
+        
+        // Show value based on selected unit - use real-time available quantity
+        let valueText = '';
+        if (selectedUnit === 'kg') {
+          valueText = 'Available: ' + Math.round(availableQty) + ' kg';
+        } else if (selectedUnit === 'sqm') {
+          const areaValue = remainingSqm > 0 ? remainingSqm.toFixed(2) : '0.00';
+          valueText = 'Available: ' + areaValue + ' sqm';
+        } else {
+          // Default: show both
+          valueText = 'Available: ' + Math.round(availableQty) + ' kg';
+          if (remainingSqm > 0) {
+            valueText += ', Area: ' + remainingSqm.toFixed(2) + ' sqm';
+          }
+        }
+        
+        option.innerHTML = '<strong>' + escapeHtml(ref.reference_number) + '</strong><br><small style="color:#27ae60; font-weight:600;">' + escapeHtml(tripText) + ', ' + valueText + '</small>';
+        
+        // Set data attributes - use real-time available quantity
+        option.setAttribute('data-ref', ref.reference_number);
+        option.setAttribute('data-trips', ref.trips.join(','));
+        option.setAttribute('data-total-amount', ref.total_amount.toFixed(2));
+        option.setAttribute('data-total-area', (ref.total_area || 0).toFixed(2));
+        option.setAttribute('data-remaining-qty', Math.round(availableQty).toString());
+        option.setAttribute('style', 'display:block; padding:10px; cursor:pointer; border-bottom:1px solid #eee;');
+        option.setAttribute('onmouseover', "this.style.background='#f0f0f0'");
+        option.setAttribute('onmouseout', "this.style.background='#fff'");
+        option.setAttribute('onclick', "event.preventDefault(); event.stopPropagation(); selectDeliveryReferenceFromDropdown('" + ref.reference_number.replace(/'/g, "\\'") + "'); return false;");
+        
+        dropdown.appendChild(option);
+      });
+      
+      if (referenceHint) {
+        referenceHint.textContent = validResults.length > 0 
+          ? 'Showing ' + validResults.length + ' reference(s) with available stock. Type to search, click to select, then click Add.' 
+          : 'No references with available stock found for the selected trip and unit.';
+      }
+      
+      if (referenceHint) {
+        referenceHint.textContent = 'Showing ' + results.length + ' reference(s) transferred to FG. Type to search, click to select, then click Add.';
+      }
+    });
+    
+    if (referenceHint) {
+      referenceHint.textContent = 'Showing ' + refArray.length + ' reference(s) transferred to FG. Type to search, click to select, then click Add.';
+    }
+  } else {
+    // Fallback: try to find matching entries in fgEntriesData
+  const rollEntries = fgEntriesData.filter(entry => {
+    const isRoll = entry.product_type === 'roll';
+      return isRoll;
+  });
+  
+  rollEntries.forEach(entry => {
+      const option = document.createElement('div');
+      option.className = 'delivery-reference-option';
+      
+      option.innerHTML = '<strong>' + escapeHtml(entry.reference_number) + '</strong><br><small style="color:#27ae60; font-weight:600;">Remaining: ' + entry.remaining_quantity + ' kg</small>';
+    
+    // Set all data attributes
+      option.setAttribute('data-ref', entry.reference_number);
+      option.setAttribute('data-fg-id', String(entry.id || ''));
+      option.setAttribute('data-cnc-batch', String(entry.cnc_cutting_batch || ''));
+      option.setAttribute('data-bag-size', String(entry.bag_size || ''));
+      option.setAttribute('data-project', String(entry.project_name || ''));
+      option.setAttribute('data-passed-qty', String(entry.passed_qty || '0'));
+      option.setAttribute('data-actual-weight', String(entry.actual_weight || '0'));
+      option.setAttribute('data-delivered-qty', String(entry.delivered_quantity || '0'));
+      option.setAttribute('data-remaining-qty', String(entry.remaining_quantity || '0'));
+      option.setAttribute('style', 'display:none; padding:10px; cursor:pointer; border-bottom:1px solid #eee;');
+      option.setAttribute('onmouseover', "this.style.background='#f0f0f0'");
+      option.setAttribute('onmouseout', "this.style.background='#fff'");
+      option.setAttribute('onclick', "event.preventDefault(); event.stopPropagation(); selectDeliveryReferenceFromDropdown('" + entry.reference_number.replace(/'/g, "\\'") + "'); return false;");
+      
+      dropdown.appendChild(option);
+    });
+    
+    if (referenceHint) {
+      referenceHint.textContent = rollEntries.length > 0 ? 'Showing roll entries from FG entry. Type to search, click to select, then click Add.' : 'No roll references found';
+    }
+  }
+  
+  // Hide dropdown initially
+  dropdown.style.display = 'none';
+}
+
+// Helper function to escape HTML
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+// Function to show reference dropdown
+function showDeliveryReferenceDropdown() {
+  const dropdown = document.getElementById('delivery_reference_dropdown');
+  if (dropdown) {
+    filterDeliveryReferences();
+    dropdown.style.display = 'block';
+  }
+}
+
+// Function to filter references based on search term
+function filterDeliveryReferences() {
+  const searchTerm = document.getElementById('delivery_reference_search').value.toLowerCase();
+  const options = document.querySelectorAll('.delivery-reference-option');
+  const noRefsMsg = document.getElementById('delivery_no_references_message');
+  
+  let visibleCount = 0;
+  
+  options.forEach(option => {
+    const refText = (option.getAttribute('data-ref') || '').toLowerCase();
+    
+    if (!searchTerm || refText.includes(searchTerm)) {
+      option.style.display = 'block';
+      visibleCount++;
+    } else {
+      option.style.display = 'none';
+    }
+  });
+  
+  if (noRefsMsg) {
+    noRefsMsg.style.display = visibleCount === 0 ? 'block' : 'none';
+  }
+  
+  const dropdown = document.getElementById('delivery_reference_dropdown');
+  if (dropdown) {
+    dropdown.style.display = visibleCount === 0 && !searchTerm ? 'none' : 'block';
+  }
+}
+
+// Function to select reference from dropdown (fills search box)
+function selectDeliveryReferenceFromDropdown(refNumber) {
+  const searchInput = document.getElementById('delivery_reference_search');
+  if (searchInput) {
+    searchInput.value = refNumber;
+    // Hide dropdown after selection
+    const dropdown = document.getElementById('delivery_reference_dropdown');
+    if (dropdown) {
+      dropdown.style.display = 'none';
+    }
+  }
+}
+
+// Store selected references array
+if (typeof window.deliverySelectedReferences === 'undefined') {
+  window.deliverySelectedReferences = [];
+}
+
+// Function to add reference
+function addDeliveryReference() {
+  const searchInput = document.getElementById('delivery_reference_search');
+  if (!searchInput) {
+    alert('Search input not found.');
+    return;
+  }
+  
+  const refValue = searchInput.value.trim();
+  
+  if (!refValue) {
+    alert('Please search and select a reference number first.');
+    return;
+  }
+  
+  // Try to find exact match first, then partial match
+  const options = document.querySelectorAll('.delivery-reference-option');
+  let matchedOption = null;
+  
+  // First try exact match (case-insensitive)
+  for (let i = 0; i < options.length; i++) {
+    const option = options[i];
+    const refText = option.getAttribute('data-ref') || '';
+    
+    if (refText.toLowerCase() === refValue.toLowerCase()) {
+      matchedOption = option;
+      break;
+    }
+  }
+  
+  // If no exact match, try partial match
+  if (!matchedOption) {
+    for (let i = 0; i < options.length; i++) {
+      const option = options[i];
+      const refText = option.getAttribute('data-ref') || '';
+      
+      // Check if search value is contained in reference or vice versa
+      if (refText.toLowerCase().includes(refValue.toLowerCase()) || refValue.toLowerCase().includes(refText.toLowerCase())) {
+        matchedOption = option;
+        break;
+      }
+    }
+  }
+  
+  if (matchedOption) {
+    const refText = matchedOption.getAttribute('data-ref');
+    
+    // Check if reference already exists
+    if (window.deliverySelectedReferences.some(ref => ref.reference === refText)) {
+      alert('This reference has already been added.');
+      searchInput.value = '';
+      return;
+    }
+    
+    const trips = matchedOption.getAttribute('data-trips') || '';
+    const totalAmount = parseFloat(matchedOption.getAttribute('data-total-amount')) || 0;
+    const totalArea = parseFloat(matchedOption.getAttribute('data-total-area')) || 0;
+    
+    // Get selected unit to determine default values
+    const unitField = document.getElementById('delivery_quantity_unit');
+    const selectedUnit = unitField ? unitField.value : 'kg';
+    
+    // Fetch real-time available quantity from fg_received_entry API
+    fetch(`api/get_fg_received_available_qty.php?reference=${encodeURIComponent(refText)}`)
+      .then(response => response.json())
+      .then(data => {
+        let availableAmount = totalAmount;
+        let remainingQty = totalAmount;
+        let areaToUse = totalArea;
+        
+        if (data.success && data.remaining_quantity !== undefined) {
+          // Use real-time remaining quantity from fg_received_entry
+          remainingQty = parseFloat(data.remaining_quantity) || 0;
+          availableAmount = remainingQty > 0 ? remainingQty : totalAmount;
+          const remainingSqmFromApi = parseFloat(data.remaining_sqm ?? data.area_sqm ?? 0) || 0;
+          if (remainingSqmFromApi > 0) {
+            areaToUse = remainingSqmFromApi;
+          }
+        } else {
+          // Fallback to static data if API fails
+          const staticRemainingQty = parseFloat(matchedOption.getAttribute('data-remaining-qty')) || totalAmount;
+          remainingQty = staticRemainingQty;
+          availableAmount = remainingQty > 0 ? remainingQty : totalAmount;
+        }
+        
+        // Round to whole numbers
+        const availableAmountInt = Math.round(availableAmount);
+        const availableAreaInt = Math.round(areaToUse);
+        const defaultAmountInt = availableAmountInt > 0 ? availableAmountInt : 1;
+        const defaultAreaInt = availableAreaInt > 0 ? availableAreaInt : 0;
+        
+        // Add to selected references array
+        const refId = 'ref_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+        const newRef = {
+          id: refId,
+          reference: refText,
+          trips: trips,
+          availableAmount: availableAmountInt,
+          availableArea: availableAreaInt,
+          deliveryAmount: selectedUnit === 'kg' ? defaultAmountInt : 0,
+          deliveryArea: selectedUnit === 'sqm' ? defaultAreaInt : 0,
+          fgId: matchedOption.getAttribute('data-fg-id') || ''
+        };
+        
+        window.deliverySelectedReferences.push(newRef);
+        
+        // Render all selected references
+        renderSelectedReferences();
+        
+        // Update available quantity immediately when reference is added
+        updateAvailableQuantity();
+        
+        // Clear search box
+        searchInput.value = '';
+        const dropdown = document.getElementById('delivery_reference_dropdown');
+        if (dropdown) {
+          dropdown.style.display = 'none';
+        }
+        
+        // Update summary
+        updateSummary();
+      })
+      .catch(error => {
+        console.error('Error fetching available quantity:', error);
+        // Fallback to static data if API fails
+        const remainingQty = parseFloat(matchedOption.getAttribute('data-remaining-qty')) || totalAmount;
+        const availableAmount = remainingQty > 0 ? remainingQty : totalAmount;
+        const availableAmountInt = Math.round(availableAmount);
+        const availableAreaInt = Math.round(totalArea);
+        const defaultAmountInt = availableAmountInt > 0 ? availableAmountInt : 1;
+        const defaultAreaInt = availableAreaInt > 0 ? availableAreaInt : 0;
+        
+        const refId = 'ref_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+        const newRef = {
+          id: refId,
+          reference: refText,
+          trips: trips,
+          availableAmount: availableAmountInt,
+          availableArea: availableAreaInt,
+          deliveryAmount: selectedUnit === 'kg' ? defaultAmountInt : 0,
+          deliveryArea: selectedUnit === 'sqm' ? defaultAreaInt : 0,
+          fgId: matchedOption.getAttribute('data-fg-id') || ''
+        };
+        
+        window.deliverySelectedReferences.push(newRef);
+        renderSelectedReferences();
+        updateAvailableQuantity();
+        searchInput.value = '';
+        const dropdown = document.getElementById('delivery_reference_dropdown');
+        if (dropdown) dropdown.style.display = 'none';
+        updateSummary();
+      });
+  } else {
+    alert('Please select a valid reference from the dropdown first. Type to search, click on a reference to select it, then click Add.');
+  }
+}
+
+// Function to render all selected references
+function renderSelectedReferences() {
+  const selectedDiv = document.getElementById('delivery_selected_reference');
+  const hiddenInput = document.getElementById('reference_number');
+  
+  if (!selectedDiv) return;
+  
+  if (window.deliverySelectedReferences.length === 0) {
+    selectedDiv.innerHTML = '';
+    if (hiddenInput) hiddenInput.value = '';
+    return;
+  }
+  
+  let html = '';
+  const refNumbers = [];
+  
+  const unitField = document.getElementById('delivery_quantity_unit');
+  const selectedUnit = unitField ? unitField.value : 'kg';
+
+  window.deliverySelectedReferences.forEach((ref, index) => {
+    const tripText = ref.trips ? (ref.trips.includes(',') ? 'Trips: ' + ref.trips : 'Trip: ' + ref.trips) : '';
+    const isSQM = selectedUnit === 'sqm';
+    const availableAmountInt = Math.round(isSQM ? (ref.availableArea || 0) : ref.availableAmount);
+    const deliveryValue = Math.round(isSQM ? (ref.deliveryArea || availableAmountInt) : (ref.deliveryAmount || availableAmountInt));
+    const labelText = isSQM ? 'Delivery Amount (sqm):' : 'Delivery Amount (kg):';
+    const availableUnitLabel = isSQM ? 'sqm' : 'kg';
+
+    html += `
+      <div class="delivery-ref-row" style="padding:12px; background:#e8f5e9; border:2px solid #4caf50; border-radius:6px; margin-bottom:10px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+          <div>
+            <strong style="color:#2e7d32; font-size:16px;">${escapeHtml(ref.reference)}</strong>
+            ${tripText ? '<br><small style="color:#666;">' + escapeHtml(tripText) + '</small>' : ''}
+          </div>
+          <button type="button" onclick="removeDeliveryReferenceById('${ref.id}')" style="padding:6px 12px; background:#e74c3c; color:#fff; border:none; border-radius:4px; cursor:pointer; font-weight:600;">
+            <i class="fas fa-times"></i> Remove
+          </button>
+        </div>
+        <div style="display:flex; align-items:center; gap:10px;">
+          <label style="font-weight:600; color:#333; white-space:nowrap;" id="delivery_amount_label_${ref.id}">${labelText}</label>
+          <input type="number" 
+                 id="delivery_ref_amount_${ref.id}" 
+                 step="1" 
+                 min="1" 
+                 max="${availableAmountInt || 1}" 
+                 value="${deliveryValue}"
+                 data-available-amount="${Math.round(ref.availableAmount)}"
+                 data-available-area="${Math.round(ref.availableArea || 0)}"
+                 data-reference="${escapeHtml(ref.reference)}"
+                 data-ref-id="${ref.id}"
+                 onchange="validateDeliveryReferenceAmountById('${ref.id}')" 
+                 onblur="validateDeliveryReferenceAmountById('${ref.id}')"
+                 style="padding:8px; border:2px solid #4caf50; border-radius:6px; width:150px; font-size:14px; font-weight:600;"
+                 required>
+          <small style="color:#666; white-space:nowrap;" id="delivery_available_info_${ref.id}">Available: <strong style="color:#27ae60;">${availableAmountInt}</strong> ${availableUnitLabel}</small>
+        </div>
+      </div>
+    `;
+    
+    refNumbers.push(ref.reference);
+  });
+  
+  selectedDiv.innerHTML = html;
+  
+  // Update hidden input with all reference numbers (comma-separated)
+  if (hiddenInput) {
+    hiddenInput.value = refNumbers.join(', ');
+  }
+  
+  // Update available quantity when references are rendered
+  updateAvailableQuantity();
+  updateTotalDeliveryQuantity();
+}
+
+// Function to update available quantity (sum of all selected references' available amounts)
+function updateAvailableQuantity() {
+  const unitField = document.getElementById('delivery_quantity_unit');
+  const selectedUnit = unitField ? unitField.value : 'kg';
+  
+  let totalAvailable = 0;
+  
+  // Calculate sum based on selected unit
+  if (selectedUnit === 'kg') {
+    window.deliverySelectedReferences.forEach(ref => {
+      totalAvailable += ref.availableAmount;
+    });
+  } else if (selectedUnit === 'sqm') {
+    window.deliverySelectedReferences.forEach(ref => {
+      totalAvailable += (ref.availableArea || 0);
+    });
+  }
+  
+  // Update available quantity field with sum of all available amounts
+  const availableQtyField = document.getElementById('available_qty');
+  if (availableQtyField) {
+    if (window.deliverySelectedReferences.length > 0) {
+      availableQtyField.value = totalAvailable;
+    } else {
+      availableQtyField.value = '';
+    }
+  }
+  
+  // Update FG entry ID (use first reference if exists)
+  if (window.deliverySelectedReferences.length > 0) {
+    const firstRef = window.deliverySelectedReferences[0];
+    if (firstRef.fgId) {
+      const fgIdField = document.getElementById('fg_entry_id');
+      if (fgIdField) fgIdField.value = firstRef.fgId;
+    }
+  }
+}
+
+// Function to select delivery unit (KG or SQM)
+function selectDeliveryUnit(unit, buttonElement = null) {
+  // Remove selected styling from all unit buttons
+  const allBtns = document.querySelectorAll('.delivery-unit-btn');
   allBtns.forEach(btn => {
     btn.style.background = '#e0e0e0';
     btn.style.color = '#333';
@@ -829,93 +1773,302 @@ function selectDeliveryRollEntryType(entryType) {
     btn.classList.remove('selected');
   });
   
-  // Add selected styling to clicked button (blue)
-  event.target.style.background = '#2196F3';
-  event.target.style.color = '#fff';
-  event.target.style.border = '2px solid #1976D2';
-  event.target.classList.add('selected');
+  // Add selected styling to clicked button
+  const targetBtn = buttonElement || document.querySelector(`.delivery-unit-btn[data-unit="${unit}"]`);
+  if (targetBtn) {
+    targetBtn.style.background = '#2196F3';
+    targetBtn.style.color = '#fff';
+    targetBtn.style.border = '2px solid #1976D2';
+    targetBtn.classList.add('selected');
+  }
   
   // Set hidden input
-  document.getElementById('delivery_roll_entry_type').value = entryType;
+  const unitField = document.getElementById('delivery_quantity_unit');
+  if (unitField) unitField.value = unit;
   
-  // Show delivery fields container
-  const deliveryFieldsContainer = document.getElementById('deliveryFieldsContainer');
-  if(deliveryFieldsContainer) deliveryFieldsContainer.style.display = 'block';
+  // Show reference number group after unit is selected
+  const referenceNumberGroup = document.getElementById('referenceNumberGroup');
+  if (referenceNumberGroup) referenceNumberGroup.style.display = 'block';
   
-  // Hide CNC batch field for rolls (rolls don't have CNC cutting batch)
-  const cncBatchGroup = document.getElementById('cncBatchGroup');
-  if (cncBatchGroup) cncBatchGroup.style.display = 'none';
-  const cncBatchField = document.getElementById('cnc_cutting_batch');
-  if (cncBatchField) cncBatchField.value = '';
+  // Load references based on selected unit
+  loadRollDeliveryReferences();
   
-  // Load roll references based on entry type
-  loadRollDeliveryReferences(entryType);
+  // Update labels
+  const availableQtyLabel = document.getElementById('available_qty_label');
+  const deliveryQtyLabel = document.getElementById('delivery_qty_label');
+  const deliveryQtyField = document.getElementById('delivery_qty');
+  
+  if (unit === 'kg') {
+    if (availableQtyLabel) availableQtyLabel.textContent = 'Available Quantity (kg):';
+    if (deliveryQtyLabel) deliveryQtyLabel.textContent = 'Delivery Quantity (kg):';
+    if (deliveryQtyField) { deliveryQtyField.step = 1; deliveryQtyField.min = 1; }
+  } else if (unit === 'sqm') {
+    if (availableQtyLabel) availableQtyLabel.textContent = 'Available Quantity (sqm):';
+    if (deliveryQtyLabel) deliveryQtyLabel.textContent = 'Delivery Quantity (sqm):';
+    if (deliveryQtyField) { deliveryQtyField.step = 1
+      ; deliveryQtyField.min = 0; }
+  }
+  
+  // Clear previous selections when unit changes
+  window.deliverySelectedReferences = [];
+  renderSelectedReferences();
+  
+  // Update available quantity
+  updateAvailableQuantity();
+  
+  // Update total delivery quantity
+  updateTotalDeliveryQuantity();
+  
+  // Update summary
+  updateSummary();
+}
+
+// Function to update reference rows based on selected unit
+function updateReferenceRowsForUnit(unit) {
+  window.deliverySelectedReferences.forEach(ref => {
+    const amountInput = document.getElementById('delivery_ref_amount_' + ref.id);
+    const label = document.getElementById('delivery_amount_label_' + ref.id);
+    const info = document.getElementById('delivery_available_info_' + ref.id);
+    
+    if (!amountInput || !label || !info) return;
+    
+    if (unit === 'kg') {
+      label.textContent = 'Delivery Amount (kg):';
+      const availableAmount = parseFloat(amountInput.getAttribute('data-available-amount')) || 0;
+      const currentValue = parseFloat(amountInput.value) || 0;
+      amountInput.max = availableAmount;
+      amountInput.min = 1;
+      amountInput.step = 1;
+      amountInput.value = (typeof ref.deliveryAmount !== 'undefined' && ref.deliveryAmount !== null) ? ref.deliveryAmount : (currentValue || availableAmount);
+      info.innerHTML = 'Available: <strong style="color:#27ae60;">' + availableAmount + '</strong> kg';
+      ref.deliveryAmount = parseFloat(amountInput.value) || 0;
+    } else if (unit === 'sqm') {
+      label.textContent = 'Delivery Amount (sqm):';
+      const availableArea = parseFloat(amountInput.getAttribute('data-available-area')) || 0;
+      const currentValue = parseFloat(amountInput.value) || 0;
+      amountInput.max = availableArea;
+      amountInput.min = 0.01;
+      amountInput.step = 0.01;
+      amountInput.value = (typeof ref.deliveryArea !== 'undefined' && ref.deliveryArea !== null && ref.deliveryArea !== 0) ? ref.deliveryArea : (currentValue || availableArea);
+      info.innerHTML = 'Available: <strong style="color:#27ae60;">' + availableArea + '</strong> sqm';
+      ref.deliveryArea = parseFloat(amountInput.value) || 0;
+    }
+  });
+}
+
+// Function to update total delivery quantity (sum of all delivery amounts)
+function updateTotalDeliveryQuantity() {
+  // Only update for rolls, not for bags (bags have manual entry)
+  const productType = document.getElementById('delivery_product_type')?.value;
+  if (productType === 'bag') {
+    return; // Don't update delivery quantity for bags - user enters manually
+  }
+  
+  const unitField = document.getElementById('delivery_quantity_unit');
+  const selectedUnit = unitField ? unitField.value : 'kg';
+  let totalAmount = 0;
+
+  if (!window.deliverySelectedReferences || window.deliverySelectedReferences.length === 0) {
+    const deliveryQtyField = document.getElementById('delivery_qty');
+    if (deliveryQtyField) {
+      deliveryQtyField.value = '';
+    }
+    return;
+  }
+
+  window.deliverySelectedReferences.forEach(ref => {
+    const amountInput = document.getElementById('delivery_ref_amount_' + ref.id);
+    if (!amountInput) return;
+
+    const amount = parseFloat(amountInput.value) || 0;
+    if (selectedUnit === 'kg') {
+      ref.deliveryAmount = amount;
+    } else if (selectedUnit === 'sqm') {
+      ref.deliveryArea = amount;
+    }
+
+    totalAmount += amount;
+  });
+
+  const deliveryQtyField = document.getElementById('delivery_qty');
+  if (deliveryQtyField) {
+    deliveryQtyField.value = totalAmount > 0 ? totalAmount : '';
+  }
+}
+
+// Function to validate delivery reference amount by ID
+function validateDeliveryReferenceAmountById(refId) {
+  const amountInput = document.getElementById('delivery_ref_amount_' + refId);
+  if (!amountInput) return;
+  
+  const unitField = document.getElementById('delivery_quantity_unit');
+  const selectedUnit = unitField ? unitField.value : 'kg';
+  
+  const enteredAmount = parseFloat(amountInput.value) || 0;
+  const maxAmount = selectedUnit === 'kg' 
+    ? parseFloat(amountInput.getAttribute('data-available-amount')) || 0
+    : parseFloat(amountInput.getAttribute('data-available-area')) || 0;
+  const refNumber = amountInput.getAttribute('data-reference') || '';
+  
+  // Find and update the reference in the array
+  const ref = window.deliverySelectedReferences.find(r => r.id === refId);
+  if (ref) {
+    if (selectedUnit === 'kg') {
+      ref.deliveryAmount = enteredAmount;
+    } else if (selectedUnit === 'sqm') {
+      ref.deliveryArea = enteredAmount;
+    }
+  }
+  
+  // Update total delivery quantity
+  updateTotalDeliveryQuantity();
+  
+  // Validate amount
+  if (enteredAmount <= 0) {
+    amountInput.style.borderColor = '#e74c3c';
+    amountInput.value = '1';
+    if (ref) {
+      if (selectedUnit === 'kg') ref.deliveryAmount = 1;
+      else if (selectedUnit === 'sqm') ref.deliveryArea = 1;
+    }
+    updateTotalDeliveryQuantity();
+    updateSummary();
+    return;
+  }
+  
+  if (enteredAmount > maxAmount) {
+    // Show popup notification
+    const unitText = selectedUnit === 'kg' ? 'kg' : 'sqm';
+    showDeliveryAmountExceedPopup(refNumber, enteredAmount, maxAmount, unitText);
+    
+    // Auto-correct to max amount
+    amountInput.value = maxAmount;
+    amountInput.style.borderColor = '#e74c3c';
+    
+    if (ref) {
+      if (selectedUnit === 'kg') ref.deliveryAmount = maxAmount;
+      else if (selectedUnit === 'sqm') ref.deliveryArea = maxAmount;
+    }
+    updateTotalDeliveryQuantity();
+  } else {
+    amountInput.style.borderColor = '#4caf50';
+  }
   
   updateSummary();
 }
 
-function loadRollDeliveryReferences(entryType) {
-  const referenceSelect = document.getElementById('reference_number');
-  const referenceHint = document.getElementById('delivery_reference_hint');
-  referenceSelect.innerHTML = '<option value="">-- Select Reference --</option>';
+// Function to show amount exceed popup
+function showDeliveryAmountExceedPopup(refNumber, enteredAmount, availableAmount, unit = 'kg') {
+  const popup = document.getElementById('qtyLimitPopup');
+  const overlay = document.getElementById('qtyLimitPopupOverlay');
+  const message = document.getElementById('qtyLimitPopupMessage');
+  const details = document.getElementById('qtyLimitPopupDetails');
   
-  // Filter FG entries for rolls matching the entry type
-  const rollEntries = fgEntriesData.filter(entry => {
-    const isRoll = entry.product_type === 'roll';
-    const matchesEntryType = entry.roll_entry_type === entryType;
-    return isRoll && matchesEntryType;
-  });
+  if (!popup || !overlay || !message || !details) return;
   
-  rollEntries.forEach(entry => {
-    const option = document.createElement('option');
-    option.value = entry.reference_number;
-    option.textContent = entry.reference_number + ' (Remaining: ' + entry.remaining_quantity + ' kg)';
-    
-    // Ensure all data attributes are strings
-    const fgId = String(entry.id || '');
-    const cncBatch = String(entry.cnc_cutting_batch || '');
-    const bagSize = String(entry.bag_size || '');
-    const projectName = String(entry.project_name || '');
-    const passedQty = String(entry.passed_qty || '0');
-    const actualWeight = String(entry.actual_weight || '0');
-    const deliveredQty = String(entry.delivered_quantity || '0');
-    const remainingQty = String(entry.remaining_quantity || '0');
-    
-    // Set all data attributes
-    option.setAttribute('data-fg-id', fgId);
-    option.setAttribute('data-cnc-batch', cncBatch);
-    option.setAttribute('data-bag-size', bagSize);
-    option.setAttribute('data-project', projectName);
-    option.setAttribute('data-passed-qty', passedQty);
-    option.setAttribute('data-actual-weight', actualWeight);
-    option.setAttribute('data-delivered-qty', deliveredQty);
-    option.setAttribute('data-remaining-qty', remainingQty);
-    
-    referenceSelect.appendChild(option);
-  });
+  message.textContent = `The amount you entered for reference "${refNumber}" exceeds the available quantity.`;
   
-  if (rollEntries.length === 0) {
-    referenceSelect.innerHTML += '<option value="" disabled>No ' + entryType + ' roll entries available</option>';
+  details.innerHTML = `
+    <div style="background:#fff3cd; border-left:4px solid #ffc107; padding:12px; border-radius:6px; margin-top:12px;">
+      <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
+        <span style="color:#856404; font-weight:600;">Entered Amount:</span>
+        <span style="color:#e74c3c; font-weight:700; font-size:16px;">${enteredAmount} ${unit}</span>
+      </div>
+      <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
+        <span style="color:#856404; font-weight:600;">Available Amount:</span>
+        <span style="color:#27ae60; font-weight:700; font-size:16px;">${availableAmount} ${unit}</span>
+      </div>
+      <div style="margin-top:12px; padding-top:12px; border-top:1px solid #ffc107;">
+        <small style="color:#856404; font-style:italic;">The amount has been automatically corrected to ${availableAmount} ${unit}.</small>
+      </div>
+    </div>
+  `;
+  
+  popup.classList.add('show');
+  overlay.classList.add('show');
+}
+
+// Function to close amount exceed popup
+function closeQtyLimitPopup() {
+  const popup = document.getElementById('qtyLimitPopup');
+  const overlay = document.getElementById('qtyLimitPopupOverlay');
+  
+  if (popup) popup.classList.remove('show');
+  if (overlay) overlay.classList.remove('show');
+  
+  // Focus back on amount input
+  setTimeout(() => {
+    const amountInput = document.getElementById('delivery_ref_amount');
+    if (amountInput) {
+      amountInput.focus();
+      amountInput.select();
+    }
+  }, 100);
+}
+
+// Function to remove selected reference by ID
+function removeDeliveryReferenceById(refId) {
+  // Remove from array
+  window.deliverySelectedReferences = window.deliverySelectedReferences.filter(ref => ref.id !== refId);
+  
+  // Re-render all references
+  renderSelectedReferences();
+  
+  // Update available quantity when reference is removed
+  updateAvailableQuantity();
+  
+  // Update delivery quantity
+  updateTotalDeliveryQuantity();
+  
+  // Clear related fields if no references left
+  if (window.deliverySelectedReferences.length === 0) {
+    const fgIdField = document.getElementById('fg_entry_id');
+    if (fgIdField) fgIdField.value = '';
   }
   
-  referenceHint.textContent = entryType === 'individual' ? 'Showing individual roll entries' : 'Showing bundle entries';
+  // Update summary
+  updateSummary();
 }
+
+// Close dropdown when clicking outside
+document.addEventListener('click', function(event) {
+  const dropdown = document.getElementById('delivery_reference_dropdown');
+  const searchInput = document.getElementById('delivery_reference_search');
+  
+  if (dropdown && searchInput && !dropdown.contains(event.target) && event.target !== searchInput) {
+    dropdown.style.display = 'none';
+  }
+});
 
 function loadBrandingCNCBatches() {
   const cncBatchSelect = document.getElementById('cnc_cutting_batch');
   const cncBatchHint = document.getElementById('cnc_batch_hint');
   
-  if (!cncBatchSelect) return;
+  if (!cncBatchSelect) {
+    console.error('CNC batch select element not found');
+    return;
+  }
   
   cncBatchSelect.innerHTML = '<option value="">-- Loading CNC Batches --</option>';
-  cncBatchHint.textContent = 'Loading...';
+  if (cncBatchHint) {
+    cncBatchHint.textContent = 'Loading...';
+  }
   
-  fetch('../forms/api/get_branding_cnc_batches.php')
-    .then(response => response.json())
+  fetch('api/get_branding_cnc_batches.php')
+    .then(response => {
+      if (!response.ok) {
+        throw new Error('Network response was not ok: ' + response.status);
+      }
+      return response.json();
+    })
     .then(data => {
       if (!data.success) {
         cncBatchSelect.innerHTML = '<option value="">-- Error loading batches --</option>';
-        cncBatchHint.textContent = 'Error: ' + (data.error || 'Unknown error');
+        if (cncBatchHint) {
+          cncBatchHint.textContent = 'Error: ' + (data.error || 'Unknown error');
+          cncBatchHint.style.color = '#e74c3c';
+        }
+        console.error('API returned error:', data);
         return;
       }
       
@@ -941,16 +2094,25 @@ function loadBrandingCNCBatches() {
           cncBatchSelect.appendChild(option);
         });
         
-        cncBatchHint.textContent = 'Showing ' + data.batches.length + ' CNC cutting batches with available stock';
+        if (cncBatchHint) {
+          cncBatchHint.textContent = 'Showing ' + data.batches.length + ' CNC cutting batches with available stock';
+          cncBatchHint.style.color = '#27ae60';
+        }
       } else {
         cncBatchSelect.innerHTML += '<option value="" disabled>No CNC cutting batches with remaining stock</option>';
-        cncBatchHint.textContent = 'No batches available';
+        if (cncBatchHint) {
+          cncBatchHint.textContent = 'No batches available';
+          cncBatchHint.style.color = '#e74c3c';
+        }
       }
     })
     .catch(error => {
       console.error('Error loading CNC batches:', error);
       cncBatchSelect.innerHTML = '<option value="">-- Error loading batches --</option>';
-      cncBatchHint.textContent = 'Error loading batches. Please try again.';
+      cncBatchHint.textContent = 'Error loading batches: ' + error.message + '. Please check console for details.';
+      if (cncBatchHint) {
+        cncBatchHint.style.color = '#e74c3c';
+      }
     });
 }
 
@@ -961,9 +2123,13 @@ function updateFromCNCBatch() {
   const selectedIndex = cncBatchSelect.selectedIndex;
   if (selectedIndex < 0 || selectedIndex === 0) {
     // Reset fields if no valid option selected
+    const deliveryQtyField = document.getElementById('delivery_qty');
     document.getElementById('available_qty').value = '';
-    document.getElementById('delivery_qty').value = '';
-    document.getElementById('delivery_qty').removeAttribute('data-max-qty');
+    if (deliveryQtyField) {
+      deliveryQtyField.value = '';
+      deliveryQtyField.removeAttribute('data-max-qty');
+      deliveryQtyField.placeholder = ''; // Keep placeholder empty for bags
+    }
     document.getElementById('bag_size').value = '';
     updateSummary();
     return;
@@ -1001,10 +2167,16 @@ function updateFromCNCBatch() {
     deliveryQtyField.style.backgroundColor = 'white';
     deliveryQtyField.style.fontWeight = 'normal';
     
+    // Clear placeholder for bags (not needed since user enters manually)
+    deliveryQtyField.placeholder = '';
+    
     qtyHintElem.innerHTML = `Enter quantity (max: <span id="max_qty">${remainingQty}</span> pcs)`;
     qtyHintElem.style.display = 'block';
     
     deliveryQtyField.setAttribute('data-max-qty', remainingQty);
+    
+    // Note: Event listeners are already added in DOMContentLoaded section
+    // No need to add them here to avoid duplicates
   }
   
   // Auto-fill unit price from BOM based on bag size
@@ -1186,6 +2358,8 @@ let lastPopupQty = null; // Track last quantity that triggered popup to avoid re
 
 function validateDeliveryQty() {
   const deliveryQtyField = document.getElementById("delivery_qty");
+  if (!deliveryQtyField) return;
+  
   const maxQty = parseFloat(deliveryQtyField.getAttribute("data-max-qty")) || 0;
   const enteredQty = parseFloat(deliveryQtyField.value) || 0;
   const qtyHint = document.getElementById("qty_hint");
@@ -1194,54 +2368,78 @@ function validateDeliveryQty() {
   const productType = document.getElementById('delivery_product_type').value;
   const unit = productType === 'bag' ? 'pcs' : 'kg';
   
-  if (enteredQty > maxQty && maxQty > 0) {
-    qtyHint.innerHTML = `<span style="color: #e74c3c;">⚠️ Cannot exceed ${maxQty} ${unit}!</span>`;
-    deliveryQtyField.style.borderColor = "#e74c3c";
-    
-    // Show popup notification (only once per quantity value to avoid spam)
-    if (lastPopupQty !== enteredQty) {
-      showQtyLimitPopup(enteredQty, maxQty, unit);
-      lastPopupQty = enteredQty;
-    }
-  } else {
-    // Reset popup tracking when quantity is valid
-    if (enteredQty <= maxQty) {
-      lastPopupQty = null;
-    }
-    
-    if (enteredQty > 0) {
-      qtyHint.innerHTML = `Enter quantity (max: <span id="max_qty">${maxQty}</span> ${unit})`;
-      deliveryQtyField.style.borderColor = "#27ae60";
+  // Only validate if maxQty is set (field is ready)
+  if (maxQty > 0) {
+    if (enteredQty > maxQty) {
+      if (qtyHint) {
+        qtyHint.innerHTML = `<span style="color: #e74c3c;">⚠️ Cannot exceed ${maxQty} ${unit}!</span>`;
+      }
+      deliveryQtyField.style.borderColor = "#e74c3c";
+      
+      // Show popup notification (only once per quantity value to avoid spam)
+      if (lastPopupQty !== enteredQty) {
+        showQtyLimitPopup(enteredQty, maxQty, unit);
+        lastPopupQty = enteredQty;
+      }
     } else {
-      qtyHint.innerHTML = `Enter quantity (max: <span id="max_qty">${maxQty}</span> ${unit})`;
-      deliveryQtyField.style.borderColor = "#ccc";
+      // Reset popup tracking when quantity is valid
+      if (enteredQty <= maxQty) {
+        lastPopupQty = null;
+      }
+      
+      if (qtyHint) {
+        if (enteredQty > 0) {
+          qtyHint.innerHTML = `Enter quantity (max: <span id="max_qty">${maxQty}</span> ${unit})`;
+          deliveryQtyField.style.borderColor = "#27ae60";
+        } else {
+          qtyHint.innerHTML = `Enter quantity (max: <span id="max_qty">${maxQty}</span> ${unit})`;
+          deliveryQtyField.style.borderColor = "#ccc";
+        }
+      }
     }
   }
   
-  updateSummary();
+  if (typeof updateSummary === 'function') {
+    updateSummary();
+  }
 }
 
-function showQtyLimitPopup(enteredQty, maxQty, unit) {
+function showQtyLimitPopup(enteredQty, maxQty, unit, customMessage = null) {
   const popup = document.getElementById('qtyLimitPopup');
   const overlay = document.getElementById('qtyLimitPopupOverlay');
   const message = document.getElementById('qtyLimitPopupMessage');
   const details = document.getElementById('qtyLimitPopupDetails');
   
-  // Shorter, more user-friendly message
-  message.textContent = `Only ${maxQty} ${unit} available. You entered ${enteredQty} ${unit}.`;
+  if (!popup || !overlay || !message || !details) return;
   
-  // Simplified details structure
-  const excess = (enteredQty - maxQty).toFixed(2);
-  details.innerHTML = `
-    <div class="qty-limit-popup-details-row">
-      <strong>Available:</strong>
-      <span>${maxQty} ${unit}</span>
-    </div>
-    <div class="qty-limit-popup-details-row">
-      <strong>Excess:</strong>
-      <span style="color: #dc2626; font-weight: 700;">${excess} ${unit}</span>
-    </div>
-  `;
+  // Use custom message if provided, otherwise use default
+  if (customMessage) {
+    message.textContent = customMessage;
+    details.innerHTML = '';
+  } else {
+    // Shorter, more user-friendly message
+    message.textContent = `Delivery quantity (<strong>${enteredQty} ${unit}</strong>) cannot exceed available stock (<strong>${maxQty} ${unit}</strong>).`;
+    
+    // Simplified details structure
+    const excess = (enteredQty - maxQty).toFixed(2);
+    details.innerHTML = `
+      <div class="qty-limit-popup-details-row">
+        <strong>Available:</strong>
+        <span style="color: #27ae60; font-weight: 700;">${maxQty} ${unit}</span>
+      </div>
+      <div class="qty-limit-popup-details-row">
+        <strong>Entered:</strong>
+        <span style="color: #e74c3c; font-weight: 700;">${enteredQty} ${unit}</span>
+      </div>
+      <div class="qty-limit-popup-details-row">
+        <strong>Excess:</strong>
+        <span style="color: #dc2626; font-weight: 700;">${excess} ${unit}</span>
+      </div>
+      <div style="margin-top: 16px; padding-top: 16px; border-top: 1px solid #e2e8f0;">
+        <small style="color: #64748b; font-style: italic;">Please reduce the delivery quantity to ${maxQty} ${unit} or less.</small>
+      </div>
+    `;
+  }
   
   overlay.classList.add('show');
   // Small delay to ensure overlay is rendered first
@@ -1250,20 +2448,7 @@ function showQtyLimitPopup(enteredQty, maxQty, unit) {
   }, 10);
 }
 
-function closeQtyLimitPopup() {
-  const popup = document.getElementById('qtyLimitPopup');
-  const overlay = document.getElementById('qtyLimitPopupOverlay');
-  
-  popup.classList.remove('show');
-  overlay.classList.remove('show');
-  
-  // Focus back on delivery quantity field
-  const deliveryQtyField = document.getElementById('delivery_qty');
-  if (deliveryQtyField) {
-    deliveryQtyField.focus();
-    deliveryQtyField.select();
-  }
-}
+// closeQtyLimitPopup function is defined above - removed duplicate
 
 // Close popup on ESC key
 document.addEventListener('keydown', function(e) {
@@ -1275,10 +2460,10 @@ document.addEventListener('keydown', function(e) {
   }
 });
 
-function enableManualChallan() {
+function enableManualChallan(button = null) {
   const autoField = document.getElementById("challan_no");
   const manualField = document.getElementById("challan_no_manual");
-  const button = event.target;
+  const toggleButton = button || document.getElementById("manualChallanBtn");
   
   if (manualField.style.display === "none") {
     // Enable manual mode
@@ -1286,20 +2471,24 @@ function enableManualChallan() {
     manualField.focus();
     autoField.removeAttribute("name"); // Don't submit auto field
     manualField.setAttribute("name", "challan_no"); // Submit manual field instead
-    button.textContent = "🔄 Use Auto";
-    button.style.background = "linear-gradient(135deg, #95a5a6 0%, #7f8c8d 100%)";
-    button.style.borderColor = "#7f8c8d";
-    button.style.boxShadow = "0 2px 6px rgba(149, 165, 166, 0.3)";
+    if (toggleButton) {
+      toggleButton.textContent = "🔄 Use Auto";
+      toggleButton.style.background = "linear-gradient(135deg, #95a5a6 0%, #7f8c8d 100%)";
+      toggleButton.style.borderColor = "#7f8c8d";
+      toggleButton.style.boxShadow = "0 2px 6px rgba(149, 165, 166, 0.3)";
+    }
   } else {
     // Switch back to auto mode
     manualField.style.display = "none";
     manualField.value = "";
     manualField.removeAttribute("name");
     autoField.setAttribute("name", "challan_no");
-    button.textContent = "✏️ Manual Entry";
-    button.style.background = "linear-gradient(135deg, #718A95 0%, #5A6F7A 100%)";
-    button.style.borderColor = "#5A6F7A";
-    button.style.boxShadow = "0 2px 6px rgba(114, 132, 143, 0.3)";
+    if (toggleButton) {
+      toggleButton.textContent = "✏️ Manual Entry";
+      toggleButton.style.background = "linear-gradient(135deg, #718A95 0%, #5A6F7A 100%)";
+      toggleButton.style.borderColor = "#5A6F7A";
+      toggleButton.style.boxShadow = "0 2px 6px rgba(114, 132, 143, 0.3)";
+    }
   }
 }
 
@@ -1562,14 +2751,58 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 
 function validateForm(){
-  updateSummary(); // Update summary before validation
+  console.log('validateForm called');
+  try {
+  // Close any open popups before validation to ensure they don't block submission
+  closeQtyLimitPopup();
   
+  // Ensure delivery quantity field is editable before validation
+  const deliveryQtyFieldCheck = document.getElementById("delivery_qty");
+  if (deliveryQtyFieldCheck) {
+    deliveryQtyFieldCheck.readOnly = false;
+    deliveryQtyFieldCheck.removeAttribute('readonly');
+    deliveryQtyFieldCheck.disabled = false;
+  }
+  
+  // Ensure quantities are recalculated before validation
   const productType = document.getElementById("delivery_product_type").value;
+  
+  // Only update total delivery quantity for rolls (bags have manual entry)
+  if (productType === 'roll') {
+    if (typeof updateAvailableQuantity === 'function') updateAvailableQuantity();
+    if (typeof updateTotalDeliveryQuantity === 'function') updateTotalDeliveryQuantity();
+  } else if (productType === 'bag') {
+    // For bags, only update available quantity, don't touch delivery quantity (user enters manually)
+    if (typeof updateAvailableQuantity === 'function') updateAvailableQuantity();
+  }
+  
+  if (typeof updateSummary === 'function') updateSummary(); // Update summary before validation
+    console.log('Product type:', productType);
+    
+    if (!productType) {
+      alert("Please select a product type (Roll or Bag).");
+      return false;
+    }
   
   // Validate based on product type
   if (productType === 'roll') {
-    if(!document.getElementById("reference_number").value){
-      alert("Please select a reference number."); 
+    // Check if any references are selected
+    if (!window.deliverySelectedReferences || window.deliverySelectedReferences.length === 0) {
+      alert("Please add at least one reference number."); 
+      return false;
+    }
+    
+    // Check if reference_number hidden field has value
+    const referenceNumberField = document.getElementById("reference_number");
+    if (!referenceNumberField || !referenceNumberField.value || referenceNumberField.value.trim() === '') {
+      alert("Please add at least one reference number."); 
+      return false;
+    }
+    
+    // Validate trip number for rolls
+    const tripNumberField = document.getElementById("delivery_trip_number");
+    if (tripNumberField && tripNumberField.required && !tripNumberField.value) {
+      alert("Please select a trip number.");
       return false;
     }
   } else if (productType === 'bag') {
@@ -1592,27 +2825,149 @@ function validateForm(){
     return false;
   }
   
-  const deliveryQty = parseFloat(document.getElementById("delivery_qty").value);
-  const deliveryQtyField = document.getElementById("delivery_qty");
-  const maxQty = parseFloat(deliveryQtyField.getAttribute("data-max-qty")) || 0;
-  const unit = productType === 'bag' ? 'pcs' : 'kg';
+  // For rolls, validate delivery quantity unit
+  if (productType === 'roll') {
+    const unitField = document.getElementById('delivery_quantity_unit');
+    const selectedUnit = unitField ? unitField.value : '';
+    
+    if (!selectedUnit || (selectedUnit !== 'kg' && selectedUnit !== 'sqm')) {
+      showQtyLimitPopup(0, 0, '', "Please select a delivery quantity unit (KG or SQM).");
+      return false;
+    }
+  }
   
-  if(!deliveryQty || deliveryQty <= 0){
-    alert("Please enter a delivery quantity."); 
+  const deliveryQtyField = document.getElementById("delivery_qty");
+  if (!deliveryQtyField) {
+    showQtyLimitPopup(0, 0, 'pcs', "Delivery quantity field not found. Please refresh the page.");
     return false;
   }
   
+  // Get the raw value (important: read before any other operations)
+  const rawValue = deliveryQtyField.value;
+  const deliveryQtyValue = rawValue ? String(rawValue).trim() : '';
+  const deliveryQty = deliveryQtyValue ? parseFloat(deliveryQtyValue) : NaN;
+  const availableQty = parseFloat(document.getElementById("available_qty").value) || 0;
+  
+  // Determine unit based on product type and selected unit
+  let unit = 'pcs';
+  if (productType === 'roll') {
+    const unitField = document.getElementById('delivery_quantity_unit');
+    unit = unitField ? unitField.value : 'kg';
+  }
+  
+  // Debug logging to help diagnose issues
+  console.log('Delivery Qty Validation Debug:', {
+    rawValue: rawValue,
+    trimmedValue: deliveryQtyValue,
+    parsedValue: deliveryQty,
+    isValidNumber: !isNaN(deliveryQty),
+    isGreaterThanZero: deliveryQty > 0,
+    productType: productType,
+    fieldReadonly: deliveryQtyField.readOnly,
+    fieldDisabled: deliveryQtyField.disabled
+  });
+  
+  // Check if delivery quantity is empty or invalid
+  // For bags, the user enters manually, so we need to check the actual value
+  if (!deliveryQtyValue || deliveryQtyValue === '' || isNaN(deliveryQty) || deliveryQty <= 0) {
+    // Focus on the delivery quantity field
+    deliveryQtyField.focus();
+    deliveryQtyField.style.borderColor = '#e74c3c';
+    showQtyLimitPopup(0, 0, unit, "Please enter a delivery quantity.");
+    return false;
+  }
+  
+  // Reset border color if valid
+  deliveryQtyField.style.borderColor = '';
+  
+  // For rolls, validate against available quantity (sum of all selected references)
+  if (productType === 'roll') {
+    if (availableQty <= 0) {
+      showQtyLimitPopup(0, 0, unit, "Available quantity is 0. Please check your selected references."); 
+      return false;
+    }
+    
+    if(deliveryQty > availableQty){
+      showQtyLimitPopup(deliveryQty, availableQty, unit); 
+      return false;
+    }
+    
+    // Validate each individual reference amount doesn't exceed its available amount
+    const unitField = document.getElementById('delivery_quantity_unit');
+    const selectedUnit = unitField ? unitField.value : 'kg';
+    
+    let hasInvalidAmount = false;
+    let invalidRef = '';
+    let maxAmount = 0;
+    let enteredAmount = 0;
+    if (window.deliverySelectedReferences && window.deliverySelectedReferences.length > 0) {
+      window.deliverySelectedReferences.forEach(ref => {
+        const amountInput = document.getElementById('delivery_ref_amount_' + ref.id);
+        if (amountInput) {
+          const entered = parseFloat(amountInput.value) || 0;
+          const maxAvailable = selectedUnit === 'kg' ? ref.availableAmount : (ref.availableArea || 0);
+          
+          if (entered > maxAvailable) {
+            hasInvalidAmount = true;
+            invalidRef = ref.reference;
+            maxAmount = maxAvailable;
+            enteredAmount = entered;
+          }
+        }
+      });
+    }
+    
+    if (hasInvalidAmount) {
+      showDeliveryAmountExceedPopup(invalidRef, enteredAmount, maxAmount, selectedUnit);
+      return false;
+    }
+  } else {
+    // For bags, use the old validation with data-max-qty
+    const deliveryQtyField = document.getElementById("delivery_qty");
+    const maxQty = parseFloat(deliveryQtyField.getAttribute("data-max-qty")) || 0;
+  
   if(maxQty === 0){
-    alert("⚠️ ERROR: Maximum quantity is 0!\n\nThis means:\n• The dropdown option didn't have data-remaining-qty attribute set\n• Try refreshing the page\n• Check the debug panel at the top\n\nDebug Info:\n• Delivery Qty: " + deliveryQty + "\n• Max Qty from attribute: " + deliveryQtyField.getAttribute("data-max-qty")); 
+    showQtyLimitPopup(0, 0, unit, "⚠️ ERROR: Maximum quantity is 0!\n\nThis means:\n• The dropdown option didn't have data-remaining-qty attribute set\n• Try refreshing the page\n• Check the debug panel at the top\n\nDebug Info:\n• Delivery Qty: " + deliveryQty + "\n• Max Qty from attribute: " + deliveryQtyField.getAttribute("data-max-qty")); 
     return false;
   }
   
   if(deliveryQty > maxQty){
-    alert("Delivery quantity (" + deliveryQty + " " + unit + ") cannot exceed available stock (" + maxQty + " " + unit + ")."); 
+    showQtyLimitPopup(deliveryQty, maxQty, unit); 
     return false;
+    }
   }
   
+  // For rolls, collect individual reference quantities and send as JSON
+  if (productType === 'roll' && window.deliverySelectedReferences && window.deliverySelectedReferences.length > 0) {
+    const unitField = document.getElementById('delivery_quantity_unit');
+    const selectedUnit = unitField ? unitField.value : 'kg';
+    
+    const referenceQuantities = [];
+    window.deliverySelectedReferences.forEach(ref => {
+      const amountInput = document.getElementById('delivery_ref_amount_' + ref.id);
+      if (amountInput) {
+        const deliveryAmount = parseFloat(amountInput.value) || 0;
+        referenceQuantities.push({
+          reference: ref.reference,
+          delivery_quantity: deliveryAmount
+        });
+      }
+    });
+    
+    // Store as JSON in hidden field
+    const referenceQuantitiesField = document.getElementById('reference_quantities');
+    if (referenceQuantitiesField) {
+      referenceQuantitiesField.value = JSON.stringify(referenceQuantities);
+    }
+  }
+  
+  console.log('Validation passed, submitting form');
   return true;
+  } catch (error) {
+    console.error('Validation error:', error);
+    alert('An error occurred during validation: ' + error.message);
+    return false;
+  }
 }
 
 function updateTimeAndShift() {
@@ -1641,7 +2996,6 @@ function updateSummary() {
   const dateTime = document.getElementById("dateTime").value;
   const shift = document.getElementById("shift").value;
   const productTypeVal = document.getElementById("delivery_product_type").value;
-  const rollEntryType = document.getElementById("delivery_roll_entry_type").value;
   const referenceNumber = document.getElementById("reference_number").value;
   const cncCuttingBatch = document.getElementById("cnc_cutting_batch").value;
   const deliveryQty = document.getElementById("delivery_qty").value;
@@ -1667,7 +3021,7 @@ function updateSummary() {
     
     let productTypeText = '';
     if (productTypeVal === 'roll') {
-      productTypeText = rollEntryType === 'bundle' ? 'Roll (Bundle)' : 'Roll (Individual)';
+      productTypeText = 'Roll';
     } else if (productTypeVal === 'bag') {
       productTypeText = 'Bag';
     }
@@ -1700,7 +3054,16 @@ function clearForm() {
   document.getElementById("available_qty").value = "";
   document.getElementById("delivery_qty").value = "";
   document.getElementById("delivery_qty").removeAttribute("data-max-qty");
-  document.getElementById("max_qty").textContent = "0";
+  const maxQtyElem = document.getElementById("max_qty");
+  if (maxQtyElem) maxQtyElem.textContent = "0";
+  
+  // Clear selected references
+  window.deliverySelectedReferences = [];
+  renderSelectedReferences();
+  
+  // Clear search input
+  const searchInput = document.getElementById('delivery_reference_search');
+  if (searchInput) searchInput.value = '';
   
   // Reset product type selection
   document.querySelectorAll('.delivery-product-type-btn').forEach(btn => {
@@ -1725,15 +3088,21 @@ function clearForm() {
   if (deliveryQtyLabel) deliveryQtyLabel.textContent = 'Delivery Quantity (pcs):';
   
   // Hide conditional sections
-  const rollEntryTypeGroup = document.getElementById('deliveryRollEntryTypeGroup');
+  const tripNumberGroup = document.getElementById('deliveryTripNumberGroup');
   const deliveryFieldsContainer = document.getElementById('deliveryFieldsContainer');
-  if (rollEntryTypeGroup) rollEntryTypeGroup.style.display = 'none';
+  if (tripNumberGroup) tripNumberGroup.style.display = 'none';
   if (deliveryFieldsContainer) deliveryFieldsContainer.style.display = 'none';
   
   // Reset hidden inputs
   document.getElementById('delivery_product_type').value = '';
-  document.getElementById('delivery_roll_entry_type').value = '';
   document.getElementById('delivery_unit').value = 'piece';
+  
+  // Reset trip number and remove required attribute
+  const tripNumberField = document.getElementById('delivery_trip_number');
+  if (tripNumberField) {
+    tripNumberField.value = '';
+    tripNumberField.required = false; // Remove required when clearing form
+  }
   
   // Reset reference dropdown
   const referenceSelect = document.getElementById('reference_number');
@@ -1751,11 +3120,80 @@ function clearForm() {
 
 // Add event listeners for real-time summary updates
 document.addEventListener('DOMContentLoaded', function() {
+  // If there's a success message, refresh reference data to show updated quantities
+  const successAlert = document.querySelector('.alert-success');
+  if (successAlert) {
+    // Clear any selected references to force fresh data load
+    window.deliverySelectedReferences = [];
+    renderSelectedReferences();
+    
+    // If trip and unit are already selected, reload references with fresh data
+    const tripNumber = document.getElementById('delivery_trip_number')?.value;
+    const unitField = document.getElementById('delivery_quantity_unit')?.value;
+    if (tripNumber && unitField) {
+      // Small delay to ensure DOM is ready, then reload references
+      setTimeout(() => {
+        loadRollDeliveryReferences();
+      }, 500);
+    }
+  }
+  
+  // Hide and remove Entry Type field if it still exists (legacy/cache)
+  const rollEntryTypeGroup = document.getElementById('deliveryRollEntryTypeGroup');
+  if(rollEntryTypeGroup) {
+    rollEntryTypeGroup.style.display = 'none';
+    rollEntryTypeGroup.remove(); // Remove it completely from DOM
+  }
+  
+  // Also hide any buttons with delivery-roll-entry-type-btn class
+  const entryTypeButtons = document.querySelectorAll('.delivery-roll-entry-type-btn');
+  entryTypeButtons.forEach(btn => {
+    const parent = btn.closest('.form-group');
+    if(parent && parent.id === 'deliveryRollEntryTypeGroup') {
+      parent.style.display = 'none';
+      parent.remove();
+    }
+  });
+  
   const refSelect = document.getElementById("reference_number");
   if (refSelect) refSelect.addEventListener('change', updateSummary);
   
   const deliveryQty = document.getElementById("delivery_qty");
-  if (deliveryQty) deliveryQty.addEventListener('input', updateSummary);
+  if (deliveryQty) {
+    deliveryQty.addEventListener('input', updateSummary);
+    // Add validation for bags when delivery quantity changes (debounced to avoid blocking)
+    let validationTimeout = null;
+    deliveryQty.addEventListener('input', function() {
+      const productType = document.getElementById('delivery_product_type').value;
+      if (productType === 'bag') {
+        // Clear previous timeout
+        if (validationTimeout) {
+          clearTimeout(validationTimeout);
+        }
+        // Debounce validation to avoid blocking form submission
+        validationTimeout = setTimeout(function() {
+          try {
+            validateDeliveryQty();
+          } catch (e) {
+            console.error('Error in validateDeliveryQty:', e);
+          }
+        }, 300);
+      }
+    });
+    deliveryQty.addEventListener('change', function() {
+      const productType = document.getElementById('delivery_product_type').value;
+      if (productType === 'bag') {
+        if (validationTimeout) {
+          clearTimeout(validationTimeout);
+        }
+        try {
+          validateDeliveryQty();
+        } catch (e) {
+          console.error('Error in validateDeliveryQty:', e);
+        }
+      }
+    });
+  }
   
   const unitPrice = document.getElementById("unit_price");
   if (unitPrice) unitPrice.addEventListener('input', updateSummary);
@@ -1763,6 +3201,29 @@ document.addEventListener('DOMContentLoaded', function() {
   // Initial updates
   updateTimeAndShift();
   updateSummary();
+  
+  // Check for error in URL and show modern popup if it's about delivery quantity exceeding available stock
+  const urlParams = new URLSearchParams(window.location.search);
+  const error = urlParams.get('error');
+  if (error) {
+    // Check if error is about delivery quantity exceeding available stock
+    if (error.includes('exceeds available stock') || error.includes('exceeds available')) {
+      // Extract quantities from error message
+      const match = error.match(/Delivery quantity \(([\d.]+)\s*(\w+)\) exceeds available stock \(([\d.]+)\s*(\w+)\)/i);
+      if (match) {
+        const enteredQty = parseFloat(match[1]);
+        const unit = match[2];
+        const availableQty = parseFloat(match[3]);
+        showQtyLimitPopup(enteredQty, availableQty, unit);
+      } else {
+        // Fallback: show error message as-is
+        showQtyLimitPopup(0, 0, '', error);
+      }
+      // Remove error from URL
+      const newUrl = window.location.pathname;
+      window.history.replaceState({}, document.title, newUrl);
+    }
+  }
 });
 
 // Update time and shift every second

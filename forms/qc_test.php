@@ -1240,7 +1240,7 @@ function generateExternalReference() {
 
                 <?php if ($message): ?>
     <div class="alert alert-success">
-      ? <?php echo htmlspecialchars($message); ?>
+      <?php echo htmlspecialchars($message); ?>
                     </div>
                 <?php endif; ?>
 
@@ -1585,7 +1585,7 @@ function generateExternalReference() {
 
       <div class="form-row">
         <div class="form-group" style="flex:1;">
-          <label>Temperature (°C):</label>
+          <label>Temperature (ï¿½C):</label>
           <input type="number" name="temperature" id="temperature" step="0.1">
         </div>
         
@@ -1745,7 +1745,7 @@ function generateExternalReference() {
 
       <div class="form-row">
         <div class="form-group" style="flex:1;">
-          <label>Test Temperature (°C): <span style="color: red;">*</span></label>
+          <label>Test Temperature (ï¿½C): <span style="color: red;">*</span></label>
           <input type="number" name="yarn_temperature" step="0.1">
         </div>
         
@@ -1869,7 +1869,7 @@ function generateExternalReference() {
                         // External product - check external reference
                         if (!externalRefValue || externalRefValue.trim() === '') {
                             console.error('? External reference validation failed');
-                            alert('? External Reference is Missing!\n\nThe reference has not been auto-generated yet.\n\nPlease ensure these fields are filled:\n• Batch Information\n• Roll Number\n• GSM\n\nWait 2-3 seconds for auto-generation, then try again.');
+                            alert('? External Reference is Missing!\n\nThe reference has not been auto-generated yet.\n\nPlease ensure these fields are filled:\nï¿½ Batch Information\nï¿½ Roll Number\nï¿½ GSM\n\nWait 2-3 seconds for auto-generation, then try again.');
                             if (event) event.preventDefault();
                             return false;
                         }
@@ -4564,7 +4564,7 @@ function updateSampleReferenceId() {
 								</div>
 								<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-top: 10px;">
 									<div class="form-group" style="grid-column: 1 / -1;"><label>Note (if any)</label><input type="text" name="wx_note_${suffixId}" maxlength="255" placeholder="Optional"></div>
-									<div class="form-group"><label>Temperature (°C) *</label><input type="number" step="any" min="0" max="1000" name="wx_temperature_${suffixId}" oninput="if(this.value < 0) this.value = 0" required></div>
+									<div class="form-group"><label>Temperature (ï¿½C) *</label><input type="number" step="any" min="0" max="1000" name="wx_temperature_${suffixId}" oninput="if(this.value < 0) this.value = 0" required></div>
 									<div class="form-group"><label>RH% *</label><input type="number" step="any" min="0" max="100" name="wx_rh_${suffixId}" oninput="if(this.value < 0) this.value = 0" required></div>
 								</div>
 								<div style="margin-top: 15px;">
@@ -4807,7 +4807,7 @@ function updateSampleReferenceId() {
                                                 <div id="final_result_${suffixId}" style="font-size: 16px; font-weight: bold; color: #27ae60;"></div>
                                             </div>
                                             <div style="background: #f8f9fa; padding: 10px; border-radius: 6px; font-size: 12px; color: #6c757d;">
-                                                <strong>Note:</strong> O90 corresponds to 90% passing as per ISO 12956 standard. It represents the Apparent Opening Size (AOS) — the pore size through which 90% of particles can pass.
+                                                <strong>Note:</strong> O90 corresponds to 90% passing as per ISO 12956 standard. It represents the Apparent Opening Size (AOS) ï¿½ the pore size through which 90% of particles can pass.
                                             </div>
                                         </div>
                                     </div>
@@ -4852,7 +4852,7 @@ function updateSampleReferenceId() {
                                         <label style="font-size: 12px; font-weight: bold;">Water Temperature:</label>
                                         <div style="display: flex; gap: 5px; align-items: center;">
                                             <input type="number" step="0.0001" min="0" name="iso11058_watertemp_${suffixId}" required style="flex: 1; padding: 5px; border: 1px solid #ddd; border-radius: 4px;" oninput="if(this.value < 0) this.value = 0">
-                                            <span style="font-size: 12px;">°C</span>
+                                            <span style="font-size: 12px;">ï¿½C</span>
                                     </div>
                         </div>
                                     <div style="display: flex; flex-direction: column; gap: 5px;">
@@ -4913,11 +4913,11 @@ function updateSampleReferenceId() {
                                             <input type="number" step="0.0001" min="0" name="iso11058_area_pipe_${suffixId}" style="width: 100%; padding: 5px; border: 1px solid #ddd; border-radius: 4px;" oninput="recalculateAllRows('${suffixId}')">
         </div>
                                         <div style="display: flex; flex-direction: column; gap: 5px;">
-                                            <label style="font-size: 12px; font-weight: bold;">Laboratory Temperature °C</label>
+                                            <label style="font-size: 12px; font-weight: bold;">Laboratory Temperature ï¿½C</label>
                                             <input type="number" step="0.0001" min="0" name="iso11058_labtemp_${suffixId}" style="width: 100%; padding: 5px; border: 1px solid #ddd; border-radius: 4px;">
     </div>
                                         <div style="display: flex; flex-direction: column; gap: 5px;">
-                                            <label style="font-size: 12px; font-weight: bold;">Avg. Water Temperature °C</label>
+                                            <label style="font-size: 12px; font-weight: bold;">Avg. Water Temperature ï¿½C</label>
                                             <input type="number" step="0.0001" min="0" name="iso11058_avgwatertemp_${suffixId}" style="width: 100%; padding: 5px; border: 1px solid #ddd; border-radius: 4px;">
                                         </div>
                                         <div style="display: flex; flex-direction: column; gap: 5px;">
@@ -4950,9 +4950,9 @@ function updateSampleReferenceId() {
                                                     <!-- Time -->
                                                     <th style="border: 1px solid #ddd; padding: 8px; text-align: center; background: #e9ecef;" rowspan="3">Time</th>
                                                     <!-- Velocity -->
-                                                    <th style="border: 1px solid #ddd; padding: 8px; text-align: center; background: #e9ecef;" rowspan="3">Velocity (m/s×10?³)</th>
+                                                    <th style="border: 1px solid #ddd; padding: 8px; text-align: center; background: #e9ecef;" rowspan="3">Velocity (m/sï¿½10?ï¿½)</th>
                                                     <!-- Permeability -->
-                                                    <th style="border: 1px solid #ddd; padding: 8px; text-align: center; background: #e9ecef;" rowspan="3">Permeability 10?³(m/s)</th>
+                                                    <th style="border: 1px solid #ddd; padding: 8px; text-align: center; background: #e9ecef;" rowspan="3">Permeability 10?ï¿½(m/s)</th>
                                                 </tr>
                                                 <tr style="background: #f8f9fa;">
                                                     <th style="border: 1px solid #ddd; padding: 6px; text-align: center;" rowspan="2">No</th>
@@ -4973,7 +4973,7 @@ function updateSampleReferenceId() {
                                                     <th style="border: 1px solid #ddd; padding: 6px; text-align: center;"></th>
                                                     <th style="border: 1px solid #ddd; padding: 6px; text-align: center;">mm</th>
                                                     <th style="border: 1px solid #ddd; padding: 6px; text-align: center;">h0 (m)</th>
-                                                    <th style="border: 1px solid #ddd; padding: 6px; text-align: center;">T (°C)</th>
+                                                    <th style="border: 1px solid #ddd; padding: 6px; text-align: center;">T (ï¿½C)</th>
                                                     <th style="border: 1px solid #ddd; padding: 6px; text-align: center;">RT</th>
                                                     <th style="border: 1px solid #ddd; padding: 6px; text-align: center;">(m)</th>
                                                     <th style="border: 1px solid #ddd; padding: 6px; text-align: center;">(s)</th>
@@ -5217,14 +5217,14 @@ function updateSampleReferenceId() {
                                                 <tbody>
                                                     <tr>
                                                         <td style="border: 1px solid #ddd; padding: 8px; text-align: center; font-weight: bold;">Permeability, k</td>
-                                                        <td style="border: 1px solid #ddd; padding: 8px; text-align: center;">K = (a × L) / (A × t) × log10(h0/h1) × RT</td>
+                                                        <td style="border: 1px solid #ddd; padding: 8px; text-align: center;">K = (a ï¿½ L) / (A ï¿½ t) ï¿½ log10(h0/h1) ï¿½ RT</td>
                                                         <td style="border: 1px solid #ddd; padding: 8px; text-align: center;">
                                                             <input type="text" name="avg_permeability_${suffixId}" readonly id="avg_permeability_${suffixId}" style="width: 100%; padding: 4px; border: 1px solid #ddd; text-align: center; background: #f8f9fa; font-weight: bold;">
                                                         </td>
                                                     </tr>
                                                     <tr>
                                                         <td style="border: 1px solid #ddd; padding: 8px; text-align: center; font-weight: bold;">Flow Velocity, V20</td>
-                                                        <td style="border: 1px solid #ddd; padding: 8px; text-align: center;">V20 = ?h/t × RT</td>
+                                                        <td style="border: 1px solid #ddd; padding: 8px; text-align: center;">V20 = ?h/t ï¿½ RT</td>
                                                         <td style="border: 1px solid #ddd; padding: 8px; text-align: center;">
                                                             <input type="text" name="avg_velocity_${suffixId}" readonly id="avg_velocity_${suffixId}" style="width: 100%; padding: 4px; border: 1px solid #ddd; text-align: center; background: #f8f9fa; font-weight: bold;">
                                                         </td>
@@ -5824,10 +5824,10 @@ function updateSampleReferenceId() {
             detailsHTML += `O${targetPercent} lies between sieve size ${result.size1} mm (${result.pass1}% passing) and ${result.size2} mm (${result.pass2}% passing).<br><br>`;
             detailsHTML += `Interpolation formula:<br>`;
             detailsHTML += `${result.formula}<br><br>`;
-            detailsHTML += `<strong>O${targetPercent} = ${result.result} mm (${(result.result * 1000).toFixed(0)} µm)</strong>`;
+            detailsHTML += `<strong>O${targetPercent} = ${result.result} mm (${(result.result * 1000).toFixed(0)} ï¿½m)</strong>`;
             
             // Create final result display
-            const finalResultHTML = `Apparent Opening Size(O${targetPercent}): ${result.result} mm (${(result.result * 1000).toFixed(0)} µm)`;
+            const finalResultHTML = `Apparent Opening Size(O${targetPercent}): ${result.result} mm (${(result.result * 1000).toFixed(0)} ï¿½m)`;
             
             detailsDiv.innerHTML = detailsHTML;
             finalResultDiv.innerHTML = finalResultHTML;
@@ -6047,7 +6047,7 @@ function updateSampleReferenceId() {
                     </div>
                     <div class="form-row" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(260px,1fr)); gap:12px;">
                         <div class="form-group"><label>Sample Production Date</label><input type="date" name="sample_production_date_${suffixId}" style="padding:8px; border:1px solid #ddd; border-radius:6px;" required></div>
-                        <div class="form-group"><label>Temperature (°C)</label><input type="number" step="any" max="1000" min="0" name="temperature_c_${suffixId}" style="padding:8px; border:1px solid #ddd; border-radius:6px;" required></div>
+                        <div class="form-group"><label>Temperature (ï¿½C)</label><input type="number" step="any" max="1000" min="0" name="temperature_c_${suffixId}" style="padding:8px; border:1px solid #ddd; border-radius:6px;" required></div>
                         <div class="form-group"><label>RH (%)</label><input type="number" step="any" max="1000" min="0" name="rh_percent_${suffixId}" style="padding:8px; border:1px solid #ddd; border-radius:6px;" required></div>
                         <div class="form-group">
                             <label>Test Period</label>
@@ -6491,7 +6491,7 @@ function updateSampleReferenceId() {
                 // Calculate Head Difference (?h) = h0 - h1
                 const headDifference = h0 - h1;
                 
-                // Calculate Velocity (V20) = ?h/t × RT
+                // Calculate Velocity (V20) = ?h/t ï¿½ RT
                 // Use t2 - t1 for time difference as per falling head method
                 const timeDifference = t2 - t1;
                 const velocity = timeDifference > 0 ? (headDifference / timeDifference) * correctionFactor : 0;
@@ -6540,7 +6540,7 @@ function updateSampleReferenceId() {
             // Calculate Head Difference (?h) = h0 - h1
             const headDifference = h0 - h1;
             
-            // Calculate Velocity (V20) = ?h/t × RT
+            // Calculate Velocity (V20) = ?h/t ï¿½ RT
             // Use t2 - t1 for time difference as per falling head method
             const timeDifference = t2 - t1;
             const velocity = timeDifference > 0 ? (headDifference / timeDifference) * correctionFactor : 0;

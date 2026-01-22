@@ -36,7 +36,9 @@ date_default_timezone_set('Asia/Dhaka');
 // Connect DB
 $conn = SecurityConfig::getConnection();
 
-// Fetch reference numbers from roll_entry that have passed QC testing and are approved and routed to FG or Bag Production (schema-aware)
+// Fetch reference numbers from roll_entry that have passed QC testing and are approved and routed by AGM to FG or Bag Production
+// When FG is selected, only references with roll_destination = 'fg_production' (routed by AGM for FG production) will be shown
+// When Sewing is selected, only references with roll_destination = 'bag_production' (routed by AGM for Bag production) will be shown
 $referenceNumbers = [];
 
 // Check if is_deleted column exists in roll_transfer table FIRST
@@ -57,10 +59,12 @@ if ($checkParentRef && $checkParentRef->num_rows > 0) {
 $deletedCondition = $hasIsDeleted ? "AND (rt.is_deleted = 0 OR rt.is_deleted IS NULL)" : "";
 
 $hasRollDest = $conn->query("SHOW COLUMNS FROM qc_test_orders LIKE 'roll_destination'");
-// Include both FG and Bag Production routed references
-// Also include references that have been partially transferred (even if not yet routed)
+// Include only references that have been explicitly routed by AGM to FG or Bag Production
+// Only show references with roll_destination set (routed by AGM via route_roll.php handler)
+// When FG is selected, only references with roll_destination = 'fg_production' will be shown (AGM-routed for FG)
+// When Sewing/Bag is selected, only references with roll_destination = 'bag_production' will be shown (AGM-routed for Bag)
 $rollDestFilter = ($hasRollDest && $hasRollDest->num_rows > 0) 
-    ? "AND (qto.roll_destination IN ('fg_production', 'bag_production') OR EXISTS (SELECT 1 FROM roll_transfer rt2 WHERE rt2.reference_number = re.reference_number {$deletedCondition} LIMIT 1))" 
+    ? "AND qto.roll_destination IN ('fg_production', 'bag_production')" 
     : "";
 
 // Fetch references with their available amounts
@@ -72,8 +76,13 @@ $referenceMatchCondition = $hasParentReference
     ? "(rt2.reference_number = re.reference_number OR rt2.parent_reference = re.reference_number)"
     : "rt2.reference_number = re.reference_number";
 
+// Query to fetch references that have been routed by AGM
+// Note: We use INNER JOIN to ensure reference exists in both roll_entry and qc_test_orders
+// IMPORTANT: This query fetches references that have been explicitly routed by AGM (roll_destination is set)
+// Query to fetch references that have been routed by AGM
+// Handle cases where multiple test orders exist for same reference - use the one with roll_destination set
 $res = $conn->query("
-    SELECT DISTINCT
+    SELECT 
         re.reference_number,
         re.total_weight,
         COALESCE((
@@ -88,17 +97,126 @@ $res = $conn->query("
             WHERE {$referenceMatchCondition}
             {$subqueryDeletedCondition}
         ), 0)) as available_amount,
-        COALESCE(MAX(qto.roll_destination), '') as roll_destination
+        MAX(qto.roll_destination) as roll_destination,
+        COALESCE(MAX(qto.admin_remarks), '') as admin_remarks
     FROM roll_entry re
-    INNER JOIN qc_test_orders qto ON qto.sample_reference_id = re.reference_number
+    INNER JOIN qc_test_orders qto ON (
+        qto.sample_reference_id = re.reference_number 
+        OR qto.sample_reference_id LIKE CONCAT(re.reference_number, '-%')
+        OR re.reference_number LIKE CONCAT(qto.sample_reference_id, '-%')
+    )
     WHERE re.reference_number IS NOT NULL 
     AND re.reference_number != ''
+    AND re.reference_number != '0'
     AND qto.status = 'approved'
     {$rollDestFilter}
     GROUP BY re.reference_number, re.total_weight
     HAVING available_amount > 0.001
+    AND (MAX(qto.roll_destination) = 'fg_production' OR MAX(qto.roll_destination) = 'bag_production')
     ORDER BY re.reference_number ASC
 ");
+
+// Check if query returned results
+$queryResultCount = 0;
+if ($res) {
+    $queryResultCount = $res->num_rows;
+    // Reset result pointer for processing
+    $res->data_seek(0);
+} else {
+    error_log("Roll Transfer Entry: Query failed - " . $conn->error);
+}
+
+// Diagnostic queries to help debug missing references
+// Always check for bag_production references to help debug
+if ($hasRollDest && $hasRollDest->num_rows > 0) {
+    // Direct check for bag_production references
+    $bagCheckDeletedCondition = $hasIsDeleted ? "AND (rt2.is_deleted = 0 OR rt2.is_deleted IS NULL)" : "";
+    $bagCheck = $conn->query("
+        SELECT 
+            qto.sample_reference_id,
+            qto.status,
+            qto.roll_destination,
+            CASE WHEN re.reference_number IS NOT NULL THEN 'YES' ELSE 'NO' END as in_roll_entry,
+            re.total_weight,
+            COALESCE((SELECT SUM(rt2.amount_kg) FROM roll_transfer rt2 WHERE rt2.reference_number = qto.sample_reference_id {$bagCheckDeletedCondition}), 0) as transferred
+        FROM qc_test_orders qto
+        LEFT JOIN roll_entry re ON (
+            qto.sample_reference_id = re.reference_number 
+            OR qto.sample_reference_id LIKE CONCAT(re.reference_number, '-%')
+            OR re.reference_number LIKE CONCAT(qto.sample_reference_id, '-%')
+        )
+        WHERE qto.roll_destination = 'bag_production'
+        AND qto.status = 'approved'
+        ORDER BY qto.sample_reference_id DESC
+        LIMIT 20
+    ");
+    if ($bagCheck) {
+        $bagRefs = [];
+        while ($row = $bagCheck->fetch_assoc()) {
+            $bagRefs[] = $row;
+        }
+        error_log("Roll Transfer Entry: Found " . count($bagRefs) . " bag_production references. Sample: " . json_encode(array_slice($bagRefs, 0, 3)));
+    }
+    
+    // Check specific reference if provided in query string for debugging
+    $debugRef = $_GET['debug_ref'] ?? '';
+    if ($debugRef) {
+        $debugStmt = $conn->prepare("
+            SELECT 
+                re.reference_number as roll_entry_ref,
+                re.total_weight,
+                qto.sample_reference_id as qc_ref,
+                qto.status,
+                qto.roll_destination,
+                (SELECT SUM(rt2.amount_kg) FROM roll_transfer rt2 WHERE rt2.reference_number = ? AND (rt2.is_deleted = 0 OR rt2.is_deleted IS NULL)) as transferred
+            FROM roll_entry re
+            LEFT JOIN qc_test_orders qto ON qto.sample_reference_id = re.reference_number
+            WHERE re.reference_number = ?
+            LIMIT 1
+        ");
+        if ($debugStmt) {
+            $debugStmt->bind_param("sss", $debugRef, $debugRef, $debugRef);
+            $debugStmt->execute();
+            $debugResult = $debugStmt->get_result();
+            if ($debugRow = $debugResult->fetch_assoc()) {
+                error_log("Roll Transfer Entry Debug for $debugRef: " . json_encode($debugRow));
+            } else {
+                error_log("Roll Transfer Entry Debug: Reference $debugRef not found in roll_entry");
+            }
+            $debugStmt->close();
+        }
+    }
+    
+    // General diagnostic
+    if ($queryResultCount == 0) {
+        $diagRes = $conn->query("
+            SELECT COUNT(*) as total_routed, 
+                   SUM(CASE WHEN roll_destination = 'fg_production' THEN 1 ELSE 0 END) as fg_count,
+                   SUM(CASE WHEN roll_destination = 'bag_production' THEN 1 ELSE 0 END) as bag_count
+            FROM qc_test_orders 
+            WHERE status = 'approved' 
+            AND roll_destination IN ('fg_production', 'bag_production')
+        ");
+        if ($diagRes) {
+            $diag = $diagRes->fetch_assoc();
+            error_log("Roll Transfer Entry: Diagnostic - Total routed references: " . ($diag['total_routed'] ?? 0) . 
+                      ", FG: " . ($diag['fg_count'] ?? 0) . ", Bag: " . ($diag['bag_count'] ?? 0));
+        }
+        
+        // Also check if references exist in roll_entry
+        $rollEntryCheck = $conn->query("
+            SELECT COUNT(DISTINCT qto.sample_reference_id) as matching_refs
+            FROM qc_test_orders qto
+            INNER JOIN roll_entry re ON qto.sample_reference_id = re.reference_number
+            WHERE qto.status = 'approved' 
+            AND qto.roll_destination IN ('fg_production', 'bag_production')
+        ");
+        if ($rollEntryCheck) {
+            $check = $rollEntryCheck->fetch_assoc();
+            error_log("Roll Transfer Entry: References matching roll_entry: " . ($check['matching_refs'] ?? 0));
+        }
+    }
+}
 $allReferences = [];
 if ($res) {
     while ($r = $res->fetch_assoc()) {
@@ -117,6 +235,10 @@ if ($res) {
         }
     }
 }
+
+// Debug: Log how many references were found after filtering
+error_log("Roll Transfer Entry: Found " . count($allReferences) . " references with available amount > 0");
+error_log("Roll Transfer Entry: Query returned " . $queryResultCount . " rows from database");
 
 // Group references into bundles (sequential references with same base pattern)
 // Pattern: references like "4.0L226JAN05-R01-H0.1-1", "4.0L226JAN05-R01-H0.1-2", etc.
@@ -157,18 +279,26 @@ foreach ($allReferences as $ref) {
             });
             
             // Create bundle entry
-            $totalWeight = array_sum(array_column($bundleRefs, 'total_weight'));
+            // IMPORTANT: For bundles, the total_weight stored in roll_entry is the TOTAL weight for the entire bundle,
+            // not per individual roll. So we use the weight from the first roll (they're all the same) as the bundle total.
+            $totalWeight = $bundleRefs[0]['total_weight'] ?? 0;
+            // Sum up all transferred amounts from all rolls in the bundle
             $totalTransferred = array_sum(array_column($bundleRefs, 'transferred_amount'));
             $totalAvailable = $totalWeight - $totalTransferred;
             
             // Use the first reference's destination (they should all be the same)
             $bundleDestination = $bundleRefs[0]['roll_destination'] ?? '';
             
+            // Format bundle as range: "4.0L226JAN05-R01-H0.1-1 to 4.0L226JAN05-R01-H0.1-4"
+            $firstRef = $bundleRefs[0]['reference_number'];
+            $lastRef = $bundleRefs[count($bundleRefs) - 1]['reference_number'];
+            $bundleDisplayName = $firstRef . ' to ' . $lastRef;
+            
             $bundles[] = [
                 'is_bundle' => true,
                 'base_reference' => $baseRef,
                 'bundle_count' => count($bundleRefs),
-                'reference_number' => $baseRef . ' (Bundle of ' . count($bundleRefs) . ')',
+                'reference_number' => $bundleDisplayName, // Display as range format
                 'total_weight' => $totalWeight,
                 'transferred_amount' => $totalTransferred,
                 'available_amount' => $totalAvailable,
@@ -188,6 +318,9 @@ foreach ($allReferences as $ref) {
 
 // Combine bundles and individual references
 $referenceNumbers = array_merge($bundles, $individualRefs);
+
+// Debug: Store total count for JavaScript
+$totalRefsCount = count($referenceNumbers);
 
 // Fetch drivers (optional table, dynamic columns)
 $drivers = [];
@@ -294,9 +427,190 @@ $operator_name = $_SESSION['username'];
   .submit-btn { background:#2ecc71; color:#fff; }
   .clear-btn { background:#e74c3c; color:#fff; }
   .readonly { background:#ecf0f1; }
+  
+  /* Modern Modal Styles */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(4px);
+    z-index: 10000;
+    animation: fadeIn 0.3s ease;
+  }
+  
+  .modal-overlay.show {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  
+  .modal-container {
+    background: #ffffff;
+    border-radius: 16px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    max-width: 450px;
+    width: 90%;
+    padding: 0;
+    animation: slideUp 0.3s ease;
+    transform: scale(0.9);
+    transition: transform 0.3s ease;
+  }
+  
+  .modal-overlay.show .modal-container {
+    transform: scale(1);
+  }
+  
+  .modal-header {
+    background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%);
+    color: #ffffff;
+    padding: 20px 24px;
+    border-radius: 16px 16px 0 0;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  
+  .modal-header .modal-icon {
+    font-size: 28px;
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 50%;
+  }
+  
+  .modal-header .modal-title {
+    flex: 1;
+    font-size: 20px;
+    font-weight: 600;
+    margin: 0;
+  }
+  
+  .modal-body {
+    padding: 24px;
+  }
+  
+  .modal-message {
+    font-size: 16px;
+    color: #333;
+    line-height: 1.6;
+    margin-bottom: 8px;
+  }
+  
+  .modal-details {
+    background: #f8f9fa;
+    border-left: 4px solid #e74c3c;
+    padding: 12px 16px;
+    border-radius: 6px;
+    margin-top: 16px;
+  }
+  
+  .modal-details-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 6px 0;
+    font-size: 14px;
+  }
+  
+  .modal-details-label {
+    color: #666;
+    font-weight: 500;
+  }
+  
+  .modal-details-value {
+    color: #333;
+    font-weight: 600;
+  }
+  
+  .modal-footer {
+    padding: 16px 24px;
+    border-top: 1px solid #e0e0e0;
+    display: flex;
+    justify-content: flex-end;
+    gap: 12px;
+  }
+  
+  .modal-btn {
+    padding: 10px 24px;
+    border: none;
+    border-radius: 8px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    min-width: 100px;
+  }
+  
+  .modal-btn-primary {
+    background: linear-gradient(135deg, #3498db 0%, #2980b9 100%);
+    color: #ffffff;
+    box-shadow: 0 4px 12px rgba(52, 152, 219, 0.3);
+  }
+  
+  .modal-btn-primary:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgba(52, 152, 219, 0.4);
+  }
+  
+  .modal-btn-primary:active {
+    transform: translateY(0);
+  }
+  
+  @keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  
+  @keyframes slideUp {
+    from {
+      opacity: 0;
+      transform: translateY(30px) scale(0.9);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(0.9);
+    }
+  }
 </style>
 </head>
 <body>
+
+<!-- Modern Modal Popup -->
+<div id="amountExceedModal" class="modal-overlay">
+  <div class="modal-container">
+    <div class="modal-header">
+      <div class="modal-icon">⚠️</div>
+      <h3 class="modal-title">Amount Exceeds Available</h3>
+    </div>
+    <div class="modal-body">
+      <p class="modal-message" id="modalMessage"></p>
+      <div class="modal-details">
+        <div class="modal-details-item">
+          <span class="modal-details-label">Reference Number:</span>
+          <span class="modal-details-value" id="modalReference"></span>
+        </div>
+        <div class="modal-details-item">
+          <span class="modal-details-label">Entered Amount:</span>
+          <span class="modal-details-value" id="modalEnteredAmount" style="color:#e74c3c;"></span>
+        </div>
+        <div class="modal-details-item">
+          <span class="modal-details-label">Available Amount:</span>
+          <span class="modal-details-value" id="modalAvailableAmount" style="color:#27ae60;"></span>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="modal-btn modal-btn-primary" onclick="closeAmountExceedModal()">OK</button>
+    </div>
+  </div>
+</div>
+
 <div class="container">
   
   <h1>Roll Internal Transfer Entry</h1>
@@ -346,7 +660,7 @@ $operator_name = $_SESSION['username'];
     <div class="form-group">
       <label>To</label>
       <div class="btn-group" id="toLocationGroup">
-        <button type="button" class="btn" data-value="Swing" onclick="selectBtn(this, 'toLocationGroup')">Swing</button>
+        <button type="button" class="btn" data-value="Sewing" onclick="selectBtn(this, 'toLocationGroup')">Sewing</button>
         <button type="button" class="btn" data-value="FG" onclick="selectBtn(this, 'toLocationGroup')">FG</button>
       </div>
       <input type="hidden" id="to_location" name="to_location" value="">
@@ -361,6 +675,10 @@ $operator_name = $_SESSION['username'];
                  style="padding:10px; border:1px solid #ccc; border-radius:6px; width:100%; margin-bottom:10px;"
                  onkeyup="filterReferences()" onfocus="showReferenceDropdown()">
           <div id="reference_dropdown" style="display:none; max-height:200px; overflow-y:auto; border:1px solid #ccc; border-radius:6px; background:#fff; position:absolute; z-index:1000; width:100%; top:100%; box-shadow:0 4px 6px rgba(0,0,0,0.1);">
+            <div id="no_references_message" style="display:none; padding:15px; text-align:center; color:#999; font-style:italic;">
+              No references available for the selected destination. Please ensure references have been routed by AGM.<br>
+              <small style="color:#666;">Debug: Total references loaded: <span id="debug_ref_count">0</span></small>
+            </div>
             <?php foreach($referenceNumbers as $ref): 
               $destination_label = '';
               if (isset($ref['roll_destination'])) {
@@ -374,7 +692,7 @@ $operator_name = $_SESSION['username'];
               if ($isBundle && isset($ref['bundle_data'])) {
                 // Encode bundle data as JSON for JavaScript
                 $bundleData = htmlspecialchars(json_encode($ref['bundle_data']), ENT_QUOTES, 'UTF-8');
-                $displayRef = $ref['reference_number']; // Already formatted as "Base (Bundle of N)"
+                $displayRef = $ref['reference_number']; // Already formatted as range "X to Y"
               }
             ?>
               <div class="reference-option <?php echo $isBundle ? 'bundle-option' : ''; ?>" 
@@ -388,16 +706,25 @@ $operator_name = $_SESSION['username'];
                    data-bundle-data="<?php echo $bundleData; ?>"
                    <?php endif; ?>
                    onclick="event.preventDefault(); event.stopPropagation(); selectReferenceFromDropdown('<?php echo htmlspecialchars(addslashes($displayRef)); ?>'); return false;"
-                   style="padding:10px; cursor:pointer; border-bottom:1px solid #eee; <?php echo $isBundle ? 'background:#e8f5e9;' : ''; ?>"
+                   style="display:none; padding:10px; cursor:pointer; border-bottom:1px solid #eee; <?php echo $isBundle ? 'background:#e8f5e9;' : ''; ?>"
                    onmouseover="this.style.background='<?php echo $isBundle ? '#c8e6c9' : '#f0f0f0'; ?>'" 
                    onmouseout="this.style.background='<?php echo $isBundle ? '#e8f5e9' : '#fff'; ?>'">
                 <strong><?php echo htmlspecialchars($displayRef); ?><?php echo $destination_label; ?></strong>
                 <?php if ($isBundle): ?>
                   <span style="background:#4caf50; color:#fff; padding:2px 6px; border-radius:3px; font-size:11px; margin-left:5px;">BUNDLE</span>
                 <?php endif; ?>
-                <br><small style="color:#27ae60; font-weight:600;">Available: <?php echo number_format($ref['available_amount'], 2); ?> kg</small>
-                <?php if (isset($ref['transferred_amount']) && $ref['transferred_amount'] > 0): ?>
-                  <br><small style="color:#e67e22;">Transferred: <?php echo number_format($ref['transferred_amount'], 2); ?> kg / Total: <?php echo number_format($ref['total_weight'], 2); ?> kg</small>
+                <?php if ($isBundle): ?>
+                  <br><small style="color:#27ae60; font-weight:600;">Total Weight: <?php echo number_format($ref['total_weight'], 2); ?> kg</small>
+                  <?php if (isset($ref['transferred_amount']) && $ref['transferred_amount'] > 0): ?>
+                    <br><small style="color:#e67e22;">Transferred: <?php echo number_format($ref['transferred_amount'], 2); ?> kg / Available: <?php echo number_format($ref['available_amount'], 2); ?> kg</small>
+                  <?php else: ?>
+                    <br><small style="color:#27ae60;">Available: <?php echo number_format($ref['available_amount'], 2); ?> kg</small>
+                  <?php endif; ?>
+                <?php else: ?>
+                  <br><small style="color:#27ae60; font-weight:600;">Available: <?php echo number_format($ref['available_amount'], 2); ?> kg</small>
+                  <?php if (isset($ref['transferred_amount']) && $ref['transferred_amount'] > 0): ?>
+                    <br><small style="color:#e67e22;">Transferred: <?php echo number_format($ref['transferred_amount'], 2); ?> kg / Total: <?php echo number_format($ref['total_weight'], 2); ?> kg</small>
+                  <?php endif; ?>
                 <?php endif; ?>
                 <?php if ($isBundle && isset($ref['bundle_refs'])): ?>
                   <br><small style="color:#888; font-size:10px;">Includes: <?php echo implode(', ', array_slice($ref['bundle_refs'], 0, 4)); ?><?php echo count($ref['bundle_refs']) > 4 ? '...' : ''; ?></small>
@@ -530,6 +857,7 @@ function updateTimeAndShift() {
 }
 setInterval(updateTimeAndShift,1000); updateTimeAndShift();
 
+
 function selectBtn(btn, groupId) {
   document.querySelectorAll(`#${groupId} .btn`).forEach(b => b.classList.remove('selected'));
   btn.classList.add('selected');
@@ -543,6 +871,11 @@ function selectBtn(btn, groupId) {
     // Clear selected references when destination changes
     window.selectedReferences = [];
     updateSelectedReferences();
+    // Automatically show the reference dropdown when destination is selected
+    const dropdown = document.getElementById('reference_dropdown');
+    if (dropdown && toLocation.value) {
+      dropdown.style.display = 'block';
+    }
   }
   updateSummary();
 }
@@ -555,6 +888,7 @@ function filterReferencesByDestination() {
   
   const selectedDestination = toLocation.value;
   const options = document.querySelectorAll('.reference-option');
+  const noRefsMessage = document.getElementById('no_references_message');
   
   console.log('Filtering references by destination:', selectedDestination);
   
@@ -563,13 +897,16 @@ function filterReferencesByDestination() {
     options.forEach(option => {
       option.style.display = 'none';
     });
+    if (noRefsMessage) {
+      noRefsMessage.style.display = 'none';
+    }
     return;
   }
   
   // Map UI values to database values
   const destinationMap = {
     'FG': 'fg_production',
-    'Swing': 'bag_production'
+    'Sewing': 'bag_production'
   };
   
   const dbDestination = destinationMap[selectedDestination];
@@ -579,6 +916,9 @@ function filterReferencesByDestination() {
     options.forEach(option => {
       option.style.display = 'none';
     });
+    if (noRefsMessage) {
+      noRefsMessage.style.display = 'none';
+    }
     return;
   }
   
@@ -592,10 +932,17 @@ function filterReferencesByDestination() {
     });
   }
   
+  let visibleCount = 0;
+  
   options.forEach(option => {
     const optionDestination = option.getAttribute('data-destination') || '';
     const isBundle = option.getAttribute('data-is-bundle') === 'true';
     const refText = option.getAttribute('data-ref') ? option.getAttribute('data-ref').toLowerCase() : '';
+    
+    // Debug: Log first few references to see what destinations they have
+    if (visibleCount < 3) {
+      console.log('Reference:', refText, 'Destination:', optionDestination, 'Expected:', dbDestination);
+    }
     
     // Check if this reference is already selected
     let isAlreadySelected = false;
@@ -620,12 +967,26 @@ function filterReferencesByDestination() {
     }
     
     // Show only if matches destination and not already selected
+    // When FG is selected, only show references with roll_destination = 'fg_production' (AGM-routed for FG)
+    // When Sewing is selected, only show references with roll_destination = 'bag_production' (AGM-routed for Bag)
     if (optionDestination === dbDestination && !isAlreadySelected) {
       option.style.display = 'block';
+      visibleCount++;
     } else {
       option.style.display = 'none';
     }
   });
+  
+  console.log('Filtering complete. Visible references for', selectedDestination, ':', visibleCount, 'out of', options.length);
+  
+  // Show message if no references are available for the selected destination
+  if (noRefsMessage) {
+    if (visibleCount === 0) {
+      noRefsMessage.style.display = 'block';
+    } else {
+      noRefsMessage.style.display = 'none';
+    }
+  }
   
   // Also filter based on current search term
   filterReferences();
@@ -636,10 +997,20 @@ if (typeof window.selectedReferences === 'undefined') {
   window.selectedReferences = [];
 }
 
+// Set total references count for debugging
+document.addEventListener('DOMContentLoaded', function() {
+  const totalRefs = document.querySelectorAll('.reference-option').length;
+  const debugCount = document.getElementById('debug_ref_count');
+  if (debugCount) {
+    debugCount.textContent = totalRefs;
+  }
+  console.log('Total references loaded:', totalRefs);
+});
+
 function showReferenceDropdown() {
   const toLocation = document.getElementById('to_location');
   if (!toLocation || !toLocation.value) {
-    alert('Please select a destination (To: FG or Swing) first.');
+    alert('Please select a destination (To: FG or Sewing) first.');
     const searchInput = document.getElementById('reference_search');
     if (searchInput) {
       searchInput.blur();
@@ -650,8 +1021,11 @@ function showReferenceDropdown() {
   // Filter references before showing dropdown
   filterReferencesByDestination();
   
+  // Show dropdown - filterReferencesByDestination will handle showing/hiding based on available references
   const dropdown = document.getElementById('reference_dropdown');
-  if (dropdown) {
+  const toLocationValue = toLocation.value;
+  if (dropdown && toLocationValue) {
+    // Always show dropdown when destination is selected, even if empty (to show "no references" message)
     dropdown.style.display = 'block';
   }
 }
@@ -664,7 +1038,7 @@ function filterReferences() {
   // Map UI values to database values
   const destinationMap = {
     'FG': 'fg_production',
-    'Swing': 'bag_production'
+    'Sewing': 'bag_production'
   };
   const dbDestination = selectedDestination ? destinationMap[selectedDestination] : null;
   
@@ -681,7 +1055,7 @@ function filterReferences() {
   const options = document.querySelectorAll('.reference-option');
   
   options.forEach(option => {
-    const refText = option.getAttribute('data-ref').toLowerCase();
+    const refText = (option.getAttribute('data-ref') || '').toLowerCase();
     const optionDestination = option.getAttribute('data-destination') || '';
     const isBundle = option.getAttribute('data-is-bundle') === 'true';
     
@@ -727,6 +1101,8 @@ function filterReferences() {
     const matchesSearch = refText.includes(searchTerm) || searchTerm === '';
     
     // Filter by destination if one is selected
+    // When FG is selected: only show references with roll_destination = 'fg_production' (AGM-routed for FG)
+    // When Sewing is selected: only show references with roll_destination = 'bag_production' (AGM-routed for Bag)
     const matchesDestination = !dbDestination || optionDestination === dbDestination;
     
     // Hide if already selected (with no remaining), doesn't match search, or doesn't match destination
@@ -737,16 +1113,31 @@ function filterReferences() {
     }
   });
   
-  // Show dropdown if there are visible options
+  // Show dropdown if there are visible options or if no references message should be shown
   const visibleOptions = Array.from(options).filter(opt => opt.style.display !== 'none' && opt.style.display !== '');
   const dropdown = document.getElementById('reference_dropdown');
+  const noRefsMessage = document.getElementById('no_references_message');
+  const hasDestination = toLocation && toLocation.value;
+  
   if (visibleOptions.length > 0) {
     if (dropdown) {
       dropdown.style.display = 'block';
     }
+    if (noRefsMessage) {
+      noRefsMessage.style.display = 'none';
+    }
+  } else if (hasDestination && noRefsMessage) {
+    // Show dropdown with "no references" message if destination is selected but no references match
+    if (dropdown) {
+      dropdown.style.display = 'block';
+    }
+    noRefsMessage.style.display = 'block';
   } else {
     if (dropdown) {
       dropdown.style.display = 'none';
+    }
+    if (noRefsMessage) {
+      noRefsMessage.style.display = 'none';
     }
   }
 }
@@ -767,18 +1158,28 @@ function selectReference(refNumber, totalWeight, transferred, available, isBundl
       return;
     }
     
-    // Allow same reference to be added multiple times (for multiple trips/partial transfers)
+    // For bundles, check if this bundle is already selected (by bundleBaseRef)
+    if (isBundleRef && bundleBaseRef) {
+      const bundleAlreadySelected = window.selectedReferences.some(r => 
+        r.isBundleRef && r.bundleBaseRef === bundleBaseRef
+      );
+      if (bundleAlreadySelected) {
+        alert('This bundle is already selected.');
+        return;
+      }
+    }
+    
     // Add to selected references
     const availableAmount = parseFloat(available) || 0;
-    // For single references, default to rounded available amount. For bundles, use full available.
-    const defaultTransferAmount = isBundleRef ? availableAmount : Math.round(availableAmount);
+    // For bundles, use full available amount. For single references, default to exact available amount.
+    const defaultTransferAmount = isBundleRef ? availableAmount : availableAmount;
     
     const refObj = {
       ref: String(refNumber),
       totalWeight: parseFloat(totalWeight) || 0,
       transferred: parseFloat(transferred) || 0,
       available: availableAmount,
-      transferAmount: defaultTransferAmount, // Default to rounded available for single refs, full for bundles
+      transferAmount: defaultTransferAmount, // Default to exact available amount
       isBundleRef: isBundleRef || false,
       bundleBaseRef: bundleBaseRef || null
     };
@@ -857,8 +1258,10 @@ function addReference() {
       
       // Check if it's a bundle match (search value contains "bundle of" or matches bundle display)
       if (isBundle) {
-        // Extract base reference from bundle display text (e.g., "4.0L226JAN05-R01-H0.1 (Bundle of 4)")
-        const bundleMatch = displayTextLower.match(/(.+?)\s*\(bundle of \d+\)/i);
+        // Extract base reference from bundle display text (e.g., "4.0L226JAN05-R01-H0.1-1 to 4.0L226JAN05-R01-H0.1-4")
+        // Check if it's a range format (contains " to ")
+        const rangeMatch = displayTextLower.match(/^(.+?)\s+to\s+(.+)$/i);
+        const bundleMatch = rangeMatch ? null : displayTextLower.match(/(.+?)\s*\(bundle of \d+\)/i);
         if (bundleMatch) {
           const baseRef = bundleMatch[1].trim().toLowerCase();
           const fullBundleText = bundleMatch[0].trim().toLowerCase();
@@ -915,28 +1318,31 @@ function addReference() {
     const isBundle = matchedOption.getAttribute('data-is-bundle') === 'true';
     
     if (isBundle) {
-      // Handle bundle - add all references in the bundle
+      // Handle bundle - add ONE entry representing the entire bundle
       try {
         const bundleDataJson = matchedOption.getAttribute('data-bundle-data');
         if (bundleDataJson) {
           const bundleData = JSON.parse(bundleDataJson);
           const baseRef = matchedOption.getAttribute('data-ref');
           
-          // Add each reference in the bundle with bundle flag
-          bundleData.forEach(refData => {
-            const refText = refData.reference_number;
-            const totalWeight = parseFloat(refData.total_weight) || 0;
-            const transferred = parseFloat(refData.transferred_amount) || 0;
-            const available = parseFloat(refData.available_amount) || 0;
+          // Get bundle display name (range format like "X-1 to X-4")
+          const strongTag = matchedOption.querySelector('strong');
+          const bundleDisplayName = strongTag ? strongTag.textContent.trim() : baseRef;
+          
+          // Use the FIRST roll's data - the total_weight is the TOTAL bundle weight, not per roll
+          const firstRoll = bundleData[0];
+          if (firstRoll) {
+            const totalWeight = parseFloat(firstRoll.total_weight) || 0; // This is the TOTAL bundle weight
+            const transferred = parseFloat(matchedOption.getAttribute('data-transferred')) || 0;
+            const available = parseFloat(matchedOption.getAttribute('data-available')) || 0;
             
-            if (refText) {
-              selectReference(refText, totalWeight, transferred, available, true, baseRef);
-            }
-          });
+            // Add ONE entry for the entire bundle with the bundle display name
+            selectReference(bundleDisplayName, totalWeight, transferred, available, true, baseRef);
+          }
           
           // Clear the search box after adding
           searchInput.value = '';
-          console.log('Bundle added successfully:', bundleData.length, 'references');
+          console.log('Bundle added successfully as single entry:', bundleDisplayName);
         } else {
           alert('Error: Could not read bundle data.');
         }
@@ -1023,10 +1429,10 @@ function updateSelectedReferences() {
     
     const available = parseFloat(ref.available) || 0;
     const isBundleRef = ref.isBundleRef || false;
-    // For single references, use transferAmount (rounded). For bundles, use full available.
+    // For single references, use transferAmount (exact). For bundles, use full available.
     const transferAmount = isBundleRef 
       ? available 
-      : (parseFloat(ref.transferAmount) || Math.round(available));
+      : (parseFloat(ref.transferAmount) || available);
     
     // Escape HTML to prevent XSS
     const escapedRef = String(ref.ref).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
@@ -1048,22 +1454,25 @@ function updateSelectedReferences() {
         <label style="font-size:12px; color:#666;">Transfer Amount (kg):</label>
         <input type="number" 
                id="${uniqueId}_amount" 
-               value="${Math.round(transferAmount)}" 
-               min="1" 
-               max="${Math.round(available)}" 
-               step="1"
+               value="${transferAmount.toFixed(2)}" 
+               min="0.01" 
+               max="${available.toFixed(2)}" 
+               step="0.01"
                style="width:100px; padding:5px; border:1px solid #ccc; border-radius:4px;"
                onchange="updateReferenceAmount(${index}, this.value)"
                oninput="validateReferenceAmount(${index}, this.value)">
-        <small style="color:#666;">/ ${Math.round(available)} kg</small>
+        <small style="color:#666;">/ ${available.toFixed(2)} kg</small>
       </div>`;
     }
+    
+    // For bundles, show "Total Weight" instead of "Available" to clarify it's the bundle total
+    const weightLabel = isBundleRef ? 'Total Weight' : 'Available';
     
     html += `<div style="background:${bgColor}; padding:10px; border-radius:8px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
       <div style="flex:1; min-width:200px;">
         <strong>${escapedRef}</strong>
         ${isBundleRef ? '<span style="background:#4caf50; color:#fff; padding:2px 6px; border-radius:3px; font-size:10px; margin-left:5px;">BUNDLE</span>' : ''}
-        <br><small style="color:#666;">Available: ${available.toFixed(2)} kg</small>
+        <br><small style="color:#666;">${weightLabel}: ${available.toFixed(2)} kg</small>
       </div>
       ${transferAmountInput}
       ${deleteButton}
@@ -1099,6 +1508,49 @@ function updateSelectedReferences() {
   console.log('Updated reference_amounts:', referenceAmounts);
 }
 
+function showAmountExceedModal(referenceNumber, enteredAmount, availableAmount, isInvalid = false) {
+  const modal = document.getElementById('amountExceedModal');
+  const modalMessage = document.getElementById('modalMessage');
+  const modalReference = document.getElementById('modalReference');
+  const modalEnteredAmount = document.getElementById('modalEnteredAmount');
+  const modalAvailableAmount = document.getElementById('modalAvailableAmount');
+  
+  if (isInvalid || enteredAmount <= 0) {
+    modalMessage.textContent = `The transfer amount must be greater than 0. Please enter a valid amount.`;
+  } else {
+    modalMessage.textContent = `The transfer amount you entered exceeds the available quantity for this reference. Please adjust the amount to be within the available limit.`;
+  }
+  
+  modalReference.textContent = referenceNumber;
+  modalEnteredAmount.textContent = enteredAmount.toFixed(2) + ' kg';
+  modalAvailableAmount.textContent = availableAmount.toFixed(2) + ' kg';
+  
+  modal.classList.add('show');
+  
+  // Close on overlay click (only add listener once)
+  const overlayClickHandler = function(e) {
+    if (e.target === modal) {
+      closeAmountExceedModal();
+      modal.removeEventListener('click', overlayClickHandler);
+    }
+  };
+  modal.addEventListener('click', overlayClickHandler);
+  
+  // Close on Escape key
+  const escapeHandler = function(e) {
+    if (e.key === 'Escape' && modal.classList.contains('show')) {
+      closeAmountExceedModal();
+      document.removeEventListener('keydown', escapeHandler);
+    }
+  };
+  document.addEventListener('keydown', escapeHandler);
+}
+
+function closeAmountExceedModal() {
+  const modal = document.getElementById('amountExceedModal');
+  modal.classList.remove('show');
+}
+
 function updateReferenceAmount(index, amount) {
   if (typeof selectedReferences === 'undefined') {
     window.selectedReferences = [];
@@ -1111,21 +1563,22 @@ function updateReferenceAmount(index, amount) {
       return;
     }
     
-    const transferAmount = Math.round(parseFloat(amount) || 0);
-    const maxAmount = Math.round(parseFloat(ref.available) || 0);
+    const transferAmount = parseFloat(amount) || 0;
+    const maxAmount = parseFloat(ref.available) || 0;
     
     if (transferAmount > maxAmount) {
-      alert(`Transfer amount (${transferAmount} kg) cannot exceed available amount (${maxAmount} kg)`);
+      // Show modern modal popup
+      showAmountExceedModal(ref.ref, transferAmount, maxAmount, false);
       const input = document.getElementById(ref.uniqueId + '_amount');
       if (input) {
-        input.value = maxAmount;
+        input.value = maxAmount.toFixed(2);
       }
       ref.transferAmount = maxAmount;
     } else if (transferAmount <= 0) {
-      alert('Transfer amount must be greater than 0');
+      showAmountExceedModal(ref.ref, transferAmount, maxAmount, true);
       const input = document.getElementById(ref.uniqueId + '_amount');
       if (input) {
-        input.value = ref.transferAmount || 1;
+        input.value = (ref.transferAmount || 0.01).toFixed(2);
       }
     } else {
       ref.transferAmount = transferAmount;
@@ -1150,8 +1603,8 @@ function validateReferenceAmount(index, amount) {
       return;
     }
     
-    const transferAmount = Math.round(parseFloat(amount) || 0);
-    const maxAmount = Math.round(parseFloat(ref.available) || 0);
+    const transferAmount = parseFloat(amount) || 0;
+    const maxAmount = parseFloat(ref.available) || 0;
     const input = document.getElementById(ref.uniqueId + '_amount');
     
     if (!input) {
@@ -1161,6 +1614,8 @@ function validateReferenceAmount(index, amount) {
     if (transferAmount > maxAmount) {
       input.style.border = '2px solid #f44336';
       input.style.borderColor = '#f44336';
+      // Show modal popup when amount exceeds available
+      showAmountExceedModal(ref.ref, transferAmount, maxAmount);
     } else {
       input.style.border = '1px solid #ccc';
       input.style.borderColor = '#ccc';
@@ -1201,19 +1656,44 @@ function updateAvailableAmount() {
   let totalWeight = 0;
   let totalTransferred = 0;
   
-  // Calculate total from all selected references
-  // For bundles: use full available amount
-  // For single references: use the transferAmount (which can be adjusted by user)
+  // Group bundle references by bundleBaseRef to avoid double-counting
+  // For bundles: the weight stored is the TOTAL bundle weight, not per individual roll
+  const bundleGroups = {}; // Key: bundleBaseRef, Value: first ref in that bundle
+  const individualRefs = []; // Non-bundle references
+  
   window.selectedReferences.forEach(ref => {
-    let refAmount;
-    if (ref.isBundleRef) {
-      // Bundle references use full available amount
-      refAmount = parseFloat(ref.available) || 0;
-      ref.transferAmount = refAmount;
+    if (ref.isBundleRef && ref.bundleBaseRef) {
+      // This is a bundle reference - group by bundleBaseRef
+      if (!bundleGroups[ref.bundleBaseRef]) {
+        // First time seeing this bundle - store it
+        bundleGroups[ref.bundleBaseRef] = ref;
+      }
+      // If we've seen this bundle before, ignore this duplicate entry
     } else {
-      // Single references use the transferAmount (user can adjust)
-      refAmount = parseFloat(ref.transferAmount) || parseFloat(ref.available) || 0;
+      // Individual (non-bundle) reference
+      individualRefs.push(ref);
     }
+  });
+  
+  // Process unique bundles (each bundle counted only once)
+  Object.values(bundleGroups).forEach(ref => {
+    // For bundles, the totalWeight is the TOTAL bundle weight (not per roll)
+    const bundleWeight = parseFloat(ref.totalWeight) || 0;
+    const bundleAvailable = parseFloat(ref.available) || 0;
+    const bundleTransferred = parseFloat(ref.transferred) || 0;
+    
+    totalTransferAmount += bundleAvailable;
+    totalAvailable += bundleAvailable;
+    totalWeight += bundleWeight; // This is already the bundle total, not per roll
+    totalTransferred += bundleTransferred;
+  });
+  
+  // Process individual (non-bundle) references
+  individualRefs.forEach(ref => {
+    let refAmount;
+    // Single references use the transferAmount (user can adjust)
+    refAmount = parseFloat(ref.transferAmount) || parseFloat(ref.available) || 0;
+    
     totalTransferAmount += refAmount;
     totalAvailable += (parseFloat(ref.available) || 0);
     totalWeight += (parseFloat(ref.totalWeight) || 0);

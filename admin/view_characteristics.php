@@ -8,8 +8,8 @@ if (!isset($_SESSION['user_id']) || !isset($_SESSION['username'])) {
 }
 
 $role = strtolower(trim($_SESSION['role'] ?? 'user'));
-if (!in_array($role, ['admin', 'agm ops', 'agm operations'])) {
-    die('Access denied. Only admins can access this page.');
+if (!in_array($role, ['admin', 'agm ops', 'agm operations', 'management'])) {
+    die('Access denied. Only admins, AGM Ops, and management can access this page.');
 }
 
 $conn = SecurityConfig::getConnection();
@@ -27,25 +27,64 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     $action = $_POST['action'];
     $admin_name = $_SESSION['full_name'] ?? $_SESSION['username'];
     
+    // Get bundle_reference for this report to find all reports in the same range
+    $getBundleStmt = $conn->prepare("SELECT bundle_reference FROM characteristics_tests WHERE id = ?");
+    $getBundleStmt->bind_param("i", $report_id);
+    $getBundleStmt->execute();
+    $bundleResult = $getBundleStmt->get_result();
+    $bundleRow = $bundleResult->fetch_assoc();
+    $bundle_reference = $bundleRow['bundle_reference'] ?? null;
+    $getBundleStmt->close();
+    
+    // If bundle_reference exists and contains a range (|), update all reports with the same bundle_reference
+    $whereClause = "id = ?";
+    $params = [$report_id];
+    $types = "i";
+    
+    if ($bundle_reference && strpos($bundle_reference, '|') !== false) {
+        // It's a range - update all reports with the same bundle_reference
+        $whereClause = "bundle_reference = ? AND status IN ('checked', 'pending')";
+        $params = [$bundle_reference];
+        $types = "s";
+    } else {
+        // Single report - update only this one
+        $whereClause = "id = ? AND status IN ('checked', 'pending')";
+        $params = [$report_id];
+        $types = "i";
+    }
+    
     if ($action === 'approve') {
-        $stmt = $conn->prepare("UPDATE characteristics_tests SET status = 'approved', approver_name = ?, approved_at = NOW() WHERE id = ? AND status = 'checked'");
-        $stmt->bind_param("si", $admin_name, $report_id);
+        $stmt = $conn->prepare("UPDATE characteristics_tests SET status = 'approved', approver_name = ?, approved_at = NOW() WHERE $whereClause");
+        if ($types === "s") {
+            $stmt->bind_param("ss", $admin_name, $params[0]);
+        } else {
+            $stmt->bind_param("si", $admin_name, $params[0]);
+        }
         if ($stmt->execute() && $stmt->affected_rows > 0) {
-            $_SESSION['success_message'] = "✅ Test approved successfully!";
+            $_SESSION['success_message'] = "Test approved successfully!";
             $stmt->close();
             // Prevent caching
             header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
             header("Cache-Control: post-check=0, pre-check=0", false);
             header("Pragma: no-cache");
-            // Refresh parent window and close this one if opened from parent
+            // Always redirect to QC Test Approval Dashboard
+            $return_url = 'qc_test_approval_dashboard.php';
+            // Build absolute URL dynamically
+            $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+            $host = $_SERVER['HTTP_HOST'];
+            $script_dir = dirname($_SERVER['SCRIPT_NAME']); // e.g., /geotexx/admin
+            $base_url = $protocol . '://' . $host . $script_dir . '/' . $return_url;
+            $relative_url = $script_dir . '/' . $return_url;
+            
             echo '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Approved</title><script>
+                var returnUrl = ' . json_encode($base_url) . ';
                 if (window.opener && !window.opener.closed) {
-                    window.opener.location.href = "../admin/qc_reports_dashboard.php?t=" + new Date().getTime();
+                    window.opener.location.href = returnUrl + "?t=" + new Date().getTime();
                     setTimeout(function() { window.close(); }, 100);
                 } else {
-                    window.location.href = "../admin/qc_reports_dashboard.php?t=" + new Date().getTime();
+                    window.location.href = ' . json_encode($relative_url) . ' + "?t=" + new Date().getTime();
                 }
-            </script></head><body><p>Approved! Closing window...</p></body></html>';
+            </script></head><body><p>Approved! Redirecting...</p></body></html>';
             exit();
         }
         $stmt->close();
@@ -64,24 +103,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             }
         }
         
-        $stmt = $conn->prepare("UPDATE characteristics_tests SET status = 'rejected', remarks = ?, approver_name = ? WHERE id = ? AND status = 'checked'");
-        $stmt->bind_param("ssi", $reject_reason, $admin_name, $report_id);
+        // Use the same where clause logic for rejection
+        $stmt = $conn->prepare("UPDATE characteristics_tests SET status = 'rejected', remarks = ?, approver_name = ? WHERE $whereClause");
+        if ($types === "s") {
+            $stmt->bind_param("sss", $reject_reason, $admin_name, $params[0]);
+        } else {
+            $stmt->bind_param("ssi", $reject_reason, $admin_name, $params[0]);
+        }
         if ($stmt->execute() && $stmt->affected_rows > 0) {
-            $_SESSION['success_message'] = "❌ Test rejected and returned to tester!";
+            $_SESSION['success_message'] = "Test rejected and returned to tester!";
             $stmt->close();
             // Prevent caching
             header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
             header("Cache-Control: post-check=0, pre-check=0", false);
             header("Pragma: no-cache");
-            // Refresh parent window and close this one if opened from parent
+            // Always redirect to QC Test Approval Dashboard
+            $return_url = 'qc_test_approval_dashboard.php';
+            // Build absolute URL dynamically
+            $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+            $host = $_SERVER['HTTP_HOST'];
+            $script_dir = dirname($_SERVER['SCRIPT_NAME']); // e.g., /geotexx/admin
+            $base_url = $protocol . '://' . $host . $script_dir . '/' . $return_url;
+            $relative_url = $script_dir . '/' . $return_url;
+            
             echo '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Rejected</title><script>
+                var returnUrl = ' . json_encode($base_url) . ';
                 if (window.opener && !window.opener.closed) {
-                    window.opener.location.href = "../admin/qc_reports_dashboard.php?t=" + new Date().getTime();
+                    window.opener.location.href = returnUrl + "?t=" + new Date().getTime();
                     setTimeout(function() { window.close(); }, 100);
                 } else {
-                    window.location.href = "../admin/qc_reports_dashboard.php?t=" + new Date().getTime();
+                    window.location.href = ' . json_encode($relative_url) . ' + "?t=" + new Date().getTime();
                 }
-            </script></head><body><p>Rejected! Closing window...</p></body></html>';
+            </script></head><body><p>Rejected! Redirecting...</p></body></html>';
             exit();
         }
         $stmt->close();
@@ -273,10 +326,13 @@ $test_data = json_decode($report['test_results'], true);
 
   <?php endif; ?>
 
-  <?php if ($report['status'] === 'checked'): ?>
+  <?php if (in_array($role, ['admin', 'agm ops', 'agm operations', 'management']) && in_array($report['status'], ['pending', 'checked'])): ?>
   <h3>Admin Actions</h3>
-  <form method="POST" action="" style="margin-bottom:15px;">
+  <form method="POST" action="" style="margin-bottom:15px; padding:15px; background:#f8f9fa; border-radius:8px; border:1px solid #ddd;">
     <input type="hidden" name="action" value="approve">
+    <p style="margin:0 0 15px 0; padding:12px; background:#e8f6ec; border-left:4px solid #28a745; border-radius:4px; color:#065f46; font-size:14px;">
+      <i class="fas fa-info-circle"></i> <strong>Note:</strong> After approval, this test will appear in the "Approved Tests with Routing" section of the QC Test Approval Dashboard where you can set the routing destination (FG or Bag Production).
+    </p>
     <button type="submit" class="btn btn-approve">✓ Final Approve</button>
   </form>
   
@@ -333,7 +389,15 @@ $test_data = json_decode($report['test_results'], true);
   <?php endif; ?>
 
   <div style="margin-top:20px;">
-    <a href="qc_reports_dashboard.php" class="btn btn-back">← Back to Dashboard</a>
+    <?php 
+    $return_url = $_GET['return'] ?? 'qc_test_approval_dashboard.php';
+    if ($return_url === 'qc_test_approval_dashboard') {
+        $return_url = 'qc_test_approval_dashboard.php';
+    } elseif (empty($return_url)) {
+        $return_url = 'qc_test_approval_dashboard.php';
+    }
+    ?>
+    <a href="<?php echo htmlspecialchars($return_url); ?>" class="btn btn-back">← Back to Dashboard</a>
     <button onclick="closeWindow()" class="btn btn-back">Close Window</button>
   </div>
 </div>
@@ -343,10 +407,21 @@ function closeWindow() {
     if (window.opener) {
         window.close();
     } else {
-        if (window.history.length > 1) {
+        const returnUrl = '<?php 
+            $return_url = $_GET['return'] ?? 'qc_test_approval_dashboard.php';
+            if ($return_url === 'qc_test_approval_dashboard') {
+                $return_url = 'qc_test_approval_dashboard.php';
+            } elseif (empty($return_url)) {
+                $return_url = 'qc_test_approval_dashboard.php';
+            }
+            echo htmlspecialchars($return_url); 
+        ?>';
+        if (returnUrl && returnUrl !== 'qc_test_approval_dashboard.php') {
+            window.location.href = returnUrl;
+        } else if (window.history.length > 1) {
             window.history.back();
         } else {
-            window.location.href = 'qc_reports_dashboard.php';
+            window.location.href = 'qc_test_approval_dashboard.php';
         }
     }
 }

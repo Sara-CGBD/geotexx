@@ -176,10 +176,23 @@ if ($hasRqcRef) {
 $defaultProject = getDefaultProject($conn);
 $projects = $defaultProject ? [$defaultProject] : [];
 
+// Build the WHERE clause for roll_qc_reports subquery
+$rqcWhereClause = '';
+if ($hasRqcRef) {
+    if ($hasRqcApproved && $hasRqcOverallStatus) {
+        $rqcWhereClause = "AND (rqc.approved = 1 OR rqc.overall_status IN ('approved', 'Done'))";
+    } elseif ($hasRqcApproved) {
+        $rqcWhereClause = "AND rqc.approved = 1";
+    } elseif ($hasRqcOverallStatus) {
+        $rqcWhereClause = "AND rqc.overall_status IN ('approved', 'Done')";
+    }
+}
+
 // Performance: Defer reference loading - will load asynchronously after page render
 // Fetch reference numbers from fiber_to_roll_entry with material type and available weight
 // ONLY if BOTH Daily GSM Check AND Length Calibration tests are APPROVED
 // AND Roll QC Report is APPROVED
+// Available weight = product_amount from approved roll_qc_reports - used_in_roll_entry
 $referenceNumbers = [];
 $refRes = $conn->query("
     SELECT 
@@ -189,26 +202,49 @@ $refRes = $conn->query("
         ftr.roll_no,
         ftr.line_no,
         ftr.total_weight as original_weight,
-        COALESCE(SUM(re.total_weight), 0) as used_weight,
-        (ftr.total_weight - COALESCE(SUM(re.total_weight), 0)) as available_weight
+        COALESCE((
+            SELECT SUM(re2.total_weight)
+            FROM roll_entry re2
+            WHERE ftr.reference_number COLLATE {$collation} = re2.reference_number COLLATE {$collation}
+               OR re2.reference_number COLLATE {$collation} LIKE CONCAT(ftr.reference_number COLLATE {$collation}, '-%')
+        ), 0) as used_in_roll_entry,
+        COALESCE((
+            SELECT rqc.product_amount
+            FROM roll_qc_reports rqc
+            WHERE rqc.reference_number COLLATE {$collation} = ftr.reference_number COLLATE {$collation}
+              AND (rqc.roll_no = ftr.roll_no OR (rqc.roll_no IS NULL AND ftr.roll_no IS NULL))
+              {$rqcWhereClause}
+            ORDER BY rqc.created_at DESC
+            LIMIT 1
+        ), 0) as qc_approved_amount,
+        (COALESCE((
+            SELECT rqc.product_amount
+            FROM roll_qc_reports rqc
+            WHERE rqc.reference_number COLLATE {$collation} = ftr.reference_number COLLATE {$collation}
+              AND (rqc.roll_no = ftr.roll_no OR (rqc.roll_no IS NULL AND ftr.roll_no IS NULL))
+              {$rqcWhereClause}
+            ORDER BY rqc.created_at DESC
+            LIMIT 1
+        ), 0) - 
+         COALESCE((
+            SELECT SUM(re2.total_weight)
+            FROM roll_entry re2
+            WHERE ftr.reference_number COLLATE {$collation} = re2.reference_number COLLATE {$collation}
+               OR re2.reference_number COLLATE {$collation} LIKE CONCAT(ftr.reference_number COLLATE {$collation}, '-%')
+        ), 0)) as available_weight
     FROM fiber_to_roll_entry ftr
-    LEFT JOIN roll_entry re ON (
-        ftr.reference_number COLLATE {$collation} = re.reference_number COLLATE {$collation}
-        OR re.reference_number COLLATE {$collation} LIKE CONCAT(ftr.reference_number COLLATE {$collation}, '-%')
-    )
     WHERE ftr.reference_number IS NOT NULL
     {$gsmExistsClause}
     {$lcExistsClause}
     {$rqcExistsClause}
-    GROUP BY ftr.id, ftr.reference_number, ftr.material_type, ftr.roll_no, ftr.line_no, ftr.total_weight
-    HAVING available_weight > 0
+    HAVING available_weight > 0.01
     ORDER BY ftr.created_at DESC
 ");
 if ($refRes) {
     while ($r = $refRes->fetch_assoc()) $referenceNumbers[] = $r;
 }
 
-// Material type is always "PP Stable Fiber"
+// Material type options include "PP Stable Fiber" and "PSF Fiber"
 
 // Generate next Entry ID
 $current_date = date('Y-m-d');
@@ -313,8 +349,175 @@ $operator_name = $_SESSION['username'];
       cursor: pointer;
       margin: 0 10px;
     }
-    .submit-btn { background: #2ecc71; color: #fff; }
-    .clear-btn { background: #e74c3c; color: #fff; }
+    .submit-btn {
+      background-color: #2ecc71;
+      color: white;
+    }
+    .clear-btn {
+      background-color: #e74c3c;
+      color: white;
+    }
+    
+    /* Quantity Limit Popup Styles */
+    .qty-limit-popup-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(15, 23, 42, 0.75);
+      backdrop-filter: blur(8px);
+      z-index: 9999;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0;
+      visibility: hidden;
+      transition: all 0.3s ease;
+    }
+    
+    .qty-limit-popup-overlay.show {
+      opacity: 1;
+      visibility: visible;
+    }
+    
+    .qty-limit-popup {
+      background: white;
+      border-radius: 16px;
+      max-width: 400px;
+      width: 90%;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+      position: relative;
+      transform: scale(0.9) translateY(20px);
+      transition: all 0.3s ease;
+      overflow: hidden;
+    }
+    
+    .qty-limit-popup.show {
+      transform: scale(1) translateY(0);
+    }
+    
+    .qty-limit-popup-header {
+      background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+      padding: 16px 20px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      color: white;
+    }
+    
+    .qty-limit-popup-icon {
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.2);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 28px;
+      flex-shrink: 0;
+    }
+    
+    .qty-limit-popup-title {
+      font-size: 18px;
+      font-weight: 700;
+      margin: 0;
+      text-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    }
+    
+    .qty-limit-popup-body {
+      padding: 20px 24px 24px;
+    }
+    
+    .qty-limit-popup-message {
+      font-size: 14px;
+      color: #64748b;
+      margin-bottom: 16px;
+      line-height: 1.5;
+    }
+    
+    .qty-limit-popup-details {
+      background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+      border: 1px solid #fbbf24;
+      border-radius: 12px;
+      padding: 14px 16px;
+      margin-bottom: 20px;
+      font-size: 13px;
+      color: #78350f;
+    }
+    
+    .qty-limit-popup-details strong {
+      color: #92400e;
+      font-weight: 600;
+      display: inline-block;
+      min-width: 70px;
+    }
+    
+    .qty-limit-popup-details-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 0;
+    }
+    
+    .qty-limit-popup-details-row:last-child {
+      padding-bottom: 0;
+    }
+    
+    .qty-limit-popup-details-row:first-child {
+      padding-top: 0;
+    }
+    
+    .qty-limit-popup-button {
+      background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+      color: white;
+      border: none;
+      padding: 12px 32px;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+      width: 100%;
+    }
+    
+    .qty-limit-popup-button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 16px rgba(239, 68, 68, 0.4);
+    }
+    
+    .qty-limit-popup-button:active {
+      transform: translateY(0);
+      box-shadow: 0 2px 8px rgba(239, 68, 68, 0.3);
+    }
+    
+    .qty-limit-popup-close {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.2);
+      border: none;
+      color: #ffffff;
+      font-size: 18px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s ease;
+    }
+    
+    .qty-limit-popup-close:hover {
+      background: rgba(255, 255, 255, 0.3);
+      transform: scale(1.1);
+    }
+    
+    .qty-limit-popup-close:active {
+      transform: scale(0.95);
+    }
     .summary-info {
       font-size: 16px;
       font-weight: bold;
@@ -490,9 +693,10 @@ $operator_name = $_SESSION['username'];
       <!-- Material Type -->
       <div class="form-group">
         <label>Material Type:</label>
-        <div class="btn-group" id="materialTypeGroup">
-          <button type="button" class="btn" data-value="PP Stable Fiber" onclick="selectBtn(this, 'materialTypeGroup')">PP Stable Fiber</button>
-        </div>
+      <div class="btn-group" id="materialTypeGroup">
+        <button type="button" class="btn" data-value="PP Stable Fiber" onclick="selectBtn(this, 'materialTypeGroup')">PP Stable Fiber</button>
+        <button type="button" class="btn" data-value="PSF Fiber" onclick="selectBtn(this, 'materialTypeGroup')">PSF Fiber</button>
+      </div>
         <input type="hidden" id="material_type" name="material_type" value="">
       </div>
 
@@ -561,6 +765,9 @@ $operator_name = $_SESSION['username'];
   </div>
 
   <script>
+    let availableWeight = 0;
+    let lastPopupWeight = null;
+    
     function updateTimeAndShift() {
       const now = new Date();
       const utc = now.getTime() + (now.getTimezoneOffset()*60000);
@@ -761,12 +968,7 @@ $operator_name = $_SESSION['username'];
       // Set max weight
       document.getElementById('total_weight').max = availWeight;
       
-      // Auto-select material type - always "PP Stable Fiber"
-      const materialTypeBtn = document.querySelector('#materialTypeGroup .btn[data-value="PP Stable Fiber"]');
-      if (materialTypeBtn) {
-        materialTypeBtn.classList.add('selected');
-        document.getElementById('material_type').value = 'PP Stable Fiber';
-      }
+      setMaterialTypeSelection(materialType);
       
       updateSummary();
     }
@@ -811,12 +1013,7 @@ $operator_name = $_SESSION['username'];
       // Set max weight
       document.getElementById('total_weight').max = availWeight;
       
-      // Auto-select material type - always "PP Stable Fiber"
-      const materialTypeBtn = document.querySelector('#materialTypeGroup .btn[data-value="PP Stable Fiber"]');
-      if (materialTypeBtn) {
-        materialTypeBtn.classList.add('selected');
-        document.getElementById('material_type').value = 'PP Stable Fiber';
-      }
+      setMaterialTypeSelection(materialType);
       
       // Store base reference in hidden field
       document.getElementById('reference_number').value = baseRef;
@@ -842,13 +1039,90 @@ $operator_name = $_SESSION['username'];
         warningElement.textContent = `⚠️ Weight exceeds available quantity (${availableWeight.toFixed(2)} kg)`;
         warningElement.style.display = 'block';
         totalWeightInput.setCustomValidity('Weight exceeds available quantity');
+        totalWeightInput.style.borderColor = '#e74c3c';
+        totalWeightInput.style.border = '2px solid #e74c3c';
+        
+        // Show popup notification (only once per weight value to avoid spam)
+        if (lastPopupWeight !== weight) {
+          showQtyLimitPopup(weight, availableWeight);
+          lastPopupWeight = weight;
+        }
       } else {
+        // Reset popup tracking when weight is valid
+        if (weight <= availableWeight) {
+          lastPopupWeight = null;
+        }
+        
         warningElement.style.display = 'none';
         totalWeightInput.setCustomValidity('');
+        totalWeightInput.style.borderColor = '#e1e5e9';
+        totalWeightInput.style.border = '2px solid #e1e5e9';
       }
       
       updateSummary();
     }
+    
+    function showQtyLimitPopup(enteredWeight, maxWeight) {
+      const popup = document.getElementById('qtyLimitPopup');
+      const overlay = document.getElementById('qtyLimitPopupOverlay');
+      const message = document.getElementById('qtyLimitPopupMessage');
+      const details = document.getElementById('qtyLimitPopupDetails');
+      
+      // Shorter, more user-friendly message
+      message.textContent = `Only ${maxWeight.toFixed(2)} kg available. You entered ${enteredWeight.toFixed(2)} kg.`;
+      
+      // Simplified details structure
+      const excess = (enteredWeight - maxWeight).toFixed(2);
+      details.innerHTML = `
+        <div class="qty-limit-popup-details-row">
+          <strong>Available:</strong>
+          <span>${maxWeight.toFixed(2)} kg</span>
+        </div>
+        <div class="qty-limit-popup-details-row">
+          <strong>Excess:</strong>
+          <span style="color: #dc2626; font-weight: 700;">${excess} kg</span>
+        </div>
+      `;
+      
+      overlay.classList.add('show');
+      // Small delay to ensure overlay is rendered first
+      setTimeout(() => {
+        popup.classList.add('show');
+      }, 10);
+    }
+    
+    function closeQtyLimitPopup() {
+      try {
+        const popup = document.getElementById('qtyLimitPopup');
+        const overlay = document.getElementById('qtyLimitPopupOverlay');
+        
+        if (popup && overlay) {
+          popup.classList.remove('show');
+          overlay.classList.remove('show');
+          
+          // Focus back on total_weight input field
+          setTimeout(() => {
+            const weightInput = document.getElementById('total_weight');
+            if (weightInput) {
+              weightInput.focus();
+              weightInput.select();
+            }
+          }, 100);
+        }
+      } catch (error) {
+        console.error('Error closing popup:', error);
+      }
+    }
+    
+    // Close popup on ESC key
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') {
+        const popup = document.getElementById('qtyLimitPopup');
+        if (popup && popup.classList.contains('show')) {
+          closeQtyLimitPopup();
+        }
+      }
+    });
 
     function selectRollSize(value, btn){
       document.querySelectorAll('#rollSizeGroup .btn').forEach(b=>b.classList.remove('selected'));
@@ -890,6 +1164,26 @@ $operator_name = $_SESSION['username'];
       updateSummary();
     }
 
+    function setMaterialTypeSelection(preferredType) {
+      const buttons = Array.from(document.querySelectorAll('#materialTypeGroup .btn'));
+      buttons.forEach(btn => btn.classList.remove('selected'));
+      const targetType = (preferredType || '').trim();
+      let targetBtn = buttons.find(btn => ((btn.dataset.value || btn.innerText).trim()) === targetType);
+      if (!targetBtn) {
+        targetBtn = buttons.find(btn => ((btn.dataset.value || btn.innerText).trim()) === 'PP Stable Fiber');
+      }
+      if (!targetBtn && buttons.length > 0) {
+        targetBtn = buttons[0];
+      }
+      if (targetBtn) {
+        targetBtn.classList.add('selected');
+        document.getElementById("material_type").value = (targetBtn.dataset.value || targetBtn.innerText).trim();
+      } else {
+        document.getElementById("material_type").value = '';
+      }
+      updateBatchNumberDisplay();
+    }
+
     function clearForm(){
       document.getElementById("gsm").value = "";
       document.getElementById("line_no").value = "";
@@ -923,22 +1217,35 @@ $operator_name = $_SESSION['username'];
       // Validate weight doesn't exceed available
       const totalWeight = parseFloat(document.getElementById('total_weight').value) || 0;
       if (availableWeight > 0 && totalWeight > availableWeight) {
-        alert(`Total weight (${totalWeight} kg) exceeds available quantity (${availableWeight.toFixed(2)} kg).\nPlease reduce the amount.`);
+        // Show popup instead of alert
+        showQtyLimitPopup(totalWeight, availableWeight);
         return false;
       }
       
       return true;
     }
     
-    // Auto-select "PP Stable Fiber" on page load
+    // Default material type selection on page load
     window.addEventListener('DOMContentLoaded', function() {
-      const materialTypeBtn = document.querySelector('#materialTypeGroup .btn[data-value="PP Stable Fiber"]');
-      if (materialTypeBtn) {
-        materialTypeBtn.classList.add('selected');
-        document.getElementById('material_type').value = 'PP Stable Fiber';
-      }
+      setMaterialTypeSelection('PP Stable Fiber');
     });
   </script>
+
+  <!-- Quantity Limit Exceeded Popup -->
+  <div id="qtyLimitPopupOverlay" class="qty-limit-popup-overlay" onclick="closeQtyLimitPopup()">
+    <div id="qtyLimitPopup" class="qty-limit-popup" onclick="event.stopPropagation()">
+      <button type="button" class="qty-limit-popup-close" onclick="closeQtyLimitPopup()" aria-label="Close">×</button>
+      <div class="qty-limit-popup-header">
+        <div class="qty-limit-popup-icon">⚠️</div>
+        <h3 class="qty-limit-popup-title">Weight Limit Exceeded</h3>
+      </div>
+      <div class="qty-limit-popup-body">
+        <p class="qty-limit-popup-message" id="qtyLimitPopupMessage"></p>
+        <div class="qty-limit-popup-details" id="qtyLimitPopupDetails"></div>
+        <button type="button" class="qty-limit-popup-button" onclick="closeQtyLimitPopup()">Got It</button>
+      </div>
+    </div>
+  </div>
 </body>
 </html>
 

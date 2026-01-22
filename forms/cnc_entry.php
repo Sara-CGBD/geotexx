@@ -50,12 +50,8 @@ $projects = [];
 // Performance: Optimize reference query with LIMIT and defer loading
 // Fetch reference numbers from roll_received that:
 // 1. Haven't been used in CNC entry yet
-// 2. Have all QC tests (excluding UV/Weathering Exposure Test) approved by AGM/Admin
-//    - QC Test Orders (excluding UV/Weathering Exposure Test)
-//    - Water Permeability Tests
-//    - Characteristics Tests
-//    - Sun Test Reports
-// 3. At least one approved test exists for this reference
+// NOTE: All QC tests (QC Test Order, Water Permeability, Characteristics, Sun Test, UV Test) 
+//       will be done AFTER roll entry submission. No tests are required before CNC entry.
 $referenceNumbers = [];
 $refQuery = "SELECT DISTINCT r.reference_number 
              FROM roll_received r 
@@ -63,71 +59,6 @@ $refQuery = "SELECT DISTINCT r.reference_number
              AND NOT EXISTS (
                  SELECT 1 FROM cnc_entries c 
                  WHERE c.reference_number = r.reference_number
-             )
-             AND (
-                 -- Check if all QC test orders (excluding Weathering Exposure Test) for this reference are approved
-                 NOT EXISTS (
-                     SELECT 1 
-                     FROM qc_test_orders qto
-                     LEFT JOIN test_standards ts ON qto.test_standard_id = ts.id
-                     WHERE qto.sample_reference_id = r.reference_number
-                     AND ts.test_name != 'Weathering Exposure Test'
-                     AND (qto.status != 'approved' OR qto.approved_by IS NULL)
-                 )
-                 -- Check if all Water Permeability Tests for this reference are approved
-                 AND NOT EXISTS (
-                     SELECT 1 
-                     FROM water_permeability_tests wpt
-                     WHERE wpt.reference_number = r.reference_number
-                     AND (wpt.status != 'approved' OR wpt.approved_by IS NULL)
-                 )
-                 -- Check if all Characteristics Tests for this reference are approved
-                 AND NOT EXISTS (
-                     SELECT 1 
-                     FROM characteristics_tests ct
-                     WHERE ct.reference_number = r.reference_number
-                     AND (ct.status != 'approved' OR ct.approver_name IS NULL)
-                 )
-                 -- Check if all Sun Test Reports for this reference are approved
-                 AND NOT EXISTS (
-                     SELECT 1 
-                     FROM sun_test_reports str
-                     WHERE str.reference_number = r.reference_number
-                     AND (str.status != 'approved' OR str.approved_by IS NULL)
-                 )
-             )
-             AND (
-                 -- Ensure at least one approved test exists for this reference
-                 EXISTS (
-                     SELECT 1 
-                     FROM qc_test_orders qto
-                     LEFT JOIN test_standards ts ON qto.test_standard_id = ts.id
-                     WHERE qto.sample_reference_id = r.reference_number
-                     AND ts.test_name != 'Weathering Exposure Test'
-                     AND qto.status = 'approved'
-                     AND qto.approved_by IS NOT NULL
-                 )
-                 OR EXISTS (
-                     SELECT 1 
-                     FROM water_permeability_tests wpt
-                     WHERE wpt.reference_number = r.reference_number
-                     AND wpt.status = 'approved'
-                     AND wpt.approved_by IS NOT NULL
-                 )
-                 OR EXISTS (
-                     SELECT 1 
-                     FROM characteristics_tests ct
-                     WHERE ct.reference_number = r.reference_number
-                     AND ct.status = 'approved'
-                     AND ct.approver_name IS NOT NULL
-                 )
-                 OR EXISTS (
-                     SELECT 1 
-                     FROM sun_test_reports str
-                     WHERE str.reference_number = r.reference_number
-                     AND str.status = 'approved'
-                     AND str.approved_by IS NOT NULL
-                 )
              )
              ORDER BY r.created_at DESC
              LIMIT 100";
@@ -1294,8 +1225,63 @@ function populateCNCReferenceDropdown() {
   
   cncReferencesData.forEach((ref, index) => {
     const isBundle = ref.is_bundle || false;
-    const rollCount = ref.roll_count || 1;
     const displayText = ref.display || ref.reference || '';
+    
+    // Calculate roll count using the same logic as selection functions
+    let rollCount = ref.roll_count;
+    
+    // If roll_count is not available, try to calculate it
+    if (!rollCount || rollCount === 1) {
+      // First, try to count from bundle_refs array
+      if (isBundle && ref.bundle_refs && Array.isArray(ref.bundle_refs) && ref.bundle_refs.length > 0) {
+        rollCount = ref.bundle_refs.length;
+      }
+      // If still not available, try to parse from display format
+      // Format examples: "REF-1 to REF-4" or "REF-1-4 (Bundle)"
+      else if (displayText) {
+        // Check for "to" format: "X-1 to X-4"
+        const toMatch = displayText.match(/\s+to\s+/i);
+        if (toMatch) {
+          // Split by " to " and extract the last number after the last dash from each part
+          const parts = displayText.split(/\s+to\s+/i);
+          if (parts.length === 2) {
+            // Extract number after last dash in first part (e.g., "2.8L126JAN19-R09-GT0.9.H0.1-1" -> 1)
+            // Match all -(\d+) patterns and take the last one
+            const firstPartMatches = parts[0].match(/-(\d+)/g);
+            // Extract number after last dash in second part (e.g., "2.8L126JAN19-R09-GT0.9.H0.1-4 [Bag]" -> 4)
+            const secondPartMatches = parts[1].match(/-(\d+)/g);
+            
+            if (firstPartMatches && firstPartMatches.length > 0 && secondPartMatches && secondPartMatches.length > 0) {
+              // Get the last match from each part (the roll number)
+              const firstLastMatch = firstPartMatches[firstPartMatches.length - 1].match(/-(\d+)/);
+              const secondLastMatch = secondPartMatches[secondPartMatches.length - 1].match(/-(\d+)/);
+              
+              if (firstLastMatch && secondLastMatch) {
+                const startNum = parseInt(firstLastMatch[1]);
+                const endNum = parseInt(secondLastMatch[1]);
+                if (!isNaN(startNum) && !isNaN(endNum) && endNum >= startNum) {
+                  rollCount = endNum - startNum + 1;
+                }
+              }
+            }
+          }
+        }
+        // Check for dash-separated range format: "REF-1-4 (Bundle)"
+        else {
+          const dashRangeMatch = displayText.match(/-(\d+)-(\d+)\s*\(/i);
+          if (dashRangeMatch) {
+            const startNum = parseInt(dashRangeMatch[1]);
+            const endNum = parseInt(dashRangeMatch[2]);
+            if (!isNaN(startNum) && !isNaN(endNum) && endNum >= startNum) {
+              rollCount = endNum - startNum + 1;
+            }
+          }
+        }
+      }
+    }
+    
+    // Final fallback
+    rollCount = rollCount || 1;
     
     const option = document.createElement('div');
     option.className = 'reference-option' + (isBundle ? ' bundle-option' : '');
@@ -1637,7 +1623,62 @@ function selectCNCReferenceOption(ref) {
 function selectCNCReferenceFromDropdown(ref) {
   const maxRolls = getMaxRolls();
   const currentRollCount = getCurrentTotalRollCount();
-  const rollCount = ref.roll_count || 1;
+  
+  // Calculate roll count: use roll_count from API, or calculate from bundle_refs, or parse from display
+  let rollCount = ref.roll_count;
+  
+  // If roll_count is not available, try to calculate it
+  if (!rollCount || rollCount === 1) {
+    // First, try to count from bundle_refs array
+    if (ref.is_bundle && ref.bundle_refs && Array.isArray(ref.bundle_refs) && ref.bundle_refs.length > 0) {
+      rollCount = ref.bundle_refs.length;
+    }
+    // If still not available, try to parse from display format
+    // Format examples: "REF-1 to REF-4" or "REF-1-4 (Bundle)"
+    else if (ref.display) {
+      // Check for "to" format: "X-1 to X-4"
+      const toMatch = ref.display.match(/\s+to\s+/i);
+      if (toMatch) {
+        // Split by " to " and extract the last number after the last dash from each part
+        const parts = ref.display.split(/\s+to\s+/i);
+        if (parts.length === 2) {
+          // Extract number after last dash in first part (e.g., "2.8L126JAN19-R09-GT0.9.H0.1-1" -> 1)
+          // Match all -(\d+) patterns and take the last one
+          const firstPartMatches = parts[0].match(/-(\d+)/g);
+          // Extract number after last dash in second part (e.g., "2.8L126JAN19-R09-GT0.9.H0.1-4 [Bag]" -> 4)
+          const secondPartMatches = parts[1].match(/-(\d+)/g);
+          
+          if (firstPartMatches && firstPartMatches.length > 0 && secondPartMatches && secondPartMatches.length > 0) {
+            // Get the last match from each part (the roll number)
+            const firstLastMatch = firstPartMatches[firstPartMatches.length - 1].match(/-(\d+)/);
+            const secondLastMatch = secondPartMatches[secondPartMatches.length - 1].match(/-(\d+)/);
+            
+            if (firstLastMatch && secondLastMatch) {
+              const startNum = parseInt(firstLastMatch[1]);
+              const endNum = parseInt(secondLastMatch[1]);
+              if (!isNaN(startNum) && !isNaN(endNum) && endNum >= startNum) {
+                rollCount = endNum - startNum + 1;
+              }
+            }
+          }
+        }
+      }
+      // Check for dash-separated range format: "REF-1-4 (Bundle)"
+      else {
+        const dashRangeMatch = ref.display.match(/-(\d+)-(\d+)\s*\(/i);
+        if (dashRangeMatch) {
+          const startNum = parseInt(dashRangeMatch[1]);
+          const endNum = parseInt(dashRangeMatch[2]);
+          if (!isNaN(startNum) && !isNaN(endNum) && endNum >= startNum) {
+            rollCount = endNum - startNum + 1;
+          }
+        }
+      }
+    }
+  }
+  
+  // Final fallback
+  rollCount = rollCount || 1;
   
   // Check if adding this reference would exceed the limit
   // Only show warning for CNC-01/CNC-02, not for Custom (which allows 100 rolls)
@@ -1723,7 +1764,62 @@ function addCNCReference() {
     // Check if adding this reference would exceed the limit before calling selectCNCReferenceFromDropdown
     const maxRolls = getMaxRolls();
     const currentRollCount = getCurrentTotalRollCount();
-    const rollCount = matchedRef.roll_count || 1;
+    
+    // Calculate roll count: use roll_count from API, or calculate from bundle_refs, or parse from display
+    let rollCount = matchedRef.roll_count;
+    
+    // If roll_count is not available, try to calculate it
+    if (!rollCount || rollCount === 1) {
+      // First, try to count from bundle_refs array
+      if (matchedRef.is_bundle && matchedRef.bundle_refs && Array.isArray(matchedRef.bundle_refs) && matchedRef.bundle_refs.length > 0) {
+        rollCount = matchedRef.bundle_refs.length;
+      }
+      // If still not available, try to parse from display format
+      // Format examples: "REF-1 to REF-4" or "REF-1-4 (Bundle)"
+      else if (matchedRef.display) {
+        // Check for "to" format: "X-1 to X-4"
+        const toMatch = matchedRef.display.match(/\s+to\s+/i);
+        if (toMatch) {
+          // Split by " to " and extract the last number after the last dash from each part
+          const parts = matchedRef.display.split(/\s+to\s+/i);
+          if (parts.length === 2) {
+            // Extract number after last dash in first part (e.g., "2.8L126JAN19-R09-GT0.9.H0.1-1" -> 1)
+            // Match all -(\d+) patterns and take the last one
+            const firstPartMatches = parts[0].match(/-(\d+)/g);
+            // Extract number after last dash in second part (e.g., "2.8L126JAN19-R09-GT0.9.H0.1-4 [Bag]" -> 4)
+            const secondPartMatches = parts[1].match(/-(\d+)/g);
+            
+            if (firstPartMatches && firstPartMatches.length > 0 && secondPartMatches && secondPartMatches.length > 0) {
+              // Get the last match from each part (the roll number)
+              const firstLastMatch = firstPartMatches[firstPartMatches.length - 1].match(/-(\d+)/);
+              const secondLastMatch = secondPartMatches[secondPartMatches.length - 1].match(/-(\d+)/);
+              
+              if (firstLastMatch && secondLastMatch) {
+                const startNum = parseInt(firstLastMatch[1]);
+                const endNum = parseInt(secondLastMatch[1]);
+                if (!isNaN(startNum) && !isNaN(endNum) && endNum >= startNum) {
+                  rollCount = endNum - startNum + 1;
+                }
+              }
+            }
+          }
+        }
+        // Check for dash-separated range format: "REF-1-4 (Bundle)"
+        else {
+          const dashRangeMatch = matchedRef.display.match(/-(\d+)-(\d+)\s*\(/i);
+          if (dashRangeMatch) {
+            const startNum = parseInt(dashRangeMatch[1]);
+            const endNum = parseInt(dashRangeMatch[2]);
+            if (!isNaN(startNum) && !isNaN(endNum) && endNum >= startNum) {
+              rollCount = endNum - startNum + 1;
+            }
+          }
+        }
+      }
+    }
+    
+    // Final fallback
+    rollCount = rollCount || 1;
     
     if ((currentRollCount + rollCount) > maxRolls) {
       const cncMachineId = document.getElementById('cnc_machine_id');

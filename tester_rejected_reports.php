@@ -76,12 +76,28 @@ $rejectedByCase = "
 $rejectedReports = [];
 
 // 1. Water Permeability Tests
-$result = $conn->query("SELECT id, 'water_perm' as type, 'Water Permeability Test' as test_name, report_number, 
-    test_date, test_performed_by as tested_by, status, updated_at, remarks,
-    COALESCE(checked_by, approved_by, '') as rejected_by
-    FROM water_permeability_tests 
-    WHERE status IN ('rejected', 'rejected_by_checker') AND reporter_id = $current_user_id
-    ORDER BY updated_at DESC");
+$refColCheck = $conn->query("SHOW COLUMNS FROM water_permeability_tests LIKE 'reference_number'");
+$hasRefCol = ($refColCheck && $refColCheck->num_rows > 0);
+$bundleColCheck = $conn->query("SHOW COLUMNS FROM water_permeability_tests LIKE 'bundle_reference'");
+$hasBundleCol = ($bundleColCheck && $bundleColCheck->num_rows > 0);
+$bundleSelect = $hasBundleCol ? ", COALESCE(wpt.bundle_reference, '') as bundle_reference" : ", '' as bundle_reference";
+
+$result = $conn->query("SELECT wpt.id, 'water_perm' as type, 'Water Permeability Test' as test_name, wpt.report_number, 
+    wpt.test_date, wpt.test_performed_by as tested_by, wpt.status, wpt.updated_at, wpt.remarks,
+    COALESCE(wpt.checked_by, wpt.approved_by, '') as rejected_by,
+    " . ($hasRefCol ? "COALESCE(wpt.reference_number, '') as reference_number" : "'' as reference_number") . "
+    $bundleSelect,
+    COALESCE(re.reference_number, wpt.reference_number, '') as full_reference
+    FROM water_permeability_tests wpt
+    LEFT JOIN roll_entry re ON (
+        re.reference_number = wpt.reference_number 
+        OR re.reference_number LIKE CONCAT(wpt.reference_number, '-%')
+        OR wpt.reference_number LIKE CONCAT(re.reference_number, '-%')
+        OR (LENGTH(wpt.reference_number) <= 3 AND re.reference_number LIKE CONCAT('%', wpt.reference_number, '%'))
+    )
+    WHERE wpt.status IN ('rejected', 'rejected_by_checker') AND wpt.reporter_id = $current_user_id
+    GROUP BY wpt.id
+    ORDER BY wpt.updated_at DESC");
 if ($result) {
     while ($row = $result->fetch_assoc()) {
         $rejectedReports[] = $row;
@@ -89,9 +105,18 @@ if ($result) {
 }
 
 // 2. Characteristics Tests
+$refColCheck = $conn->query("SHOW COLUMNS FROM characteristics_tests LIKE 'reference_number'");
+$hasRefCol = ($refColCheck && $refColCheck->num_rows > 0);
+$refSelect = $hasRefCol ? "COALESCE(reference_number, '') as reference_number" : "'' as reference_number";
+$bundleColCheck = $conn->query("SHOW COLUMNS FROM characteristics_tests LIKE 'bundle_reference'");
+$hasBundleCol = ($bundleColCheck && $bundleColCheck->num_rows > 0);
+$bundleSelect = $hasBundleCol ? ", COALESCE(bundle_reference, '') as bundle_reference" : ", '' as bundle_reference";
+
 $result = $conn->query("SELECT id, 'characteristics' as type, 'Characteristics Test (ISO 12956)' as test_name, report_number, 
     DATE(sample_tested) as test_date, test_performed_by as tested_by, status, updated_at, remarks,
-    COALESCE(checker_name, approver_name, '') as rejected_by
+    COALESCE(checker_name, approver_name, '') as rejected_by,
+    $refSelect
+    $bundleSelect
     FROM characteristics_tests 
     WHERE status IN ('rejected', 'rejected_by_checker') AND reporter_id = $current_user_id
     ORDER BY updated_at DESC");
@@ -128,11 +153,43 @@ if ($result) {
 }
 
 // 5. Sun Test Reports
+$refColCheck = $conn->query("SHOW COLUMNS FROM sun_test_reports LIKE 'reference_number'");
+$hasRefCol = ($refColCheck && $refColCheck->num_rows > 0);
+$refSelect = $hasRefCol ? "COALESCE(reference_number, '') as reference_number" : "'' as reference_number";
+$bundleColCheck = $conn->query("SHOW COLUMNS FROM sun_test_reports LIKE 'bundle_reference'");
+$hasBundleCol = ($bundleColCheck && $bundleColCheck->num_rows > 0);
+$bundleSelect = $hasBundleCol ? ", COALESCE(bundle_reference, '') as bundle_reference" : ", '' as bundle_reference";
+
 $result = $conn->query("SELECT id, 'sun' as type, 'Sun/UV Test' as test_name, report_number, 
     test_start_date as test_date, test_performed_by as tested_by, status, updated_at, remarks,
-    '' as rejected_by
+    COALESCE(approved_by, '') as rejected_by,
+    $refSelect
+    $bundleSelect
     FROM sun_test_reports 
     WHERE status IN ('rejected', 'rejected_by_checker') AND reporter_id = $current_user_id
+    ORDER BY updated_at DESC");
+if ($result) {
+    while ($row = $result->fetch_assoc()) {
+        $rejectedReports[] = $row;
+    }
+}
+
+// 5a. UV Test Reports (Weathering Exposure Reports)
+$refColCheck = $conn->query("SHOW COLUMNS FROM weathering_exposure_reports LIKE 'reference'");
+$hasRefCol = ($refColCheck && $refColCheck->num_rows > 0);
+$refSelect = $hasRefCol ? "COALESCE(reference, '') as reference_number" : "'' as reference_number";
+$bundleColCheck = $conn->query("SHOW COLUMNS FROM weathering_exposure_reports LIKE 'bundle_reference'");
+$hasBundleCol = ($bundleColCheck && $bundleColCheck->num_rows > 0);
+$bundleSelect = $hasBundleCol ? ", COALESCE(bundle_reference, '') as bundle_reference" : ", '' as bundle_reference";
+
+$result = $conn->query("SELECT id, 'uv_test' as type, 'UV Test (Weathering Exposure)' as test_name, report_number, 
+    test_start_date as test_date, test_performed_by as tested_by, status, updated_at, 
+    COALESCE(remarks, '') as remarks,
+    COALESCE(approved_by, '') as rejected_by,
+    $refSelect
+    $bundleSelect
+    FROM weathering_exposure_reports 
+    WHERE status = 'rejected' AND reporter_id = $current_user_id
     ORDER BY updated_at DESC");
 if ($result) {
     while ($row = $result->fetch_assoc()) {
@@ -189,6 +246,7 @@ $result = $conn->query("SELECT qto.id, 'qc_test_order' as type,
     qto.status, 
     qto.updated_at, 
     qto.sample_reference_id,
+    qto.sample_reference_id as reference_number,
     qto.test_data,
     {$qcRemarksSelect} as remarks,
     {$selectCheckedBy} as checked_by,
@@ -263,75 +321,183 @@ if ($result) {
     }
 }
 
-// Separate QC test orders from other reports for bulk grouping
-$qc_test_orders = [];
-$other_reports = [];
+// Helper function to extract base reference (remove bundle suffix like -1, -2, etc.)
+$extractBaseRef = function($ref) {
+    if (empty($ref)) return '';
+    return preg_replace('/-\d+$/', '', trim($ref));
+};
 
-foreach ($rejectedReports as $report) {
-    if ($report['type'] === 'qc_test_order') {
-        $qc_test_orders[] = $report;
-    } else {
-        $other_reports[] = $report;
-    }
-}
+// Group all reports by reference number
+// First pass: Group by bundle_reference (pipe-separated range format) for water_permeability, characteristics, sun, and UV tests
+$groupedReports = [];
+$processed_indices = [];
+$bulk_groups = [];
 
-// Group QC test orders by bulk reference range
-$bulk_reference_groups = [];
-$single_qc_reports = [];
-
-foreach ($qc_test_orders as $report) {
-    $test_data = json_decode($report['test_data'] ?? '{}', true);
+foreach ($rejectedReports as $idx => $report) {
+    // Check for bundle_reference with pipe separator (range format: from|to)
+    $bundle_ref = trim($report['bundle_reference'] ?? '');
     
-    // Check if this is a bulk reference submission
-    if (isset($test_data['is_bulk_reference']) && $test_data['is_bulk_reference'] && 
-        isset($test_data['bulk_from_reference']) && isset($test_data['bulk_to_reference'])) {
-        $from_ref = $test_data['bulk_from_reference'];
-        $to_ref = $test_data['bulk_to_reference'];
-        $bulk_key = $from_ref . '|' . $to_ref;
+    // For QC test orders, check test_data for bulk reference metadata
+    if ($report['type'] === 'qc_test_order' && isset($report['test_data'])) {
+        $test_data = json_decode($report['test_data'] ?? '{}', true);
+        if (is_string($test_data)) {
+            $test_data = json_decode($test_data, true) ?? [];
+        }
         
-        if (!isset($bulk_reference_groups[$bulk_key])) {
-            $bulk_reference_groups[$bulk_key] = [
-                'from' => $from_ref,
-                'to' => $to_ref,
-                'count' => $test_data['bulk_reference_count'] ?? 0,
-                'reports' => []
-            ];
+        if (isset($test_data['is_bulk_reference']) && $test_data['is_bulk_reference'] &&
+            isset($test_data['bulk_from_reference']) && isset($test_data['bulk_to_reference'])) {
+            $from_ref = trim($test_data['bulk_from_reference']);
+            $to_ref = trim($test_data['bulk_to_reference']);
+            
+            // If from and to are the same, treat as individual
+            if ($from_ref === $to_ref) {
+                $reference = $from_ref;
+                if (!isset($groupedReports[$reference])) {
+                    $groupedReports[$reference] = [];
+                }
+                $groupedReports[$reference][] = $report;
+                $processed_indices[] = $idx;
+            } else {
+                $bulk_key = $from_ref . '|' . $to_ref; // Use from|to as key
+                if (!isset($bulk_groups[$bulk_key])) {
+                    $bulk_groups[$bulk_key] = [
+                        'from' => $from_ref,
+                        'to' => $to_ref,
+                        'reports' => []
+                    ];
+                }
+                $bulk_groups[$bulk_key]['reports'][] = $report;
+                $processed_indices[] = $idx;
+            }
         }
-        $bulk_reference_groups[$bulk_key]['reports'][] = $report;
-    } else {
-        // Single report or no bulk data
-        $single_qc_reports[] = $report;
+    }
+    // For water_permeability, characteristics, sun, and UV tests, check bundle_reference
+    elseif (in_array($report['type'], ['water_perm', 'characteristics', 'sun', 'uv_test']) && 
+        !empty($bundle_ref) && strpos($bundle_ref, '|') !== false) {
+        $parts = explode('|', $bundle_ref);
+        if (count($parts) === 2) {
+            $from_ref = trim($parts[0]);
+            $to_ref = trim($parts[1]);
+            
+            // If from and to are the same, treat as individual
+            if ($from_ref === $to_ref) {
+                $reference = $from_ref;
+                if (!isset($groupedReports[$reference])) {
+                    $groupedReports[$reference] = [];
+                }
+                $groupedReports[$reference][] = $report;
+                $processed_indices[] = $idx;
+            } else {
+                $bulk_key = $bundle_ref; // Use bundle_reference as key
+                if (!isset($bulk_groups[$bulk_key])) {
+                    $bulk_groups[$bulk_key] = [
+                        'from' => $from_ref,
+                        'to' => $to_ref,
+                        'reports' => []
+                    ];
+                }
+                $bulk_groups[$bulk_key]['reports'][] = $report;
+                $processed_indices[] = $idx;
+            }
+        }
     }
 }
 
-// Group bulk reports by test name within each bulk reference group
-$grouped_bulk_reports = [];
-foreach ($bulk_reference_groups as $bulk_key => $bulk_group) {
-    $test_groups = [];
-    foreach ($bulk_group['reports'] as $report) {
-        $test_key = $report['test_name'];
-        if (!isset($test_groups[$test_key])) {
-            $test_groups[$test_key] = [];
-        }
-        $test_groups[$test_key][] = $report;
+// Second pass: Match remaining reports to existing bulk groups by bundle_reference or test_data
+foreach ($rejectedReports as $idx => $report) {
+    if (in_array($idx, $processed_indices)) {
+        continue;
     }
-    $grouped_bulk_reports[$bulk_key] = [
-        'from' => $bulk_group['from'],
-        'to' => $bulk_group['to'],
-        'count' => $bulk_group['count'],
-        'test_groups' => $test_groups
-    ];
+    
+    // For QC test orders, check test_data for bulk reference
+    if ($report['type'] === 'qc_test_order' && isset($report['test_data'])) {
+        $test_data = json_decode($report['test_data'] ?? '{}', true);
+        if (is_string($test_data)) {
+            $test_data = json_decode($test_data, true) ?? [];
+        }
+        
+        if (isset($test_data['is_bulk_reference']) && $test_data['is_bulk_reference'] &&
+            isset($test_data['bulk_from_reference']) && isset($test_data['bulk_to_reference'])) {
+            $from_ref = trim($test_data['bulk_from_reference']);
+            $to_ref = trim($test_data['bulk_to_reference']);
+            $bulk_key = $from_ref . '|' . $to_ref;
+            
+            if (isset($bulk_groups[$bulk_key])) {
+                $bulk_groups[$bulk_key]['reports'][] = $report;
+                $processed_indices[] = $idx;
+            }
+        }
+    }
+    // For other test types, check bundle_reference
+    else {
+        $bundle_ref = trim($report['bundle_reference'] ?? '');
+        if (!empty($bundle_ref) && isset($bulk_groups[$bundle_ref])) {
+            $bulk_groups[$bundle_ref]['reports'][] = $report;
+            $processed_indices[] = $idx;
+        }
+    }
 }
 
-// Sort other reports by updated_at descending
-usort($other_reports, function($a, $b) {
-    return strtotime($b['updated_at']) - strtotime($a['updated_at']);
-});
+// Add bulk groups to groupedReports (showing only one entry per range - the first/most recent)
+foreach ($bulk_groups as $bulk_key => $bulk_group) {
+    // Sort reports by updated_at descending and take only the first one for display
+    usort($bulk_group['reports'], function($a, $b) {
+        return strtotime($b['updated_at']) - strtotime($a['updated_at']);
+    });
+    
+    // Use bundle_reference as the key for grouping
+    $groupedReports[$bulk_key] = $bulk_group['reports'];
+}
 
-// Sort single QC reports by updated_at descending
-usort($single_qc_reports, function($a, $b) {
-    return strtotime($b['updated_at']) - strtotime($a['updated_at']);
-});
+// Third pass: Group remaining reports by reference number (individual reports)
+foreach ($rejectedReports as $idx => $report) {
+    if (in_array($idx, $processed_indices)) {
+        continue; // Already processed
+    }
+    
+    $reference = 'Other Reports';
+    
+    // Get reference number based on report type
+    if ($report['type'] === 'qc_test_order' && isset($report['sample_reference_id'])) {
+        // For QC test orders, extract base reference for better matching
+        $sample_ref = trim($report['sample_reference_id'] ?? '');
+        $reference = !empty($sample_ref) ? $extractBaseRef($sample_ref) : 'Other Reports';
+    } elseif (isset($report['reference_number']) && !empty($report['reference_number'])) {
+        // For UV test and Sun test, reference_number is already set - use it directly
+        if ($report['type'] === 'uv_test' || $report['type'] === 'sun') {
+            $reference = $report['reference_number'];
+        }
+        // For water permeability tests, use full_reference if available
+        elseif ($report['type'] === 'water_perm' && isset($report['full_reference']) && !empty($report['full_reference'])) {
+            if (strlen(trim($report['full_reference'])) > strlen(trim($report['reference_number']))) {
+                $reference = $report['full_reference'];
+            } else {
+                $reference = $report['reference_number'];
+            }
+        } else {
+            $reference = $report['reference_number'];
+        }
+        // Normalize reference (extract base) for consistent matching - but only if not UV/Sun
+        if ($report['type'] !== 'uv_test' && $report['type'] !== 'sun') {
+            $reference = $extractBaseRef($reference);
+        } else {
+            // For UV/Sun, still normalize to remove bundle suffixes if any
+            $reference = $extractBaseRef($reference);
+        }
+    }
+    
+    if (!isset($groupedReports[$reference])) {
+        $groupedReports[$reference] = [];
+    }
+    $groupedReports[$reference][] = $report;
+}
+
+// Sort reports within each group by updated_at descending
+foreach ($groupedReports as $ref => $reports) {
+    usort($groupedReports[$ref], function($a, $b) {
+        return strtotime($b['updated_at']) - strtotime($a['updated_at']);
+    });
+}
 
 $totalRejected = count($rejectedReports);
 ?>
@@ -458,6 +624,7 @@ $totalRejected = count($rejectedReports);
     .badge-fiber { background: #f3e5f5; color: #7b1fa2; }
     .badge-sewing_thread { background: #ede7f6; color: #5e35b1; }
     .badge-sun { background: #fff9c4; color: #f57f17; }
+    .badge-uv_test { background: #e1f5fe; color: #0277bd; }
     .badge-fabric_pre { background: #e3f2fd; color: #1976d2; }
     .badge-fabric_after { background: #e8f5e9; color: #388e3c; }
     .badge-qc_entry { background: #fce4ec; color: #c2185b; }
@@ -524,23 +691,68 @@ $totalRejected = count($rejectedReports);
         
         <?php if ($totalRejected > 0): ?>
         
-        <?php 
-        // Display bulk reference groups first
-        $counter = 1;
-        foreach ($grouped_bulk_reports as $bulk_key => $bulk_group): 
+        <?php foreach ($groupedReports as $reference => $reports): 
+            // Check if this is a bulk reference range (bundle_reference with pipe separator or QC test order test_data)
+            $hasReferenceRange = false;
+            $referenceRangeDisplay = '';
+            
+            // Check if reference is a bundle_reference format (from|to) - this means it's a bulk group
+            if (strpos($reference, '|') !== false) {
+                $parts = explode('|', $reference);
+                if (count($parts) === 2) {
+                    $from_ref = trim($parts[0]);
+                    $to_ref = trim($parts[1]);
+                    if ($from_ref !== $to_ref) {
+                        $hasReferenceRange = true;
+                        $referenceRangeDisplay = htmlspecialchars($from_ref) . ' to ' . htmlspecialchars($to_ref);
+                    }
+                }
+            }
+            
+            // If no range detected yet, check for QC test orders with reference ranges in test_data
+            if (!$hasReferenceRange) {
+                foreach ($reports as $report) {
+                    if ($report['type'] === 'qc_test_order' && isset($report['test_data'])) {
+                        $test_data = json_decode($report['test_data'] ?? '{}', true);
+                        if (is_string($test_data)) {
+                            $test_data = json_decode($test_data, true) ?? [];
+                        }
+                        if (isset($test_data['is_bulk_reference']) && $test_data['is_bulk_reference'] &&
+                            isset($test_data['bulk_from_reference']) && isset($test_data['bulk_to_reference']) &&
+                            !empty($test_data['bulk_from_reference']) && !empty($test_data['bulk_to_reference'])) {
+                            $from_ref = trim($test_data['bulk_from_reference']);
+                            $to_ref = trim($test_data['bulk_to_reference']);
+                            if ($from_ref !== $to_ref) {
+                                $hasReferenceRange = true;
+                                $referenceRangeDisplay = htmlspecialchars($from_ref) . ' to ' . htmlspecialchars($to_ref);
+                                break; // Found a range, no need to check further
+                            }
+                        }
+                    }
+                }
+            }
+            
+            if (!$hasReferenceRange) {
+                // No range, use the grouped reference
+                $referenceRangeDisplay = htmlspecialchars($reference);
+            }
+            
+            // For bulk ranges, show only the first (most recent) report
+            $displayReports = $hasReferenceRange ? [reset($reports)] : $reports;
         ?>
         <div style="margin-bottom: 30px; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
             <div style="background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%); color: white; padding: 15px 20px; font-weight: 600; font-size: 16px;">
-                <i class="fas fa-tags"></i> Reference Range: <?php echo htmlspecialchars($bulk_group['from']); ?> to <?php echo htmlspecialchars($bulk_group['to']); ?>
-                <span style="float: right; font-size: 14px; opacity: 0.9;"><?php echo count(array_merge(...array_values($bulk_group['test_groups']))); ?> report(s) | <?php echo $bulk_group['count']; ?> reference(s)</span>
+                <i class="fas fa-tag"></i> <?php echo $hasReferenceRange ? 'Reference Range:' : 'Reference:'; ?> <?php echo $referenceRangeDisplay; ?>
+                <span style="float: right; font-size: 14px; opacity: 0.9;"><?php echo count($reports); ?> report(s)</span>
             </div>
             <div class="table-wrapper">
                 <table>
                     <thead>
                         <tr>
-                            <th>#</th>
-                            <th>Test Type</th>
-                            <th>Reference Range</th>
+                            <th style="min-width:200px;">Test Type & Method</th>
+                            <th>Report Number</th>
+                            <th>Test Date</th>
+                            <th>Tested By</th>
                             <th>Rejected By</th>
                             <th>Rejection Reason</th>
                             <th>Last Updated</th>
@@ -548,40 +760,84 @@ $totalRejected = count($rejectedReports);
                         </tr>
                     </thead>
                     <tbody>
-                        <?php foreach ($bulk_group['test_groups'] as $test_name => $test_reports): 
-                            $first_report = $test_reports[0];
-                            $earliest_date = min(array_map(function($r) { return strtotime($r['updated_at']); }, $test_reports));
-                            $latest_date = max(array_map(function($r) { return strtotime($r['updated_at']); }, $test_reports));
+                        <?php foreach ($displayReports as $report): 
+                            // Get view link based on report type
+                            $view_link = '';
+                            switch($report['type']) {
+                                case 'fabric_pre':
+                                    $view_link = 'forms/edit_fabric_pre_prod.php?id=' . $report['id'];
+                                    break;
+                                case 'water_perm':
+                                    $view_link = 'forms/edit_water_permeability.php?id=' . $report['id'];
+                                    break;
+                                case 'characteristics':
+                                    $view_link = 'forms/edit_characteristics.php?id=' . $report['id'];
+                                    break;
+                                case 'fiber':
+                                    $view_link = 'forms/fiber_test_report.php?id=' . $report['id'];
+                                    break;
+                                case 'sewing_thread':
+                                    $view_link = 'forms/sewing_thread_report.php?id=' . $report['id'];
+                                    break;
+                                case 'sun':
+                                    $view_link = 'forms/edit_sun_report.php?id=' . $report['id'];
+                                    break;
+                                case 'uv_test':
+                                    $view_link = 'forms/edit_uv_report.php?id=' . $report['id'];
+                                    break;
+                                case 'fabric_after':
+                                    $view_link = 'forms/edit_fabric_after_prod.php?id=' . $report['id'];
+                                    break;
+                                case 'qc_entry':
+                                    $view_link = 'forms/qc_entry.php?edit=' . $report['id'];
+                                    break;
+                                case 'qc_test_order':
+                                    $view_link = 'forms/qc_test_order.php?edit=' . $report['id'] . '&return=tester_rejected_reports';
+                                    break;
+                                case 'tenacity_yarn':
+                                    $view_link = 'forms/tenacity_yarn_report.php?id=' . $report['id'];
+                                    break;
+                                case 'tenacity_fiber':
+                                    $view_link = 'forms/tenacity_fiber_report.php?id=' . $report['id'];
+                                    break;
+                                case 'cut_length_fiber':
+                                    $view_link = 'forms/cut_length_fiber_report.php?id=' . $report['id'];
+                                    break;
+                                case 'fineness_fiber':
+                                    $view_link = 'forms/fineness_fiber_report.php?id=' . $report['id'];
+                                    break;
+                            }
                             
-                            // Get view link for first report (all should have same type)
-                            $view_link = 'forms/qc_test_order.php?edit=' . $first_report['id'];
+                            $badge_class = 'badge-' . $report['type'];
                         ?>
                         <tr>
-                            <td><?php echo $counter++; ?></td>
                             <td>
-                                <span class="test-badge badge-qc_test_order">
-                                    <?php echo htmlspecialchars($test_name); ?>
+                                <span class="test-badge <?php echo $badge_class; ?>">
+                                    <?php 
+                                    // For QC Test Orders, split test name and method for better display
+                                    if ($report['type'] === 'qc_test_order' && strpos($report['test_name'], '(') !== false) {
+                                        preg_match('/^(.+?)\s*\(([^)]+)\)$/', $report['test_name'], $matches);
+                                        if ($matches) {
+                                            echo htmlspecialchars($matches[1]);
+                                            echo '<br><small style="font-size:10px; opacity:0.8;">' . htmlspecialchars($matches[2]) . '</small>';
+                                        } else {
+                                            echo htmlspecialchars($report['test_name']);
+                                        }
+                                    } else {
+                                        echo htmlspecialchars($report['test_name']);
+                                    }
+                                    ?>
                                 </span>
-                                <br><span style="font-size: 11px; color: #6c757d;"><?php echo count($test_reports); ?> report(s)</span>
                             </td>
-                            <td>
-                                <?php echo htmlspecialchars($bulk_group['from']); ?> to <?php echo htmlspecialchars($bulk_group['to']); ?>
-                                <br><span style="font-size: 11px; color: #6c757d;">(<?php echo $bulk_group['count']; ?> references)</span>
-                            </td>
-                            <td><?php echo htmlspecialchars($first_report['rejected_by'] ?? 'N/A'); ?></td>
-                            <td><?php echo htmlspecialchars(substr($first_report['remarks'] ?? 'No reason', 0, 100)); ?></td>
-                            <td>
-                                <?php 
-                                if ($earliest_date == $latest_date) {
-                                    echo date('M d, Y H:i', $earliest_date);
-                                } else {
-                                    echo date('M d, Y H:i', $earliest_date) . '<br><span style="font-size: 11px; color: #6c757d;">to ' . date('M d, Y H:i', $latest_date) . '</span>';
-                                }
-                                ?>
-                            </td>
+                            <td><strong><?php echo htmlspecialchars($report['report_number']); ?></strong></td>
+                            <td><?php echo date('M d, Y', strtotime($report['test_date'])); ?></td>
+                            <td><?php echo htmlspecialchars($report['tested_by'] ?? 'N/A'); ?></td>
+                            <td><?php echo htmlspecialchars($report['rejected_by'] ?? 'N/A'); ?></td>
+                            <td><?php echo htmlspecialchars(substr($report['remarks'] ?? 'No reason', 0, 100)); ?></td>
+                            <td><?php echo date('M d, Y H:i', strtotime($report['updated_at'])); ?></td>
                             <td>
                                 <a href="<?php echo $view_link; ?>" class="action-btn btn-resubmit">
-                                    <i class="fas fa-edit"></i> Resubmit All (<?php echo count($test_reports); ?>)
+                                    <i class="fas fa-edit"></i> Resubmit
                                 </a>
                             </td>
                         </tr>
@@ -591,123 +847,6 @@ $totalRejected = count($rejectedReports);
             </div>
         </div>
         <?php endforeach; ?>
-        
-        <?php 
-        // Display single QC reports and other reports
-        if (!empty($single_qc_reports) || !empty($other_reports)): 
-        ?>
-        <div class="table-wrapper">
-            <table>
-                <thead>
-                    <tr>
-                        <th>#</th>
-                        <th>Test Type</th>
-                        <th>Report Number</th>
-                        <th>Test Date</th>
-                        <th>Rejected By</th>
-                        <th>Rejection Reason</th>
-                        <th>Last Updated</th>
-                        <th>Action</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php 
-                    // Display single QC reports
-                    foreach ($single_qc_reports as $report):
-                        $view_link = 'forms/qc_test_order.php?edit=' . $report['id'];
-                    ?>
-                    <tr>
-                        <td><?php echo $counter++; ?></td>
-                        <td>
-                            <span class="test-badge badge-<?php echo $report['type']; ?>">
-                                <?php echo htmlspecialchars($report['test_name']); ?>
-                            </span>
-                        </td>
-                        <td><strong><?php echo htmlspecialchars($report['report_number']); ?></strong></td>
-                        <td><?php echo date('M d, Y', strtotime($report['test_date'])); ?></td>
-                        <td><?php echo htmlspecialchars($report['rejected_by'] ?? 'N/A'); ?></td>
-                        <td><?php echo htmlspecialchars(substr($report['remarks'] ?? 'No reason', 0, 100)); ?></td>
-                        <td><?php echo date('M d, Y H:i', strtotime($report['updated_at'])); ?></td>
-                        <td>
-                            <a href="<?php echo $view_link; ?>" class="action-btn btn-resubmit">
-                                <i class="fas fa-edit"></i> Resubmit
-                            </a>
-                        </td>
-                    </tr>
-                    <?php endforeach; ?>
-                    
-                    <?php 
-                    // Display other reports (non-QC test orders)
-                    foreach ($other_reports as $report): 
-                        $view_link = '';
-                        switch($report['type']) {
-                            case 'fabric_pre':
-                                $view_link = 'forms/edit_fabric_pre_prod.php?id=' . $report['id'];
-                                break;
-                            case 'water_perm':
-                                $view_link = 'forms/edit_water_permeability.php?edit=' . $report['id'];
-                                break;
-                            case 'characteristics':
-                                $view_link = 'forms/edit_characteristics.php?id=' . $report['id'];
-                                break;
-                            case 'fiber':
-                                $view_link = 'forms/fiber_test_report.php?id=' . $report['id'];
-                                break;
-                            case 'sewing_thread':
-                                $view_link = 'forms/sewing_thread_report.php?id=' . $report['id'];
-                                break;
-                            case 'sun':
-                                $view_link = 'forms/edit_sun_report.php?id=' . $report['id'];
-                                break;
-                            case 'fabric_after':
-                                $view_link = 'forms/edit_fabric_after_prod.php?id=' . $report['id'];
-                                break;
-                            case 'qc_entry':
-                                $view_link = 'forms/qc_entry.php?edit=' . $report['id'];
-                                break;
-                            case 'qc_test_order':
-                                $view_link = 'forms/qc_test_order.php?edit=' . $report['id'];
-                                break;
-                            case 'tenacity_yarn':
-                                $view_link = 'forms/tenacity_yarn_report.php?id=' . $report['id'];
-                                break;
-                            case 'tenacity_fiber':
-                                $view_link = 'forms/tenacity_fiber_report.php?id=' . $report['id'];
-                                break;
-                            case 'cut_length_fiber':
-                                $view_link = 'forms/cut_length_fiber_report.php?id=' . $report['id'];
-                                break;
-                            case 'fineness_fiber':
-                                $view_link = 'forms/fineness_fiber_report.php?id=' . $report['id'];
-                                break;
-                        }
-                    ?>
-                    <tr>
-                        <td><?php echo $counter++; ?></td>
-                        <td>
-                            <span class="test-badge badge-<?php echo $report['type']; ?>">
-                                <?php 
-                                // For QC Test Orders, show test name and method
-                                echo htmlspecialchars($report['test_name']); 
-                                ?>
-                            </span>
-                        </td>
-                        <td><strong><?php echo htmlspecialchars($report['report_number']); ?></strong></td>
-                        <td><?php echo date('M d, Y', strtotime($report['test_date'])); ?></td>
-                        <td><?php echo htmlspecialchars($report['rejected_by'] ?? 'N/A'); ?></td>
-                        <td><?php echo htmlspecialchars(substr($report['remarks'] ?? 'No reason', 0, 100)); ?></td>
-                        <td><?php echo date('M d, Y H:i', strtotime($report['updated_at'])); ?></td>
-                        <td>
-                            <a href="<?php echo $view_link; ?>" class="action-btn btn-resubmit">
-                                <i class="fas fa-edit"></i> Resubmit
-                            </a>
-                        </td>
-                    </tr>
-                    <?php endforeach; ?>
-                </tbody>
-            </table>
-        </div>
-        <?php endif; ?>
         
         <?php else: ?>
         <div class="empty-state">

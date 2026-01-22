@@ -53,38 +53,102 @@ $conn = SecurityConfig::getConnection();
 $defaultProject = getDefaultProject($conn);
 $projects = $defaultProject ? [$defaultProject] : [];
 
-// Performance: Defer approved materials loading - will load asynchronously after page render
-// Only show store entries where ALL 6 raw material tests are approved
+// Function to generate entry number (date-based sequential format)
+function generateFiberEntryNumber($conn) {
+    $now = new DateTime('now', new DateTimeZone('Asia/Dhaka'));
+    $hour = (int)$now->format('H');
+    
+    // If before 8 AM, use previous day's date
+    if ($hour < 8) {
+        $now->modify('-1 day');
+    }
+    
+    $dateKey = $now->format('Ymd');
+    
+    // Count actual entries for this day key (real-time)
+    $pattern = 'FE-' . $dateKey . '-%';
+    $countStmt = $conn->prepare("SELECT COUNT(*) as entry_count FROM fiber_entries WHERE entry_code LIKE ? AND (is_deleted = 0 OR is_deleted IS NULL)");
+    $countStmt->bind_param("s", $pattern);
+    $countStmt->execute();
+    $result = $countStmt->get_result();
+    
+    $counter = 1;
+    if ($result && $row = $result->fetch_assoc()) {
+        $counter = (int)$row['entry_count'] + 1;
+    }
+    $countStmt->close();
+    
+    return sprintf("FE-%s-%03d", $dateKey, $counter);
+}
+
+// Generate next entry number for display
+$display_entry_code = generateFiberEntryNumber($conn);
+
+// Only show material issue entry references in the dropdown
+// Exclude references that have already been used in fiber_entries
 $approvedMaterials = [];
-$refQuery = $conn->query("
+
+// Get material issue entries that haven't been fully used in fiber_entries
+// Show references if the full amount hasn't been consumed yet
+// Check which amount column exists in fiber_entries
+$feAmountCol = 'amount_kg';
+$feColCheck = $conn->query("SHOW COLUMNS FROM fiber_entries LIKE 'amount_kg'");
+if (!$feColCheck || $feColCheck->num_rows == 0) {
+    $feColCheck = $conn->query("SHOW COLUMNS FROM fiber_entries LIKE 'amount'");
+    if ($feColCheck && $feColCheck->num_rows > 0) {
+        $feAmountCol = 'amount';
+    } else {
+        $feColCheck = $conn->query("SHOW COLUMNS FROM fiber_entries LIKE 'total_amount'");
+        if ($feColCheck && $feColCheck->num_rows > 0) {
+            $feAmountCol = 'total_amount';
+        }
+    }
+}
+
+// Build the query to show material issue entries with remaining stock
+// Remaining stock = original issued amount - what's been used in fiber_entries
+$issueQuery = $conn->query("
     SELECT 
-        sre.entry_number,
-        sre.material_type,
-        sre.amount_kg as remaining_amount,
-        COALESCE(sre.original_amount_kg, sre.amount_kg) as original_amount,
-        sre.date_time as received_date,
-        'store' as source,
-        'approved' as approval_status
-    FROM store_received_entries sre
-    LEFT JOIN fineness_fiber_reports ff ON sre.entry_number COLLATE utf8mb4_unicode_ci = ff.store_entry_reference AND ff.status = 'approved'
-    LEFT JOIN cut_length_fiber_reports cl ON sre.entry_number COLLATE utf8mb4_unicode_ci = cl.store_entry_reference AND cl.status = 'approved'
-    LEFT JOIN tenacity_fiber_reports tf ON sre.entry_number COLLATE utf8mb4_unicode_ci = tf.store_entry_reference AND tf.status = 'approved'
-    LEFT JOIN tenacity_yarn_reports ty ON sre.entry_number COLLATE utf8mb4_unicode_ci = ty.store_entry_reference AND ty.status = 'approved'
-    LEFT JOIN fiber_test_reports ft ON sre.entry_number COLLATE utf8mb4_unicode_ci = ft.store_entry_reference AND ft.status = 'approved'
-    LEFT JOIN sewing_thread_reports st ON sre.entry_number COLLATE utf8mb4_unicode_ci = st.store_entry_reference AND st.status = 'approved'
-    WHERE ff.id IS NOT NULL 
-      AND cl.id IS NOT NULL 
-      AND tf.id IS NOT NULL 
-      AND ty.id IS NOT NULL 
-      AND ft.id IS NOT NULL 
-      AND st.id IS NOT NULL
-      AND sre.amount_kg > 0
-    GROUP BY sre.entry_number, sre.material_type, sre.amount_kg, sre.original_amount_kg, sre.date_time
-    ORDER BY sre.date_time DESC
+        sie.issue_number as entry_number,
+        sie.material_type,
+        sie.manufacturer_name,
+        sie.amount_kg as original_amount,
+        sie.date_time as received_date,
+        'material_issue' as source,
+        'issued' as approval_status,
+        COALESCE((
+            SELECT SUM(COALESCE(fe.$feAmountCol, 0))
+            FROM fiber_entries fe
+            WHERE fe.reference IS NOT NULL
+              AND fe.reference != ''
+              AND BINARY TRIM(fe.reference) = BINARY TRIM(sie.issue_number)
+              AND (fe.is_deleted = 0 OR fe.is_deleted IS NULL)
+        ), 0) as used_amount,
+        -- Calculate remaining stock: original issued amount - used in fiber entries
+        (sie.amount_kg - COALESCE((
+            SELECT SUM(COALESCE(fe.$feAmountCol, 0))
+            FROM fiber_entries fe
+            WHERE fe.reference IS NOT NULL
+              AND fe.reference != ''
+              AND BINARY TRIM(fe.reference) = BINARY TRIM(sie.issue_number)
+              AND (fe.is_deleted = 0 OR fe.is_deleted IS NULL)
+        ), 0)) as remaining_amount
+    FROM store_issue_entries sie
+    WHERE sie.amount_kg > 0
+      -- Only show entries that still have remaining stock
+      AND (sie.amount_kg - COALESCE((
+            SELECT SUM(COALESCE(fe.$feAmountCol, 0))
+            FROM fiber_entries fe
+            WHERE fe.reference IS NOT NULL
+              AND fe.reference != ''
+              AND BINARY TRIM(fe.reference) = BINARY TRIM(sie.issue_number)
+              AND (fe.is_deleted = 0 OR fe.is_deleted IS NULL)
+        ), 0)) > 0
+    ORDER BY sie.date_time DESC
     LIMIT 100
 ");
-if ($refQuery) {
-    while ($row = $refQuery->fetch_assoc()) {
+if ($issueQuery) {
+    while ($row = $issueQuery->fetch_assoc()) {
         $approvedMaterials[] = $row;
     }
 }
@@ -379,7 +443,12 @@ $recycledMaterials['swing'] = max(0, ($recycledTotals['swing'] ?? 0) - ($usedAmo
 
   <form id="fiberEntryForm">
 
-    <!-- Auto-generated Entry ID (hidden) -->
+    <!-- Entry Code (display only) -->
+    <div class="form-group">
+      <label>Entry Code:</label>
+      <input type="text" id="entry_code" value="<?php echo htmlspecialchars($display_entry_code); ?>" readonly class="readonly" style="background:#e8f5e9; font-weight:bold;">
+      <small style="color: #7f8c8d; font-size: 0.85em;">Auto-generated entry code</small>
+    </div>
 
     <!-- Hidden datetime + shift -->
     <input type="hidden" id="dateTime" name="dateTime">
@@ -397,19 +466,18 @@ $recycledMaterials['swing'] = max(0, ($recycledTotals['swing'] ?? 0) - ($usedAmo
       <input type="hidden" id="shiftIncharge" name="shiftIncharge" value="">
     </div>
 
-    <!-- Reference (From Approved QC Tests or Roll Transfer) -->
+    <!-- Reference (From Approved QC Tests, Material Issue, or Roll Transfer) -->
     <div class="form-group">
-      <label>Reference (QC Approved / Roll Transfer):</label>
+      <label>Reference (Material Issue ):</label>
       <select id="reference" name="reference" required onchange="loadApprovedMaterial()">
         <option value="">-- Select Reference --</option>
-        <?php foreach ($approvedMaterials as $mat): 
-          $sourceLabel = ($mat['source'] === 'roll_transfer') ? '🔄 Roll Transfer' : '📦 Store';
-        ?>
+        <?php foreach ($approvedMaterials as $mat): ?>
         <option value="<?php echo htmlspecialchars($mat['entry_number']); ?>" 
                 data-material-type="<?php echo htmlspecialchars($mat['material_type']); ?>"
                 data-available-amount="<?php echo $mat['remaining_amount']; ?>"
-                data-source="<?php echo $mat['source']; ?>">
-          [<?php echo $sourceLabel; ?>] <?php echo htmlspecialchars($mat['entry_number']); ?> - <?php echo htmlspecialchars($mat['material_type']); ?> (<?php echo number_format($mat['remaining_amount'], 2); ?> kg)
+                data-source="<?php echo $mat['source']; ?>"
+                data-manufacturer="<?php echo htmlspecialchars($mat['manufacturer_name'] ?? ''); ?>">
+          <?php echo htmlspecialchars($mat['entry_number']); ?> - <?php echo htmlspecialchars($mat['material_type']); ?><?php if (!empty($mat['manufacturer_name'])): ?> (<?php echo htmlspecialchars($mat['manufacturer_name']); ?>)<?php endif; ?> (<?php echo number_format($mat['remaining_amount'], 2); ?> kg)
         </option>
         <?php endforeach; ?>
       </select>
@@ -464,9 +532,10 @@ $recycledMaterials['swing'] = max(0, ($recycledTotals['swing'] ?? 0) - ($usedAmo
 
     <!-- Material Type -->
     <div class="form-group">
-      <label>Material Type:</label>
+      <label for="materialType">Material Type:</label>
       <div class="btn-group" id="materialTypeGroup">
         <button type="button" class="btn" data-value="PP Stable Fiber" onclick="selectBtn(this, 'materialTypeGroup')">PP Stable Fiber</button>
+        <button type="button" class="btn" data-value="PSF Fiber" onclick="selectBtn(this, 'materialTypeGroup')">PSF Fiber</button>
       </div>
       <input type="hidden" id="materialType" name="materialType" value="">
     </div>
@@ -550,10 +619,19 @@ function loadApprovedMaterial() {
         document.getElementById('amount').removeAttribute('max');
         document.getElementById('amount').disabled = false;
         
-        // Clear material type selection
+        // Clear material type selection and re-enable buttons
         const materialTypeGroup = document.getElementById('materialTypeGroup');
-        materialTypeGroup.querySelectorAll('.btn').forEach(btn => btn.classList.remove('selected'));
+        materialTypeGroup.querySelectorAll('.btn').forEach(btn => {
+            btn.classList.remove('selected');
+            btn.disabled = false;
+            btn.style.opacity = '1';
+            btn.style.cursor = 'pointer';
+        });
         document.getElementById('materialType').value = '';
+        
+        // Remove note if exists
+        const note = document.querySelector('label[for="materialType"] .note-text');
+        if (note) note.remove();
         
         updateSummary();
         return;
@@ -576,12 +654,55 @@ function loadApprovedMaterial() {
         document.getElementById('amount').removeAttribute('max');
     }
     
-    // Auto-select material type - always set to "PP Stable Fiber"
     const materialTypeGroup = document.getElementById('materialTypeGroup');
-    const materialTypeBtn = materialTypeGroup.querySelector('.btn[data-value="PP Stable Fiber"]');
+    const materialButtons = Array.from(materialTypeGroup.querySelectorAll('.btn'));
+    materialButtons.forEach(btn => btn.classList.remove('selected'));
+
+    const normalizedMaterialType = (materialType || '').trim();
+    let materialTypeBtn = materialButtons.find(btn => {
+        const btnValue = (btn.dataset.value || btn.textContent).trim();
+        return normalizedMaterialType && btnValue === normalizedMaterialType;
+    });
+
+    if (!materialTypeBtn) {
+        materialTypeBtn = materialButtons.find(btn => (btn.dataset.value || btn.textContent).trim() === 'PP Stable Fiber');
+    }
+    if (!materialTypeBtn && materialButtons.length > 0) {
+        materialTypeBtn = materialButtons[0];
+    }
+
     if (materialTypeBtn) {
         materialTypeBtn.classList.add('selected');
-        document.getElementById('materialType').value = 'PP Stable Fiber';
+        document.getElementById('materialType').value = (materialTypeBtn.dataset.value || materialTypeBtn.textContent).trim();
+        
+        // If reference is from material issue entry, disable material type buttons
+        const source = selectedOption.getAttribute('data-source');
+        if (source === 'material_issue') {
+            materialButtons.forEach(btn => {
+                btn.disabled = true;
+                btn.style.opacity = '0.6';
+                btn.style.cursor = 'not-allowed';
+            });
+            // Add a note that material type cannot be changed
+            const materialTypeLabel = document.querySelector('label[for="materialType"]');
+            if (materialTypeLabel && !materialTypeLabel.querySelector('.note-text')) {
+                const note = document.createElement('span');
+                note.className = 'note-text';
+                note.style.cssText = 'color: #666; font-size: 12px; font-weight: normal; margin-left: 8px;';
+                note.textContent = '(From Material Issue - Cannot be changed)';
+                materialTypeLabel.appendChild(note);
+            }
+        } else {
+            // Enable buttons if not from material issue
+            materialButtons.forEach(btn => {
+                btn.disabled = false;
+                btn.style.opacity = '1';
+                btn.style.cursor = 'pointer';
+            });
+            // Remove note if exists
+            const note = document.querySelector('label[for="materialType"] .note-text');
+            if (note) note.remove();
+        }
     }
     
     updateSummary();
@@ -788,6 +909,10 @@ function validateRecycledAmount() {
 }
 
 function selectBtn(button, groupId) {
+    // Prevent selection if button is disabled (e.g., when material type is locked from material issue entry)
+    if (button.disabled || button.classList.contains('disabled')) {
+        return;
+    }
     const group = document.getElementById(groupId);
     group.querySelectorAll('.btn').forEach(btn => btn.classList.remove('selected'));
     button.classList.add('selected');
@@ -839,11 +964,16 @@ function updateSummary() {
 
 function submitFiberEntry() {
     const form = document.getElementById('fiberEntryForm');
+    const referenceSelect = document.getElementById('reference');
+    const selectedOption = referenceSelect.options[referenceSelect.selectedIndex];
+    const manufacturerName = selectedOption ? (selectedOption.getAttribute('data-manufacturer') || '') : '';
+    
     const data = {
         dateTime: form.dateTime.value,
         shift: form.shift.value,
         shiftIncharge: form.shiftIncharge.value,
         reference: form.reference.value,
+        manufacturerName: manufacturerName,
         project: form.project.value,
         amount: form.amount.value,
         recycledType: form.recycledType.value,
@@ -889,9 +1019,12 @@ function submitFiberEntry() {
     .then(res => res.json())
     .then(resp => {
         if (resp.success === true || resp.status === 'success') {
-            alert("Fiber entry submitted successfully!");
-            // Reload the page to get fresh data and update available quantities
-            window.location.reload();
+            console.log('Submission successful. Reference:', data.reference, 'Amount:', data.amount);
+            alert("Fiber entry submitted successfully! Entry Code: " + (resp.entry_code || 'N/A'));
+            // Force a hard reload to clear cache and get fresh data with updated available quantities
+            setTimeout(function() {
+                window.location.href = window.location.href.split('?')[0] + '?t=' + new Date().getTime();
+            }, 500);
         } else {
             alert("Submission failed: " + (resp.message || "Unknown error"));
         }

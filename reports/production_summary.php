@@ -10,6 +10,17 @@ if (!isset($_SESSION['user_id']) || !isset($_SESSION['username'])) {
 
 // Role-based access control
 $user_role = strtolower(trim($_SESSION['role'] ?? ''));
+
+// Explicitly block prod_user from accessing this dashboard
+if ($user_role === 'prod_user') {
+    http_response_code(403);
+    die("<div style='font-family: Arial; max-width: 600px; margin: 100px auto; padding: 30px; border: 2px solid #e74c3c; border-radius: 10px; background: #ffe8e8;'>
+        <h2 style='color: #e74c3c;'>🚫 Access Denied</h2>
+        <p>You do not have permission to access Production Reports.</p>
+        <a href='../index.php' style='display: inline-block; margin-top: 20px; padding: 10px 20px; background: #3498db; color: white; text-decoration: none; border-radius: 5px;'>Return to Dashboard</a>
+        </div>");
+}
+
 $allowed_roles = ['admin', 'production_user', 'management', 'agm ops', 'agm operations', 'sewing_test'];
 if (!in_array($user_role, $allowed_roles)) {
     http_response_code(403);
@@ -544,8 +555,13 @@ $conn->close();
             display: block;
         }
         @media print {
+            @page {
+                size: A4 landscape;
+                margin: 10mm;
+            }
+            /* COMPREHENSIVE RESET - Prevent ALL overlapping */
             * { 
-                box-sizing: border-box;
+                box-sizing: border-box !important;
                 -webkit-print-color-adjust: exact;
                 print-color-adjust: exact;
             }
@@ -555,68 +571,145 @@ $conn->close();
                 margin: 0 !important;
                 font-size: 9px !important;
                 overflow: visible !important;
+                position: static !important;
             }
             .container { 
                 box-shadow: none !important; 
                 padding: 5px !important;
-                margin: 0 !important;
+                margin: 0 auto !important;
                 max-width: 100% !important;
                 width: 100% !important;
+                position: static !important;
+                overflow: visible !important;
+                border-radius: 0 !important;
             }
             .filters, .back-link, .tabs, .print-btn { display: none !important; }
-            .tab-content { display: block !important; }
+            .tab-content { 
+                display: block !important; 
+                position: static !important;
+                page-break-inside: avoid;
+                margin-bottom: 30px !important;
+                clear: both !important;
+                overflow: visible !important;
+            }
             h1 { 
                 font-size: 14px !important; 
                 margin: 3px 0 !important; 
                 padding: 0 !important;
                 page-break-after: avoid;
+                position: static !important;
+                clear: both !important;
             }
             .subtitle { 
                 font-size: 9px !important; 
                 margin: 2px 0 8px !important; 
                 padding: 0 !important;
+                position: static !important;
+                clear: both !important;
             }
             .section-title { 
                 font-size: 11px !important; 
                 margin: 8px 0 3px !important; 
                 padding: 3px 0 !important; 
                 page-break-after: avoid;
+                position: static !important;
+                clear: both !important;
             }
             .section { 
-                margin-bottom: 10px !important;
+                margin-bottom: 20px !important;
                 page-break-inside: avoid;
                 overflow: visible !important;
+                position: static !important;
+                clear: both !important;
+                display: block !important;
             }
-            table { 
-                font-size: 7px !important; 
+            .table-container {
+                overflow: visible !important;
                 width: 100% !important;
-                page-break-inside: auto;
-                border-collapse: collapse !important;
-                margin-bottom: 8px !important;
+                margin-bottom: 20px !important;
+                margin-top: 15px !important;
+                position: static !important;
+                clear: both !important;
+                display: block !important;
             }
-            th, td { 
-                padding: 3px 2px !important; 
-                font-size: 7px !important;
-                line-height: 1.1 !important;
-                border: 1px solid #ddd !important;
-            }
-            th { 
-                font-size: 8px !important; 
-                font-weight: 600 !important;
+            .chart-card {
+                display: none !important;
             }
             .chart-container { 
-                height: 200px !important; 
-                max-height: 200px !important;
+                display: none !important;
+            }
+            .chart-wrapper {
+                display: none !important;
+            }
+            canvas {
+                display: none !important;
+            }
+            .table-wrapper {
+                overflow: visible !important;
+                width: 100% !important;
+                margin-bottom: 15px !important;
+                position: static !important;
+                clear: both !important;
+            }
+            table { 
+                font-size: 8px !important; 
+                width: 100% !important;
+                page-break-inside: avoid;
+                break-inside: avoid;
+                border-collapse: collapse !important;
+                margin-bottom: 10px !important;
+                position: static !important;
+                clear: both !important;
+                table-layout: auto !important;
+            }
+            th, td { 
+                padding: 4px 3px !important; 
+                font-size: 8px !important;
+                line-height: 1.2 !important;
+                border: 1px solid #ddd !important;
+                position: static !important;
+                white-space: normal !important;
+            }
+            th { 
+                font-size: 9px !important; 
+                font-weight: 600 !important;
+                position: static !important;
+                top: auto !important;
+            }
+            td:first-child, th:first-child {
+                position: static !important;
+                background: inherit !important;
+                z-index: auto !important;
+                left: auto !important;
+            }
+            th:first-child {
+                background: #34495e !important;
+                z-index: auto !important;
+            }
+            tr:hover td:first-child, tr:hover {
+                background: inherit !important;
             }
             .stats-grid { 
-                grid-template-columns: repeat(3, 1fr) !important;
-                gap: 5px !important;
+                display: block !important;
+                grid-template-columns: none !important;
+                gap: 0 !important;
+                margin-bottom: 15px !important;
+                position: static !important;
+                clear: both !important;
+            }
+            .stats-grid .stat-card {
+                display: block !important;
+                width: 100% !important;
                 margin-bottom: 10px !important;
             }
             .stat-card { 
                 padding: 8px 5px !important;
                 page-break-inside: avoid;
-                margin-bottom: 0 !important;
+                margin-bottom: 10px !important;
+                position: static !important;
+                clear: both !important;
+                display: block !important;
+                width: 100% !important;
             }
             .stat-value { 
                 font-size: 1.2em !important; 
@@ -625,12 +718,18 @@ $conn->close();
             .stat-label { 
                 font-size: 0.75em !important; 
             }
-            tr { page-break-inside: avoid; }
-            thead { display: table-header-group !important; }
-            tfoot { display: table-footer-group !important; }
-            @page {
-                size: A4 landscape;
-                margin: 0.3cm;
+            tr { 
+                page-break-inside: avoid !important;
+                break-inside: avoid !important;
+            }
+            thead { 
+                display: table-header-group !important;
+            }
+            tbody {
+                display: table-row-group !important;
+            }
+            tfoot { 
+                display: table-footer-group !important; 
             }
         }
     </style>

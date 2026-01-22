@@ -173,6 +173,10 @@ $hourlyData = $hourlyResult ? $hourlyResult->fetch_all(MYSQLI_ASSOC) : [];
         .badge-night { background: #e8eaf6; color: #3f51b5; }
         
         @media print {
+            @page {
+                size: A4 landscape;
+                margin: 10mm;
+            }
             * { box-sizing: border-box; }
             body { 
                 background: white; 
@@ -210,12 +214,37 @@ $hourlyData = $hourlyResult ? $hourlyResult->fetch_all(MYSQLI_ASSOC) : [];
                 page-break-inside: avoid;
                 overflow: visible !important;
             }
-            table { 
-                font-size: 7px !important; 
+            .table-wrapper {
+                overflow: visible !important;
                 width: 100% !important;
-                page-break-inside: auto;
+            }
+            table { 
+                font-size: 9px !important; 
+                width: 100% !important;
+                min-width: auto !important;
+                max-width: 100% !important;
+                page-break-inside: avoid;
+                break-inside: avoid;
                 border-collapse: collapse !important;
                 margin-bottom: 8px !important;
+            }
+            th, td {
+                padding: 4px 3px !important;
+                font-size: 9px !important;
+                white-space: normal !important;
+            }
+            th {
+                position: static !important;
+            }
+            table thead {
+                display: table-header-group !important;
+            }
+            table tbody {
+                display: table-row-group !important;
+            }
+            table tr {
+                page-break-inside: avoid !important;
+                break-inside: avoid !important;
             }
             th, td { 
                 padding: 3px 2px !important; 

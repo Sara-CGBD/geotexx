@@ -60,6 +60,19 @@ if (!$report) {
 // Decode test data JSON
 $test_data = json_decode($report['test_results'], true);
 
+// Filter out empty sieve rows - only include rows with actual data
+if (isset($test_data['sieve_data']) && is_array($test_data['sieve_data'])) {
+    $filtered_sieve_data = [];
+    foreach ($test_data['sieve_data'] as $sieve) {
+        // Only include rows that have at least sieve_size or retained > 0
+        if ((isset($sieve['sieve_size']) && floatval($sieve['sieve_size']) > 0) || 
+            (isset($sieve['retained']) && floatval($sieve['retained']) > 0)) {
+            $filtered_sieve_data[] = $sieve;
+        }
+    }
+    $test_data['sieve_data'] = $filtered_sieve_data;
+}
+
 // Clean rejection remarks
 $rejection_reason = $report['remarks'] ?? 'No comments';
 $rejection_reason = preg_replace('/\[Checker Rejection\]:\s*/i', '', $rejection_reason);
@@ -71,6 +84,31 @@ $rejected_by = $report['checker_name'] ?? $report['approver_name'] ?? 'Unknown';
 // Use the SAME lab test number from the rejected report (not a new one)
 $next_lab_test_no = $report['lab_test_number'];
 
+// Get reference number from the rejected report - auto-fetch for resubmission
+$original_reference_number = $report['reference_number'] ?? '';
+$original_bundle_reference = $report['bundle_reference'] ?? '';
+
+// If reference_number is truncated or too short, try to get full reference from roll_entry
+if (empty($original_reference_number) || strlen(trim($original_reference_number)) <= 3) {
+    if (!empty($original_bundle_reference)) {
+        // Use bundle_reference if available
+        $original_reference_number = $original_bundle_reference;
+    } else {
+        // Try to find full reference from roll_entry
+        $refLookup = $conn->prepare("SELECT reference_number FROM roll_entry WHERE reference_number LIKE ? OR reference_number = ? LIMIT 1");
+        if ($refLookup) {
+            $searchPattern = '%' . $original_reference_number . '%';
+            $refLookup->bind_param("ss", $searchPattern, $original_reference_number);
+            $refLookup->execute();
+            $refResult = $refLookup->get_result();
+            if ($refRow = $refResult->fetch_assoc()) {
+                $original_reference_number = $refRow['reference_number'];
+            }
+            $refLookup->close();
+        }
+    }
+}
+
 // Handle form submission - create NEW test with corrected data
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     try {
@@ -79,27 +117,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         // Use the SAME lab test number from the rejected report
         $generated_lab_test_no = $report['lab_test_number'];
         $test_date = date('Y-m-d');
-        $gsm = floatval($_POST['gsm']);
-        $roll_number = trim($_POST['roll_number']);
         
         $test_date_obj = new DateTime($test_date);
         $year = $test_date_obj->format('y');
         $month = strtoupper($test_date_obj->format('M'));
         $day = $test_date_obj->format('d');
-        $gsm_formatted = number_format($gsm / 100, 1);
         $lab_test_formatted = 'LT' . $generated_lab_test_no;
-        $roll_formatted = 'R' . $roll_number;
-        $report_number = "CT-{$gsm_formatted}L{$year}{$month}{$day}-{$lab_test_formatted}-{$roll_formatted}";
+        // Generate report number without GSM and Roll Number
+        $report_number = "CT-{$year}{$month}{$day}-{$lab_test_formatted}";
         
-        // Collect sieve analysis data
+        // Collect sieve analysis data (dynamic rows)
         $sieve_data = [];
-        for ($i = 1; $i <= 8; $i++) {
-            $sieve_data[] = [
-                'sieve_size' => floatval($_POST["sieve_size_$i"] ?? 0),
-                'retained' => floatval($_POST["retained_$i"] ?? 0),
-                'cumulative' => floatval($_POST["cumulative_$i"] ?? 0),
-                'passing' => floatval($_POST["passing_$i"] ?? 0)
-            ];
+        $i = 1;
+        while (isset($_POST["sieve_size_$i"]) || isset($_POST["retained_$i"])) {
+            if (!empty($_POST["sieve_size_$i"]) || !empty($_POST["retained_$i"])) {
+                $sieve_data[] = [
+                    'sieve_size' => floatval($_POST["sieve_size_$i"] ?? 0),
+                    'retained' => floatval($_POST["retained_$i"] ?? 0),
+                    'cumulative' => floatval($_POST["cumulative_$i"] ?? 0),
+                    'passing' => floatval($_POST["passing_$i"] ?? 0)
+                ];
+            }
+            $i++;
+            if ($i > 50) break; // Safety limit
         }
         
         $test_results = [
@@ -111,54 +151,97 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         
         $test_results_json = json_encode($test_results);
         
-        // Delete the old rejected test to allow same report_number for the corrected version
-        $delete_old = $conn->prepare("DELETE FROM characteristics_tests WHERE id = ?");
-        $delete_old->bind_param("i", $report_id);
-        $delete_old->execute();
-        $delete_old->close();
+        // Check if this report has a bundle_reference with pipe separator (range format: from|to)
+        $bundle_ref = trim($original_bundle_reference ?? '');
+        $reports_to_update = [$report_id];
         
-        // Insert NEW test into database with status='pending'
-        $stmt = $conn->prepare(
-            "INSERT INTO characteristics_tests 
-            (report_number, lab_test_number, test_materials, gsm, roll_number, sample_id,
-             specimen_size, specimen_size_unit, sand_type, sand_weight, sand_weight_unit,
-             sieving_time, sieving_time_unit, sample_received, sample_tested,
-             test_results, test_performed_by, reporter_id, reporter_name, status) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')"
-        );
+        // If bundle_reference exists and contains a pipe (|), find all reports with the same bundle_reference
+        if (!empty($bundle_ref) && strpos($bundle_ref, '|') !== false) {
+            // Find all reports with the same bundle_reference that are rejected
+            $findBulkStmt = $conn->prepare("SELECT id FROM characteristics_tests WHERE bundle_reference = ? AND status IN ('rejected', 'rejected_by_checker') AND id != ?");
+            $findBulkStmt->bind_param("si", $bundle_ref, $report_id);
+            $findBulkStmt->execute();
+            $bulkResult = $findBulkStmt->get_result();
+            while ($bulkRow = $bulkResult->fetch_assoc()) {
+                $reports_to_update[] = $bulkRow['id'];
+            }
+            $findBulkStmt->close();
+            
+            error_log("Characteristics: Resubmitting bulk reference range: $bundle_ref. Found " . count($reports_to_update) . " reports to update.");
+        }
         
+        // Update all reports in the range to 'pending' status
+        $placeholders = str_repeat('?,', count($reports_to_update) - 1) . '?';
+        $updateStmt = $conn->prepare("UPDATE characteristics_tests SET status = 'pending', remarks = NULL, checker_name = NULL, checked_at = NULL, approver_name = NULL, approved_at = NULL, updated_at = NOW() WHERE id IN ($placeholders)");
+        $types = str_repeat('i', count($reports_to_update));
+        $updateStmt->bind_param($types, ...$reports_to_update);
+        $updateStmt->execute();
+        $updateStmt->close();
+        
+        // Use the auto-fetched reference number from the rejected report
+        $reference_number = $original_reference_number;
+        
+        // Update the existing report with new test data (instead of creating a new one)
         $sample_tested = date('Y-m-d H:i:s');
         
+        // Convert numeric fields to floats for proper database binding
+        $specimen_size = isset($_POST['specimen_size']) && is_numeric($_POST['specimen_size']) ? floatval($_POST['specimen_size']) : 0.0;
+        $sand_weight = isset($_POST['sand_weight']) && is_numeric($_POST['sand_weight']) ? floatval($_POST['sand_weight']) : 0.0;
+        $sieving_time = isset($_POST['sieving_time']) && is_numeric($_POST['sieving_time']) ? floatval($_POST['sieving_time']) : 0.0;
+        
+        $stmt = $conn->prepare(
+            "UPDATE characteristics_tests 
+            SET test_materials = ?, 
+                reference_number = ?,
+                sample_id = ?,
+                specimen_size = ?,
+                specimen_size_unit = ?,
+                sand_type = ?,
+                sand_weight = ?,
+                sand_weight_unit = ?,
+                sieving_time = ?,
+                sieving_time_unit = ?,
+                sample_received = ?,
+                sample_tested = ?,
+                test_results = ?,
+                test_performed_by = ?,
+                updated_at = NOW()
+            WHERE id = ?"
+        );
+        
         $stmt->bind_param(
-            "sssdssdsdsdssssssis",
-            $report_number,
-            $generated_lab_test_no,
-            $_POST['test_materials'],
-            $gsm,
-            $roll_number,
-            $_POST['sample_id'],
-            $_POST['specimen_size'],
-            $_POST['specimen_size_unit'],
-            $_POST['sand_type'],
-            $_POST['sand_weight'],
-            $_POST['sand_weight_unit'],
-            $_POST['sieving_time'],
-            $_POST['sieving_time_unit'],
-            $_POST['sample_received'],
-            $sample_tested,
-            $test_results_json,
-            $reporter_full_name,
-            $reporter_id,
-            $reporter_name
+            "sssdssdsssssssi",
+            $_POST['test_materials'],          // 1. s - test_materials
+            $reference_number,                 // 2. s - reference_number (auto-fetched)
+            $_POST['sample_id'],               // 3. s - sample_id
+            $specimen_size,                    // 4. d - specimen_size (DECIMAL)
+            $_POST['specimen_size_unit'],      // 5. s - specimen_size_unit
+            $_POST['sand_type'],               // 6. s - sand_type
+            $sand_weight,                      // 7. d - sand_weight (DECIMAL)
+            $_POST['sand_weight_unit'],        // 8. s - sand_weight_unit
+            $sieving_time,                     // 9. d - sieving_time (DECIMAL)
+            $_POST['sieving_time_unit'],       // 10. s - sieving_time_unit
+            $_POST['sample_received'],         // 11. s - sample_received
+            $sample_tested,                    // 12. s - sample_tested
+            $test_results_json,                // 13. s - test_results
+            $reporter_full_name,               // 14. s - test_performed_by
+            $report_id                         // 15. i - id
         );
         
         if ($stmt->execute()) {
+            $stmt->close();
             $conn->commit();
-            $message = "✅ Test resubmitted successfully! Report Number: " . $report_number . " - Status: Pending";
-            // Redirect to main form after 2 seconds
-            header("refresh:2;url=characteristics_test.php");
+            $count = count($reports_to_update);
+            $message = $count > 1 
+                ? "Test resubmitted successfully! {$count} reports in the reference range have been resubmitted. Status: Pending"
+                : "Test resubmitted successfully! Report Number: " . $report['report_number'] . " - Status: Pending";
+            $_SESSION['success_message'] = $message;
+            header("Location: ../tester_rejected_reports.php");
+            exit();
         } else {
-            throw new Exception("Failed to save test: " . $stmt->error);
+            $stmt->close();
+            $conn->rollback();
+            throw new Exception("Failed to update test: " . $stmt->error);
         }
         $stmt->close();
         
@@ -209,11 +292,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   <h1>✏️ Edit & Resubmit Characteristics Test</h1>
 
   <?php if ($message): ?>
-    <div class="alert alert-success">✅ <?php echo $message; ?></div>
+    <div class="alert alert-success"> <?php echo $message; ?></div>
   <?php endif; ?>
 
   <?php if ($error): ?>
-    <div class="alert alert-error">❌ <?php echo $error; ?></div>
+    <div class="alert alert-error"> <?php echo $error; ?></div>
   <?php endif; ?>
 
   <div style="margin-bottom: 15px;">
@@ -240,12 +323,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <input type="text" name="test_materials" value="<?php echo htmlspecialchars($report['test_materials']); ?>" required>
       </div>
       <div class="form-group">
-        <label>GSM:</label>
-        <input type="number" name="gsm" step="0.0001" min="0" value="<?php echo rtrim(rtrim(number_format($report['gsm'], 4), '0'), '.'); ?>" required>
-      </div>
-      <div class="form-group">
-        <label>Roll Number:</label>
-        <input type="text" name="roll_number" value="<?php echo htmlspecialchars($report['roll_number']); ?>" required>
+        <label>Reference Number:</label>
+        <input type="text" value="<?php echo htmlspecialchars($original_reference_number ?: 'Not available'); ?>" readonly class="readonly" style="background:#e8f5e9; border:2px solid #4caf50;">
+        <small style="color:#666; font-size:11px;">Auto-fetched from rejected report</small>
       </div>
       <div class="form-group">
         <label>Report ID:</label>
@@ -275,7 +355,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       <div class="form-group">
         <label>Total Sand Weight:</label>
         <div style="display:flex; gap:5px;">
-          <input type="number" name="sand_weight" step="0.0001" min="0" value="<?php echo rtrim(rtrim(number_format($report['sand_weight'], 4), '0'), '.'); ?>" required style="flex:1;" id="sand_weight">
+          <input type="number" name="sand_weight" step="0.0001" min="0" value="<?php echo rtrim(rtrim(number_format($report['sand_weight'], 4), '0'), '.'); ?>" required style="flex:1;" id="sand_weight" oninput="calculateSieve()">
           <select name="sand_weight_unit" style="width:70px;">
             <option value="g" <?php echo ($report['sand_weight_unit'] === 'g') ? 'selected' : ''; ?>>g</option>
             <option value="kg" <?php echo ($report['sand_weight_unit'] === 'kg') ? 'selected' : ''; ?>>kg</option>
@@ -314,21 +394,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <th>Retained (g)</th>
             <th>Cumulative (g)</th>
             <th>Cumulative Passing (%)</th>
+            <th style="width:80px;">Action</th>
           </tr>
         </thead>
-        <tbody>
-          <?php for ($i = 1; $i <= 8; $i++): 
-            $sieve = $test_data['sieve_data'][$i-1] ?? ['sieve_size' => 0, 'retained' => 0, 'cumulative' => 0, 'passing' => 0];
+        <tbody id="sieve_tbody">
+          <?php 
+          $initial_sieve_count = count($test_data['sieve_data'] ?? []);
+          if ($initial_sieve_count === 0) {
+              $initial_sieve_count = 1; // Ensure at least one row is displayed
+          }
+          for ($i = 0; $i < $initial_sieve_count; $i++): 
+            $sieve = $test_data['sieve_data'][$i] ?? ['sieve_size' => 0, 'retained' => 0, 'cumulative' => 0, 'passing' => 0];
+            $row_num = $i + 1;
           ?>
-          <tr>
-            <td><input type="number" name="sieve_size_<?php echo $i; ?>" id="sieve_size_<?php echo $i; ?>" step="0.0001" min="0" value="<?php echo rtrim(rtrim(sprintf('%.4f', $sieve['sieve_size']), '0'), '.'); ?>"></td>
-            <td><input type="number" name="retained_<?php echo $i; ?>" id="retained_<?php echo $i; ?>" step="0.0001" min="0" value="<?php echo rtrim(rtrim(sprintf('%.4f', $sieve['retained']), '0'), '.'); ?>" oninput="calculateSieve()"></td>
-            <td><input type="number" name="cumulative_<?php echo $i; ?>" id="cumulative_<?php echo $i; ?>" readonly class="readonly" value="<?php echo rtrim(rtrim(sprintf('%.4f', $sieve['cumulative']), '0'), '.'); ?>"></td>
-            <td><input type="number" name="passing_<?php echo $i; ?>" id="passing_<?php echo $i; ?>" readonly class="readonly" value="<?php echo rtrim(rtrim(sprintf('%.2f', $sieve['passing']), '0'), '.'); ?>"></td>
+          <tr data-row="<?php echo $row_num; ?>">
+            <td><input type="number" name="sieve_size_<?php echo $row_num; ?>" id="sieve_size_<?php echo $row_num; ?>" step="0.0001" min="0" value="<?php echo rtrim(rtrim(sprintf('%.4f', $sieve['sieve_size']), '0'), '.'); ?>"></td>
+            <td><input type="number" name="retained_<?php echo $row_num; ?>" id="retained_<?php echo $row_num; ?>" step="0.0001" min="0" value="<?php echo rtrim(rtrim(sprintf('%.4f', $sieve['retained']), '0'), '.'); ?>" oninput="calculateSieve()"></td>
+            <td><input type="number" name="cumulative_<?php echo $row_num; ?>" id="cumulative_<?php echo $row_num; ?>" readonly class="readonly" value="<?php echo rtrim(rtrim(sprintf('%.4f', $sieve['cumulative']), '0'), '.'); ?>"></td>
+            <td><input type="number" name="passing_<?php echo $row_num; ?>" id="passing_<?php echo $row_num; ?>" readonly class="readonly" value="<?php echo rtrim(rtrim(sprintf('%.2f', $sieve['passing']), '0'), '.'); ?>"></td>
+            <td>
+              <?php if ($initial_sieve_count > 1 || $row_num > 1): ?>
+              <button type="button" onclick="removeSieveRow(this)" style="padding:4px 8px; background:#dc3545; color:#fff; border:none; cursor:pointer; border-radius:4px;">Delete</button>
+              <?php endif; ?>
+            </td>
           </tr>
           <?php endfor; ?>
         </tbody>
       </table>
+      <button type="button" onclick="addSieveRow()" style="margin-top:10px; padding:8px 16px; background:#28a745; color:#fff; border:none; cursor:pointer; border-radius:4px; font-weight:600;">Add 1 More Row</button>
     </div>
 
     <div class="section-title">Opening Size Calculation (AOS)</div>
@@ -388,63 +481,103 @@ function updateTimeBD() {
 setInterval(updateTimeBD, 1000);
 updateTimeBD();
 
-// Generate Report ID based on format: GSM.XL[YY][MONTH][DD]-LT[XX]-R[XX]
-// Example: if gsm=300, lab test=01, roll=34, date=October 14, 2025 -> 3.0L25Oct14-LT01-R34
-const nextLabTestNo = '<?php echo $next_lab_test_no; ?>';
-
-function generateReportID() {
-  const gsm = document.querySelector('input[name="gsm"]').value;
-  const rollNumber = document.querySelector('input[name="roll_number"]').value;
-  
-  if (!gsm || !rollNumber) {
-    document.getElementById('report_id').value = '';
-    return;
-  }
-  
-  const now = new Date();
-  const utc = now.getTime() + now.getTimezoneOffset() * 60000;
-  const dhaka = new Date(utc + 6 * 3600000);
-  
-  const year = dhaka.getFullYear().toString().slice(-2); // Last 2 digits
-  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  const month = monthNames[dhaka.getMonth()];
-  const day = String(dhaka.getDate()).padStart(2, '0');
-  
-  const gsmFormatted = (parseFloat(gsm) / 100).toFixed(1); // e.g., 300 -> 3.0
-  const labTestFormatted = 'LT' + nextLabTestNo;
-  const rollFormatted = 'R' + rollNumber;
-  
-  const reportID = `${gsmFormatted}L${year}${month}${day}-${labTestFormatted}-${rollFormatted}`;
-  document.getElementById('report_id').value = reportID;
-}
-
-// Add event listeners to auto-generate Report ID
-document.querySelector('input[name="gsm"]').addEventListener('input', generateReportID);
-document.querySelector('input[name="roll_number"]').addEventListener('input', generateReportID);
-
-// Generate on page load
-generateReportID();
+// Report ID is already set from the rejected report, no need to regenerate
 
 // Calculate sieve analysis
 function calculateSieve() {
   const totalSand = parseFloat(document.getElementById('sand_weight').value) || 0;
   let cumulative = 0;
   
-  for (let i = 1; i <= 8; i++) {
-    const retained = parseFloat(document.getElementById('retained_' + i).value) || 0;
-    cumulative += retained;
+  const tbody = document.getElementById('sieve_tbody');
+  if (!tbody) return;
+  
+  const rows = tbody.querySelectorAll('tr');
+  rows.forEach(row => {
+    const rowNum = row.getAttribute('data-row');
+    const retainedEl = document.getElementById(`retained_${rowNum}`);
+    const cumulativeEl = document.getElementById(`cumulative_${rowNum}`);
+    const passingEl = document.getElementById(`passing_${rowNum}`);
     
-    document.getElementById('cumulative_' + i).value = cumulative.toFixed(1);
-    
-    if (totalSand > 0) {
-      const passing = ((totalSand - cumulative) / totalSand) * 100;
-      document.getElementById('passing_' + i).value = passing.toFixed(1);
+    if (retainedEl && cumulativeEl && passingEl) {
+      const retained = parseFloat(retainedEl.value) || 0;
+      cumulative += retained;
+      
+      cumulativeEl.value = cumulative.toFixed(4);
+      
+      if (totalSand > 0) {
+        const passing = ((totalSand - cumulative) / totalSand) * 100;
+        passingEl.value = passing.toFixed(2);
+      } else {
+        passingEl.value = '';
+      }
     }
-  }
+  });
 }
 
-// Calculate opening size based on O-value
+// Add sieve row
+let sieveRowCounter = <?php echo $initial_sieve_count; ?>;
+function addSieveRow() {
+    const tbody = document.getElementById('sieve_tbody');
+    sieveRowCounter++;
+    const row = document.createElement('tr');
+    row.setAttribute('data-row', sieveRowCounter);
+    row.innerHTML = `
+        <td><input type="number" name="sieve_size_${sieveRowCounter}" id="sieve_size_${sieveRowCounter}" step="0.0001" min="0"></td>
+        <td><input type="number" name="retained_${sieveRowCounter}" id="retained_${sieveRowCounter}" step="0.0001" min="0" oninput="calculateSieve()"></td>
+        <td><input type="number" name="cumulative_${sieveRowCounter}" id="cumulative_${sieveRowCounter}" readonly class="readonly"></td>
+        <td><input type="number" name="passing_${sieveRowCounter}" id="passing_${sieveRowCounter}" readonly class="readonly"></td>
+        <td><button type="button" onclick="removeSieveRow(this)" style="padding:4px 8px; background:#dc3545; color:#fff; border:none; cursor:pointer; border-radius:4px;">Delete</button></td>
+    `;
+    tbody.appendChild(row);
+}
+
+// Remove sieve row
+function removeSieveRow(button) {
+    const row = button.closest('tr');
+    const tbody = row.closest('tbody');
+    
+    // Check if this is the only row
+    if (tbody.querySelectorAll('tr').length <= 1) {
+        alert('You cannot remove the last row. At least one row is required.');
+        return;
+    }
+    
+    row.remove();
+    
+    // Renumber remaining rows
+    const rows = tbody.querySelectorAll('tr');
+    rows.forEach((r, idx) => {
+        const rowNum = idx + 1;
+        r.setAttribute('data-row', rowNum);
+        
+        // Update all input IDs and names
+        r.querySelectorAll('input, button').forEach(el => {
+            const id = el.id;
+            const name = el.name;
+            if (id) {
+                const newId = id.replace(/\d+$/, rowNum);
+                el.id = newId;
+            }
+            if (name) {
+                const newName = name.replace(/\d+$/, rowNum);
+                el.name = newName;
+            }
+            // Update oninput calls
+            if (el.hasAttribute('oninput')) {
+                el.setAttribute('oninput', el.getAttribute('oninput'));
+            }
+        });
+    });
+    
+    sieveRowCounter = rows.length;
+    calculateSieve();
+}
+
+// Calculate opening size based on O-value - using same logic as main form
 function calculateOpening() {
+  // Ensure sieve calculations are done first
+  calculateSieve();
+  
   const oValue = parseFloat(document.getElementById('o_value_input').value);
   
   if (!oValue || oValue < 0 || oValue > 100) {
@@ -457,9 +590,50 @@ function calculateOpening() {
   let upperSize = 0, lowerSize = 0, upperPass = 0, lowerPass = 0;
   let found = false;
   
-  for (let i = 1; i <= 8; i++) {
-    const passing = parseFloat(document.getElementById('passing_' + i).value) || 0;
-    const sieveSize = parseFloat(document.getElementById('sieve_size_' + i).value) || 0;
+  // Get all rows dynamically
+  const tbody = document.getElementById('sieve_tbody');
+  if (!tbody) {
+    alert('Error: Sieve data table not found');
+    return;
+  }
+  
+  const rows = Array.from(tbody.querySelectorAll('tr'));
+  if (rows.length === 0) {
+    alert('Error: No sieve data rows found. Please add sieve data first.');
+    return;
+  }
+  
+  // Collect all sieve data with their row numbers
+  const sieveData = [];
+  rows.forEach(row => {
+    const rowNum = row.getAttribute('data-row');
+    if (!rowNum) return;
+    
+    const sieveSizeEl = document.getElementById(`sieve_size_${rowNum}`);
+    const passingEl = document.getElementById(`passing_${rowNum}`);
+    
+    if (sieveSizeEl && passingEl) {
+      const sieveSize = parseFloat(sieveSizeEl.value) || 0;
+      const passing = parseFloat(passingEl.value) || 0;
+      if (sieveSize > 0) {
+        sieveData.push({ size: sieveSize, passing: passing, rowNum: rowNum });
+      }
+    }
+  });
+  
+  if (sieveData.length === 0) {
+    alert('Error: No valid sieve data found. Please enter sieve sizes and ensure retained values are entered.');
+    return;
+  }
+  
+  // Sort by sieve size descending (largest first), same as main form logic
+  sieveData.sort((a, b) => b.size - a.size);
+  
+  // Loop through sorted data to find where passing crosses O-value
+  // This mimics the main form's loop from 1 to 8
+  for (let i = 0; i < sieveData.length; i++) {
+    const passing = sieveData[i].passing;
+    const sieveSize = sieveData[i].size;
     
     if (passing <= oValue) {
       // Found the lower bound (passing just below O-value)
@@ -467,12 +641,13 @@ function calculateOpening() {
       lowerPass = passing;
       
       // Get upper bound from previous row (passing just above O-value)
-      if (i > 1) {
-        upperSize = parseFloat(document.getElementById('sieve_size_' + (i-1)).value) || 0;
-        upperPass = parseFloat(document.getElementById('passing_' + (i-1)).value) || 0;
+      if (i > 0) {
+        upperSize = sieveData[i-1].size;
+        upperPass = sieveData[i-1].passing;
         found = true;
       } else {
         // O-value is higher than the first sieve's passing %
+        // Use the first sieve size as the result
         upperSize = sieveSize;
         upperPass = passing;
         found = true;
@@ -483,9 +658,9 @@ function calculateOpening() {
   
   // If O-value is lower than all sieves, use the last sieve
   if (!found && lowerSize === 0) {
-    for (let i = 8; i >= 1; i--) {
-      const sieveSize = parseFloat(document.getElementById('sieve_size_' + i).value) || 0;
-      const passing = parseFloat(document.getElementById('passing_' + i).value) || 0;
+    for (let i = sieveData.length - 1; i >= 0; i--) {
+      const sieveSize = sieveData[i].size;
+      const passing = sieveData[i].passing;
       if (sieveSize > 0) {
         lowerSize = sieveSize;
         lowerPass = passing;
@@ -525,13 +700,28 @@ function calculateOpening() {
     calculationHTML = `O${oValue} = ${openingSize.toFixed(3)} mm (${(openingSize * 1000).toFixed(0)} μm)`;
   }
   
-  document.getElementById('opening_size').value = openingSize.toFixed(4);
-  document.getElementById('calculation_text').innerHTML = calculationHTML;
-  document.getElementById('calculation_display').style.display = 'block';
+  // Update hidden field with calculated opening size
+  const openingSizeField = document.getElementById('opening_size');
+  if (openingSizeField) {
+    openingSizeField.value = openingSize.toFixed(4);
+  }
   
-  document.getElementById('final_result').innerHTML = 
+  // Update calculation display
+  const calculationText = document.getElementById('calculation_text');
+  const calculationDisplay = document.getElementById('calculation_display');
+  if (calculationText && calculationDisplay) {
+    calculationText.innerHTML = calculationHTML;
+    calculationDisplay.style.display = 'block';
+  }
+  
+  // Update result display
+  const finalResult = document.getElementById('final_result');
+  const resultDisplay = document.getElementById('result_display');
+  if (finalResult && resultDisplay) {
+    finalResult.innerHTML = 
     `Apparent Opening Size (O${oValue}): ${openingSize.toFixed(3)} mm (${(openingSize * 1000).toFixed(0)} μm)`;
-  document.getElementById('result_display').style.display = 'block';
+    resultDisplay.style.display = 'block';
+  }
 }
 
 // Trigger initial calculation on load
@@ -543,6 +733,27 @@ setTimeout(function() {
   calculateOpening();
 }, 100);
 <?php endif; ?>
+
+// Add event listener to O-value input to auto-calculate on Enter key or when value changes
+document.addEventListener('DOMContentLoaded', function() {
+  const oValueInput = document.getElementById('o_value_input');
+  if (oValueInput) {
+    // Auto-calculate when Enter is pressed
+    oValueInput.addEventListener('keypress', function(e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        calculateOpening();
+      }
+    });
+    
+    // Optional: Auto-calculate when value changes (uncomment if desired)
+    // oValueInput.addEventListener('input', function() {
+    //   if (this.value && parseFloat(this.value) >= 0 && parseFloat(this.value) <= 100) {
+    //     calculateOpening();
+    //   }
+    // });
+  }
+});
 </script>
 </body>
 </html>

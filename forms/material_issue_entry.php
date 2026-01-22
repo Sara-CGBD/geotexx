@@ -53,6 +53,18 @@ if ($checkColumn && $checkColumn->num_rows == 0) {
     $conn->query("ALTER TABLE store_issue_entries ADD COLUMN deduction_details TEXT AFTER store_entry_reference");
 }
 
+// Add material_request_number column if it doesn't exist
+$checkRequestColumn = $conn->query("SHOW COLUMNS FROM store_issue_entries LIKE 'material_request_number'");
+if ($checkRequestColumn && $checkRequestColumn->num_rows == 0) {
+    $conn->query("ALTER TABLE store_issue_entries ADD COLUMN material_request_number VARCHAR(30) DEFAULT NULL AFTER deduction_details");
+}
+
+// Get URL parameters for prefilling
+$prefillManufacturer = isset($_GET['manufacturer']) ? htmlspecialchars($_GET['manufacturer']) : '';
+$prefillMaterialType = isset($_GET['material_type']) ? htmlspecialchars($_GET['material_type']) : '';
+$prefillAmount = isset($_GET['amount']) ? htmlspecialchars($_GET['amount']) : '';
+$prefillRequestNumber = isset($_GET['request_number']) ? htmlspecialchars($_GET['request_number']) : '';
+
 // Function to generate issue number
 function generateIssueNumber($conn) {
     $now = new DateTime('now', new DateTimeZone('Asia/Dhaka'));
@@ -104,8 +116,10 @@ $display_issue_number = generateIssueNumber($conn);
     .btn { padding:10px 16px; border:2px solid #ddd; background:#fff; border-radius:6px; cursor:pointer; font-size:14px; font-weight:500; transition:all 0.3s; color:#555; }
     .btn:hover { border-color:#3498db; color:#3498db; }
     .btn.selected { background:#3498db; color:#fff; border-color:#3498db; }
+    .btn:disabled, .btn.disabled { background:#e0e0e0; color:#9e9e9e; cursor:not-allowed; opacity:0.6; }
     .available-amount { background:#e8f5e9; padding:10px; border-radius:6px; margin-top:8px; color:#2e7d32; font-weight:600; }
     .error-amount { background:#ffebee; padding:10px; border-radius:6px; margin-top:8px; color:#c62828; font-weight:600; }
+    select:disabled { background:#f5f5f5; color:#666; cursor:not-allowed; opacity:0.7; }
     
     /* Modern Popup Notification Styles */
     .qty-limit-popup-overlay {
@@ -333,26 +347,33 @@ $display_issue_number = generateIssueNumber($conn);
     </div>
     
     <div class="form-group">
-      <label>Manufacturer Name:</label>
-      <select name="manufacturerName" id="manufacturerName" required>
+      <label>Manufacturer Name:<?php if ($prefillRequestNumber): ?> <span style="color:#666; font-size:12px;">(From Material Request - Cannot be changed)</span><?php endif; ?></label>
+      <select name="manufacturerName" id="manufacturerName" <?php echo $prefillRequestNumber ? 'disabled' : ''; ?> required>
         <option value="">-- Select Manufacturer --</option>
         <?php foreach ($manufacturerNames as $mfr): ?>
-        <option value="<?php echo htmlspecialchars($mfr); ?>"><?php echo htmlspecialchars($mfr); ?></option>
+        <option value="<?php echo htmlspecialchars($mfr); ?>" <?php echo ($prefillManufacturer === $mfr) ? 'selected' : ''; ?>><?php echo htmlspecialchars($mfr); ?></option>
         <?php endforeach; ?>
       </select>
+      <?php if ($prefillRequestNumber): ?>
+      <input type="hidden" name="manufacturerName" value="<?php echo htmlspecialchars($prefillManufacturer); ?>">
+      <?php endif; ?>
     </div>
     
     <div class="form-group">
-      <label>Material Type:</label>
-      <div class="btn-group" id="materialTypeGroup">
-        <button type="button" class="btn" data-value="PP Stable Fiber" onclick="selectBtn(this, 'materialTypeGroup')">PP Stable Fiber</button>
+      <label>Material Type:<?php if ($prefillRequestNumber): ?> <span style="color:#666; font-size:12px;">(From Material Request - Cannot be changed)</span><?php endif; ?></label>
+    <div class="btn-group" id="materialTypeGroup">
+        <button type="button" class="btn <?php echo ($prefillRequestNumber) ? 'disabled' : ''; ?>" data-value="PP Stable Fiber" <?php echo ($prefillRequestNumber) ? 'disabled' : 'onclick="selectBtn(this, \'materialTypeGroup\')"'; ?>>PP Stable Fiber</button>
+        <button type="button" class="btn <?php echo ($prefillRequestNumber) ? 'disabled' : ''; ?>" data-value="PSF Fiber" <?php echo ($prefillRequestNumber) ? 'disabled' : 'onclick="selectBtn(this, \'materialTypeGroup\')"'; ?>>PSF Fiber</button>
       </div>
-      <input type="hidden" id="materialType" name="materialType" value="" required>
+      <input type="hidden" id="materialType" name="materialType" value="<?php echo htmlspecialchars($prefillMaterialType); ?>" required>
+      <?php if ($prefillRequestNumber): ?>
+      <input type="hidden" name="materialRequestNumber" value="<?php echo htmlspecialchars($prefillRequestNumber); ?>">
+      <?php endif; ?>
     </div>
     
     <div class="form-group">
       <label>Issue Quantity (kg):</label>
-      <input type="number" name="amountKg" id="amountKg" step="0.01" min="0.01" placeholder="Enter issue quantity in kg" required>
+      <input type="number" name="amountKg" id="amountKg" step="0.01" min="0.01" placeholder="Enter issue quantity in kg" value="<?php echo htmlspecialchars($prefillAmount); ?>" required>
       <div id="availableAmountDisplay"></div>
     </div>
     
@@ -426,6 +447,11 @@ setInterval(updateTimeAndShift, 1000);
 updateTimeAndShift();
 
 function selectBtn(btn, groupId) {
+    // Prevent selection if button is disabled
+    if (btn.disabled || btn.classList.contains('disabled')) {
+        return;
+    }
+    
     const group = document.getElementById(groupId);
     const buttons = group.querySelectorAll('.btn');
     buttons.forEach(b => b.classList.remove('selected'));
@@ -438,6 +464,21 @@ function selectBtn(btn, groupId) {
     
     checkAvailableAmount();
     updateSummary();
+}
+
+function setMaterialTypeSelection(preferredType = 'PP Stable Fiber') {
+    const normalizedTarget = (preferredType || '').trim();
+    const buttons = Array.from(document.querySelectorAll('#materialTypeGroup .btn'));
+    let targetBtn = buttons.find(btn => ((btn.dataset.value || btn.innerText).trim()) === normalizedTarget);
+    if (!targetBtn) {
+        targetBtn = buttons.find(btn => ((btn.dataset.value || btn.innerText).trim()) === 'PP Stable Fiber');
+    }
+    if (!targetBtn && buttons.length > 0) {
+        targetBtn = buttons[0];
+    }
+    if (targetBtn) {
+        selectBtn(targetBtn, 'materialTypeGroup');
+    }
 }
 
 async function checkAvailableAmount() {
@@ -635,6 +676,56 @@ document.getElementById('materialIssueForm').addEventListener('submit', function
         e.preventDefault();
         alert('Amount cannot exceed available approved amount of ' + availableAmount.toFixed(2) + ' kg.');
         return false;
+    }
+});
+
+document.addEventListener('DOMContentLoaded', function() {
+    // Check if form is prefilled from material request
+    const isFromRequest = <?php echo $prefillRequestNumber ? 'true' : 'false'; ?>;
+    
+    // Prefill form if URL parameters are present
+    <?php if ($prefillMaterialType): ?>
+    const prefillMaterialType = '<?php echo htmlspecialchars($prefillMaterialType, ENT_QUOTES); ?>';
+    if (prefillMaterialType) {
+        setMaterialTypeSelection(prefillMaterialType);
+        // If from request, disable all material type buttons after selection
+        if (isFromRequest) {
+            document.querySelectorAll('#materialTypeGroup .btn').forEach(btn => {
+                btn.disabled = true;
+                btn.classList.add('disabled');
+            });
+        }
+    }
+    <?php endif; ?>
+    
+    <?php if ($prefillManufacturer): ?>
+    const prefillManufacturer = '<?php echo htmlspecialchars($prefillManufacturer, ENT_QUOTES); ?>';
+    if (prefillManufacturer) {
+        const manufacturerSelect = document.getElementById('manufacturerName');
+        manufacturerSelect.value = prefillManufacturer;
+        if (isFromRequest) {
+            manufacturerSelect.disabled = true;
+        }
+        checkAvailableAmount();
+    }
+    <?php endif; ?>
+    
+    <?php if ($prefillAmount): ?>
+    const prefillAmount = parseFloat('<?php echo htmlspecialchars($prefillAmount, ENT_QUOTES); ?>');
+    if (prefillAmount > 0) {
+        document.getElementById('amountKg').value = prefillAmount;
+        validateAmount();
+    }
+    <?php endif; ?>
+    
+    // Update summary if prefilled
+    <?php if ($prefillManufacturer && $prefillMaterialType && $prefillAmount): ?>
+    updateSummary();
+    <?php endif; ?>
+    
+    // Only set default if not from request
+    if (!isFromRequest) {
+        setMaterialTypeSelection('PP Stable Fiber');
     }
 });
 </script>

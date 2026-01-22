@@ -31,6 +31,8 @@ if (isset($_SESSION['login_time']) && (time() - $_SESSION['login_time']) > $sess
     exit();
 }
 
+// Note: prod_user will be allowed to access index.php but will default to welcome.php instead of dashboard
+
 
 // Regenerate session ID periodically to prevent session fixation (only if logged in)
 if (isset($_SESSION['last_regeneration']) && (time() - $_SESSION['last_regeneration']) > $regenerate_time) {
@@ -46,9 +48,9 @@ if ($userRole === 'agm operations' || $userRole === 'agm_ops' || $userRole === '
     $userRole = 'agm ops';
 }
 
-// Normalize prod_test to production_user
+// Normalize prod_test to prod_user (so they see welcome page, not dashboard)
 if ($userRole === 'prod_test') {
-    $userRole = 'production_user';
+    $userRole = 'prod_user';
 }
 
 $menuItems = [
@@ -79,12 +81,12 @@ $menuItems = [
                 ['text' => '8. Test Approval Dashboard', 'link' => 'admin/raw_material_test_approval_dashboard.php', 'icon' => 'fas fa-clipboard-check'],
                 ['text' => '9. Approved Material Inventory', 'link' => 'reports/approved_material_inventory.php', 'icon' => 'fas fa-check-square'],
                 ['text' => '10. Inventory Report', 'link' => 'reports/inventory_report.php', 'icon' => 'fas fa-warehouse'],
-                ['text' => '11. Material Issue Entry', 'link' => 'forms/material_issue_entry.php', 'icon' => 'fas fa-box-open'],
+                ['text' => '11. Material Request List', 'link' => 'reports/material_request_list.php', 'icon' => 'fas fa-file-signature'],
             ]],
             ['type' => 'group', 'text' => 'Quality Control(QC)', 'icon' => 'fas fa-clipboard-check', 'children' => [
                 ['text' => 'QC Test Approval Dashboard', 'link' => 'admin/qc_test_approval_dashboard.php', 'icon' => 'fas fa-check-double'],
                 ['text' => 'QC Entry Approval Dashboard', 'link' => 'admin/qc_approval_dashboard.php', 'icon' => 'fas fa-check-circle'],
-                ['text' => 'QC Reports Dashboard', 'link' => 'admin/qc_reports_dashboard.php', 'icon' => 'fas fa-tasks'],
+                // ['text' => 'QC Reports Dashboard', 'link' => 'admin/qc_reports_dashboard.php', 'icon' => 'fas fa-tasks'],
                 ['text' => 'QC Summary Report', 'link' => 'forms/qc_summary_report.php', 'icon' => 'fas fa-file-invoice'],
                 ['text' => 'QC Entry', 'link' => 'forms/qc_entry.php', 'icon' => 'fas fa-clipboard-check'],
                 ['text' => 'QC Test Order', 'link' => 'forms/qc_test_order.php', 'icon' => 'fas fa-list-check'],
@@ -99,8 +101,10 @@ $menuItems = [
                 ['text' => 'QC Pass/Fail Trend', 'link' => 'reports/qc_pass_fail_trend.php', 'icon' => 'fas fa-chart-line'],
             ]],
             ['type' => 'group', 'text' => 'Sheet Production', 'icon' => 'fas fa-industry', 'children' => [
+                ['text' => 'Material Request Entry', 'link' => 'forms/material_request_entry.php', 'icon' => 'fas fa-file-signature'],
                 ['text' => 'Fiber Received Entry', 'link' => 'forms/fiber_entry.php', 'icon' => 'fas fa-boxes'],
-                ['text' => 'Fiber to Roll Entry', 'link' => 'forms/fiber_to_roll_entry.php', 'icon' => 'fas fa-exchange-alt'],
+                ['text' => 'Fiber Input Entry', 'link' => 'forms/fiber_to_roll_entry.php', 'icon' => 'fas fa-exchange-alt'],
+                ['text' => 'GSM and Roll Input', 'link' => 'forms/gsm_roll_entry.php', 'icon' => 'fas fa-ruler-combined'],
                 ['text' => 'Roll QC Report', 'link' => 'forms/roll_qc_report.php', 'icon' => 'fas fa-clipboard-check'],
                 ['text' => 'Roll Entry', 'link' => 'forms/roll_entry.php', 'icon' => 'fas fa-dolly-flatbed'],
                 ['text' => 'Roll Internal Transfer Entry', 'link' => 'forms/roll_transfer_entry.php', 'icon' => 'fas fa-truck-moving'],
@@ -131,7 +135,8 @@ $menuItems = [
             ]],
             ['type' => 'group', 'text' => 'Finished Goods(FG)', 'icon' => 'fas fa-box', 'children' => [
                 ['text' => 'FG Entry', 'link' => 'forms/fg_entry.php', 'icon' => 'fas fa-plus-square'],
-                ['text' => 'FG Delivery', 'link' => 'forms/fg_delivery_entry.php', 'icon' => 'fas fa-truck'],
+                ['text' => 'FG Received Entry', 'link' => 'forms/fg_received_entry.php', 'icon' => 'fas fa-inbox'],
+                ['text' => 'FG Delivery Entry', 'link' => 'forms/fg_delivery_entry.php', 'icon' => 'fas fa-truck'],
                 ['text' => 'FG Batch Report (QC Summary)', 'link' => 'reports/fg_batch_report.php', 'icon' => 'fas fa-boxes'],
                 ['text' => 'FG Stock Summary', 'link' => 'reports/fg_stock_summary.php', 'icon' => 'fas fa-warehouse'],
                 ['text' => 'FG Delivery Report', 'link' => 'reports/fg_delivery_report.php', 'icon' => 'fas fa-truck'],
@@ -167,9 +172,14 @@ $menuItems = [
     
         // ========== PRODUCTION USER - Roll Production, Production, Scrap, Recycle ==========
         'production_user' => [
+            ['type' => 'group', 'text' => 'Material Request', 'icon' => 'fas fa-file-signature', 'children' => [
+                ['text' => 'Material Request Entry', 'link' => 'forms/material_request_entry.php', 'icon' => 'fas fa-file-signature'],
+                ['text' => 'Material Request Status', 'link' => 'reports/material_request_status_dashboard.php', 'icon' => 'fas fa-tasks'],
+            ]],
             ['type' => 'group', 'text' => 'Sheet Production', 'icon' => 'fas fa-industry', 'children' => [
                 ['text' => 'Fiber Received Entry', 'link' => 'forms/fiber_entry.php', 'icon' => 'fas fa-boxes'],
-                ['text' => 'Fiber to Roll Entry', 'link' => 'forms/fiber_to_roll_entry.php', 'icon' => 'fas fa-exchange-alt'],
+                ['text' => 'Fiber Input Entry', 'link' => 'forms/fiber_to_roll_entry.php', 'icon' => 'fas fa-exchange-alt'],
+                ['text' => 'GSM and Roll Input', 'link' => 'forms/gsm_roll_entry.php', 'icon' => 'fas fa-ruler-combined'],
                 ['text' => 'Roll Entry', 'link' => 'forms/roll_entry.php', 'icon' => 'fas fa-dolly-flatbed'],
                 ['text' => 'Roll Production Summary', 'link' => 'reports/roll_production_summary.php', 'icon' => 'fas fa-chart-bar'],
                 ['text' => 'Fiber to Roll Conversion', 'link' => 'reports/fiber_to_roll_conversion.php', 'icon' => 'fas fa-sync-alt'],
@@ -212,13 +222,16 @@ $menuItems = [
                 ['text' => 'Sewing Output Report', 'link' => 'reports/sewing_output_report.php', 'icon' => 'fas fa-scissors'],
                 ['text' => 'Branding Summary Report', 'link' => 'reports/branding_summary_report.php', 'icon' => 'fas fa-stamp'],
             ]],
+            ['type' => 'group', 'text' => 'Finished Goods(FG)', 'icon' => 'fas fa-box', 'children' => [
+                ['text' => 'FG Entry', 'link' => 'forms/fg_entry.php', 'icon' => 'fas fa-plus-square'],
+            ]],
         ],
 
         // ========== STORE USER - Raw Material Store Only ==========
         'store_user' => [
             ['type' => 'group', 'text' => 'Raw Material Store', 'icon' => 'fas fa-warehouse', 'children' => [
                 ['text' => 'Store Received Entry', 'link' => 'forms/store_received_entry.php', 'icon' => 'fas fa-truck-loading'],
-                ['text' => 'Material Issue Entry', 'link' => 'forms/material_issue_entry.php', 'icon' => 'fas fa-box-open'],
+                ['text' => 'Material Request List', 'link' => 'reports/material_request_list.php', 'icon' => 'fas fa-file-signature'],
                 ['text' => 'Inventory Report', 'link' => 'reports/inventory_report.php', 'icon' => 'fas fa-warehouse'],
             ]],
         ],
@@ -230,6 +243,7 @@ $menuItems = [
                 ['text' => 'Roll Transfer Log Report', 'link' => 'reports/roll_transfer_log.php', 'icon' => 'fas fa-file-alt'],
             ]],
             ['type' => 'group', 'text' => 'Finished Goods Delivery', 'icon' => 'fas fa-truck', 'children' => [
+                ['text' => 'FG Received Entry', 'link' => 'forms/fg_received_entry.php', 'icon' => 'fas fa-inbox'],
                 ['text' => 'FG Delivery Entry', 'link' => 'forms/fg_delivery_entry.php', 'icon' => 'fas fa-truck'],
                 ['text' => 'FG Delivery Report', 'link' => 'reports/fg_delivery_report.php', 'icon' => 'fas fa-file-alt'],
             ]],
@@ -252,7 +266,6 @@ $menuItems = [
                 ['text' => '1. Test Approval Dashboard', 'link' => 'admin/raw_material_test_approval_dashboard.php', 'icon' => 'fas fa-clipboard-check'],
                 ['text' => '2. Approved Material Inventory', 'link' => 'reports/approved_material_inventory.php', 'icon' => 'fas fa-check-square'],
                 ['text' => '3. Inventory Report', 'link' => 'reports/inventory_report.php', 'icon' => 'fas fa-warehouse'],
-                ['text' => '4. Store Received Entry', 'link' => 'forms/store_received_entry.php', 'icon' => 'fas fa-truck-loading'],
             ]],
             ['type' => 'group', 'text' => 'Sheet Production', 'icon' => 'fas fa-industry', 'children' => [
                 ['text' => 'Roll QC Report', 'link' => 'forms/roll_qc_report.php', 'icon' => 'fas fa-clipboard-check'],
@@ -260,11 +273,10 @@ $menuItems = [
             ['type' => 'group', 'text' => 'Quality Control(QC)', 'icon' => 'fas fa-clipboard-check', 'children' => [
                 ['text' => 'QC Test Approval Dashboard', 'link' => 'admin/qc_test_approval_dashboard.php', 'icon' => 'fas fa-check-double'],
                 ['text' => 'QC Entry Approval Dashboard', 'link' => 'admin/qc_approval_dashboard.php', 'icon' => 'fas fa-check-circle'],
-                ['text' => 'QC Reports Dashboard', 'link' => 'admin/qc_reports_dashboard.php', 'icon' => 'fas fa-tasks'],
+                // ['text' => 'QC Reports Dashboard', 'link' => 'admin/qc_reports_dashboard.php', 'icon' => 'fas fa-tasks'],
                 ['text' => 'AGM External Test Dashboard', 'link' => 'admin/agm_external_test_dashboard.php', 'icon' => 'fas fa-file-alt'],
                 ['text' => 'QC Summary Report', 'link' => 'forms/qc_summary_report.php', 'icon' => 'fas fa-file-invoice'],
                 ['text' => 'QC Test Order', 'link' => 'forms/qc_test_order.php', 'icon' => 'fas fa-list-check'],
-                ['text' => 'Lab Testing Scrap Entry', 'link' => 'forms/lab_testing_scrap_entry.php', 'icon' => 'fas fa-flask'],
             ]],
             ['type' => 'group', 'text' => 'Planning', 'icon' => 'fas fa-bullseye', 'children' => [
                 ['text' => 'Project Entry', 'link' => 'forms/project_entry.php', 'icon' => 'fas fa-project-diagram'],
@@ -294,6 +306,7 @@ $menuItems = [
                 ['text' => 'UV Test', 'link' => 'forms/weathering_exposure_test.php', 'icon' => 'fas fa-sun'],
                 ['text' => 'Fabric Internal Production Sample Test Summary', 'link' => 'forms/fabric_after_production_test.php', 'icon' => 'fas fa-industry'],
                 ['text' => 'Sun Test Report', 'link' => 'forms/sun_test_report.php', 'icon' => 'fas fa-sun'],
+                ['text' => 'Lab Testing Scrap Entry', 'link' => 'forms/lab_testing_scrap_entry.php', 'icon' => 'fas fa-trash'],
             ]],
         ],
 
@@ -301,9 +314,6 @@ $menuItems = [
         'checker' => [
             ['type' => 'link', 'text' => 'Lab Testing Reports Dashboard', 'link' => 'admin/lab_testing_dashboard.php', 'icon' => 'fas fa-chart-line'],
             ['type' => 'link', 'text' => 'External Test Checker Dashboard', 'link' => 'admin/external_checker_dashboard.php', 'icon' => 'fas fa-vial'],
-            ['type' => 'link', 'text' => 'QC Test Order', 'link' => 'forms/qc_test_order.php', 'icon' => 'fas fa-vial'],
-            ['type' => 'link', 'text' => 'Water Permeability Test', 'link' => 'forms/water_permeability_test.php', 'icon' => 'fas fa-tint'],
-            ['type' => 'link', 'text' => 'Characteristics Test', 'link' => 'forms/characteristics_test.php', 'icon' => 'fas fa-filter'],
         ],
 
         // ========== FINANCE USER - Finance Module + BOM ==========
@@ -368,9 +378,13 @@ $menuItems = [
             ]],
         ],
     
+        // ========== PROD_USER - Limited Access (No Dashboard) ==========
+        'prod_user' => [
+            ['type' => 'link', 'text' => 'Welcome', 'link' => 'welcome.php', 'icon' => 'fas fa-home'],
+        ],
+
         // ========== DEFAULT USER - Basic Access ==========
         'user' => [
-            ['type' => 'link', 'text' => 'Dashboard Overview', 'link' => 'admin/dashboard_overview.php', 'icon' => 'fas fa-th-large'],
             ['type' => 'link', 'text' => 'Quick Access', 'link' => 'quick_access.php', 'icon' => 'fas fa-rocket'],
         ],
     ];
@@ -381,15 +395,28 @@ $menuItems = [
 // Determine which menu items to display for the current user's role
 $displayMenuItems = $menuItems[$userRole] ?? $menuItems['user']; // Fallback to 'user' role if current role is not defined
 
-// Set default page - AGM ops should always see Dashboard Overview
-$dashboardRoles = ['admin', 'production_user', 'management', 'agm ops', 'agm operations'];
-if ($userRole === 'agm ops' || $userRole === 'agm operations') {
+// Set default page - Explicitly handle prod_user first, then others
+// Also check for URL parameter attempts to load dashboard
+$requestedPage = $_GET['page'] ?? '';
+
+// If prod_user tries to access dashboard via URL parameter, block it
+if ($userRole === 'prod_user') {
+    if (strpos($requestedPage, 'dashboard_overview') !== false || strpos($requestedPage, 'dashboard') !== false) {
+        $requestedPage = 'welcome.php';
+    }
+    // prod_user should always see welcome page, never dashboard
+    $defaultPage = $requestedPage ?: 'welcome.php';
+} elseif ($userRole === 'agm ops' || $userRole === 'agm operations') {
     // AGM ops always defaults to Dashboard Overview
-    $defaultPage = 'admin/dashboard_overview.php';
-} elseif (in_array($userRole, $dashboardRoles, true)) {
-    $defaultPage = 'admin/dashboard_overview.php';
+    $defaultPage = $requestedPage ?: 'admin/dashboard_overview.php';
 } else {
-    $defaultPage = 'welcome.php';
+    // Only admin and agm ops can access the reporting dashboard
+    $dashboardRoles = ['admin', 'agm ops', 'agm operations'];
+    if (in_array($userRole, $dashboardRoles, true)) {
+        $defaultPage = $requestedPage ?: 'admin/dashboard_overview.php';
+    } else {
+        $defaultPage = $requestedPage ?: 'welcome.php';
+    }
 }
 
 ?>
@@ -1372,7 +1399,18 @@ if ($userRole === 'agm ops' || $userRole === 'agm operations') {
     </div>
     <div class="overlay" id="sidebar-overlay"></div>
     <div class="main-content" id="main-content">
-      <iframe name="main" src="<?php echo htmlspecialchars($defaultPage); ?>" title="Main Content Area"></iframe>
+      <?php 
+      // Triple-check: If user is prod_user, force welcome.php (security check)
+      // Block any attempt to load dashboard, even via direct URL
+      if ($userRole === 'prod_user') {
+          if (strpos($defaultPage, 'dashboard_overview') !== false || 
+              strpos($defaultPage, 'dashboard') !== false ||
+              $defaultPage === 'admin/dashboard_overview.php') {
+              $defaultPage = 'welcome.php';
+          }
+      }
+      ?>
+      <iframe name="main" src="<?php echo htmlspecialchars($defaultPage); ?>" title="Main Content Area" id="mainFrame"></iframe>
     </div>
   </div>
 
@@ -1613,6 +1651,46 @@ if ($userRole === 'agm ops' || $userRole === 'agm operations') {
             closeSidebarBtn.style.display = 'none';
         }
     });
+
+    // Prevent prod_user from accessing dashboard - Monitor iframe src changes
+    <?php if ($userRole === 'prod_user'): ?>
+    (function() {
+        const mainFrame = document.getElementById('mainFrame');
+        if (mainFrame) {
+            // Check initial src on page load
+            setTimeout(function() {
+                if (mainFrame.src.includes('dashboard_overview') || mainFrame.src.includes('dashboard')) {
+                    mainFrame.src = 'welcome.php';
+                }
+            }, 100);
+            
+            // Monitor for any src changes (e.g., from menu clicks)
+            const observer = new MutationObserver(function(mutations) {
+                mutations.forEach(function(mutation) {
+                    if (mutation.type === 'attributes' && mutation.attributeName === 'src') {
+                        const currentSrc = mainFrame.src;
+                        if (currentSrc.includes('dashboard_overview') || currentSrc.includes('dashboard')) {
+                            mainFrame.src = 'welcome.php';
+                        }
+                    }
+                });
+            });
+            
+            observer.observe(mainFrame, {
+                attributes: true,
+                attributeFilter: ['src']
+            });
+            
+            // Also intercept navigation attempts via menu links
+            document.querySelectorAll('a[href*="dashboard_overview"], a[href*="dashboard"]').forEach(link => {
+                link.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    mainFrame.src = 'welcome.php';
+                });
+            });
+        }
+    })();
+    <?php endif; ?>
 
   </script>
 </body>

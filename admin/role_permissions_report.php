@@ -98,6 +98,7 @@ $rolePermissions = [
         'description' => 'Laboratory testing and QC test order entry',
         'modules' => [
             'Lab Testing' => 'Full Access (QC Test Order, All Tests)',
+            'Lab Testing Scrap Entry' => 'Full Access (Lab Scrap Entry)',
             'Test Reports' => 'Submit Test Reports',
             'QC Module' => 'Testing Only (No QC Entry)',
             'Production' => 'No Access',
@@ -144,6 +145,26 @@ $rolePermissions = [
             'Scrap/Waste' => 'View Reports',
             'Recycled Material Reports' => 'Full Access',
             'Other Modules' => 'No Access'
+        ]
+    ],
+    'store_user' => [
+        'name' => 'Store User',
+        'description' => 'Raw material store management and inventory',
+        'modules' => [
+            'Raw Material Store' => 'Full Access (Store Received Entry, Material Issue)',
+            'Inventory Report' => 'Full Access',
+            'Other Modules' => 'No Access',
+            'Admin Panel' => 'No Access'
+        ]
+    ],
+    'delivery_user' => [
+        'name' => 'Delivery User',
+        'description' => 'Roll transfer and finished goods delivery management',
+        'modules' => [
+            'Roll Transfer' => 'Full Access (Transfer Entry, Log Reports)',
+            'Finished Goods Delivery' => 'Full Access (FG Received, FG Delivery Entry, Reports)',
+            'Other Modules' => 'No Access',
+            'Admin Panel' => 'No Access'
         ]
     ]
 ];
@@ -309,7 +330,7 @@ $totalUsers = $conn->query($totalUsersQuery)->fetch_assoc()['total'];
                         <?php endif; ?>
                     </td>
                     <td>
-                        <?php if (in_array($roleKey, ['admin', 'production_user', 'qc_inspector', 'tester', 'checker', 'finance_user', 'planning_user'])): ?>
+                        <?php if (in_array($roleKey, ['admin', 'production_user', 'qc_inspector', 'tester', 'checker', 'finance_user', 'planning_user', 'store_user', 'delivery_user'])): ?>
                             <span class="access-full">✓ Yes</span>
                         <?php else: ?>
                             <span class="access-none">✗ No</span>

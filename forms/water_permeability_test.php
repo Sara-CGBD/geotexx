@@ -36,20 +36,8 @@ $conn = SecurityConfig::getConnection();
 $reporter_id = $_SESSION['user_id'];
 $reporter_name = $_SESSION['username'];
 
-// Fetch full name from database
-$reporter_full_name = $reporter_name;
-try {
-    $stmt = $conn->prepare("SELECT full_name FROM new_user WHERE id = ?");
-    $stmt->bind_param("i", $reporter_id);
-    $stmt->execute();
-    $result = $stmt->get_result();
-    if ($row = $result->fetch_assoc()) {
-        $reporter_full_name = $row['full_name'] ?: $reporter_name;
-    }
-    $stmt->close();
-} catch (Exception $e) {
-    $reporter_full_name = $reporter_name;
-}
+// Use full_name from session (set during login) - this ensures correct user from auto login
+$reporter_full_name = $_SESSION['full_name'] ?? $_SESSION['username'];
 
 $message = '';
 $error = '';
@@ -202,7 +190,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['wpt_action'], $_POST[
                 }
                 $bundleCheck->close();
                 
-                $_SESSION['success_message'] = "✅ Test approved successfully!";
+                $_SESSION['success_message'] = "Test approved successfully!";
                 $stmt->close();
                 // Prevent caching
                 header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
@@ -246,9 +234,114 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_test'])) {
             'lab_test_no' => trim($_POST['lab_test_no']),
             'test_date' => trim($_POST['test_date']),
             // Get reference number - use individual roll reference if bundle is selected
-            'reference_number' => (isset($_POST['individual_roll_reference']) && !empty($_POST['individual_roll_reference'])) 
-                ? trim($_POST['individual_roll_reference']) 
-                : trim($_POST['reference_number']),
+            // Get reference number - validate and ensure full reference is stored
+            'reference_number' => (function() use ($conn) {
+                $ref = '';
+                
+                // Debug: Log all POST data related to references
+                error_log("WPT Reference Debug - individual_roll_reference: " . ($_POST['individual_roll_reference'] ?? 'NOT SET'));
+                error_log("WPT Reference Debug - from_reference: " . ($_POST['from_reference'] ?? 'NOT SET'));
+                error_log("WPT Reference Debug - to_reference: " . ($_POST['to_reference'] ?? 'NOT SET'));
+                error_log("WPT Reference Debug - reference_number: " . ($_POST['reference_number'] ?? 'NOT SET'));
+                
+                // Priority 1: Individual roll reference (from bundle selection)
+                if (isset($_POST['individual_roll_reference']) && !empty($_POST['individual_roll_reference'])) {
+                    $ref = trim($_POST['individual_roll_reference']);
+                    error_log("WPT Reference: Using individual_roll_reference: " . $ref);
+                } 
+                // Priority 2: From/To reference (line-based selection) - only use if both are set and not empty
+                elseif (isset($_POST['from_reference']) && isset($_POST['to_reference']) && 
+                          !empty(trim($_POST['from_reference'])) && !empty(trim($_POST['to_reference']))) {
+                    $fromRef = trim($_POST['from_reference']);
+                    $toRef = trim($_POST['to_reference']);
+                    error_log("WPT Reference: from_reference = " . $fromRef . ", to_reference = " . $toRef);
+                    
+                    // Validate that from_reference is a valid full reference
+                    if (strlen($fromRef) > 3 && preg_match('/[A-Za-z]/', $fromRef)) {
+                        $ref = $fromRef;
+                        error_log("WPT Reference: Using valid from_reference: " . $ref);
+                    } else {
+                        // Invalid from_reference - will be handled by validation below
+                        $ref = $fromRef;
+                        error_log("WPT Reference: Invalid from_reference detected: " . $ref);
+                    }
+                } 
+                // Priority 3: Regular reference_number field (All Lines selection)
+                elseif (isset($_POST['reference_number']) && !empty($_POST['reference_number'])) {
+                    $ref = trim($_POST['reference_number']);
+                    error_log("WPT Reference: Using reference_number: " . $ref);
+                    // Check if this is a range format (from|to)
+                    if (strpos($ref, '|') !== false) {
+                        $parts = explode('|', $ref);
+                        if (count($parts) === 2) {
+                            $ref = trim($parts[0]); // Extract from reference if range format
+                            error_log("WPT Reference: Extracted from range: " . $ref);
+                        }
+                    }
+                }
+                
+                error_log("WPT Reference: Final reference before validation: " . $ref);
+                
+                // Validate reference format - must contain letters/numbers and be more than 3 chars (typical format like "2.0L126JAN16-R06")
+                if (!empty($ref)) {
+                    $refTrimmed = trim($ref);
+                    // If reference is too short or doesn't look like a valid reference, try to find full reference from roll_entry
+                    if (strlen($refTrimmed) <= 3 || !preg_match('/[A-Za-z]/', $refTrimmed)) {
+                        // Try to find a matching reference in roll_entry
+                        // For single digit like "2", look for references starting with "2." 
+                        $lookupStmt = null;
+                        if (strlen($refTrimmed) <= 3 && preg_match('/^\d+$/', $refTrimmed)) {
+                            // Single number - look for references starting with this number followed by a dot (e.g., "2.0L...")
+                            $lookupStmt = $conn->prepare("SELECT reference_number FROM roll_entry 
+                                WHERE reference_number LIKE ?
+                                ORDER BY date_time DESC 
+                                LIMIT 1");
+                            $pattern1 = $refTrimmed . '.%';
+                            $lookupStmt->bind_param("s", $pattern1);
+                        } else {
+                            // Other patterns - look for references containing the partial reference
+                            $lookupStmt = $conn->prepare("SELECT reference_number FROM roll_entry 
+                                WHERE reference_number LIKE ? 
+                                   OR reference_number LIKE ? 
+                                   OR reference_number LIKE ?
+                                ORDER BY date_time DESC 
+                                LIMIT 1");
+                            $likePattern1 = '%' . $refTrimmed . '%';
+                            $likePattern2 = $refTrimmed . '-%';
+                            $likePattern3 = $refTrimmed . '%';
+                            $lookupStmt->bind_param("sss", $likePattern1, $likePattern2, $likePattern3);
+                        }
+                        
+                        if ($lookupStmt) {
+                            $lookupStmt->execute();
+                            $lookupResult = $lookupStmt->get_result();
+                            if ($lookupRow = $lookupResult->fetch_assoc()) {
+                                $ref = $lookupRow['reference_number'];
+                            } else {
+                                // If lookup fails and reference is too short, throw an error instead of saving "2"
+                                if (strlen($refTrimmed) <= 3) {
+                                    throw new Exception("Invalid reference: '{$refTrimmed}'. Could not find matching reference. Please select a valid full reference number from the dropdown.");
+                                }
+                            }
+                            $lookupStmt->close();
+                        }
+                    }
+                }
+                
+                // Final validation - ensure reference is not empty and has minimum length and contains letters
+                $finalRef = trim($ref);
+                if (empty($finalRef)) {
+                    throw new Exception("Reference number is required. Please select a reference from the dropdown.");
+                }
+                if (strlen($finalRef) <= 3) {
+                    throw new Exception("Reference number '{$finalRef}' is too short. Please select a valid full reference from the dropdown.");
+                }
+                if (!preg_match('/[A-Za-z]/', $finalRef)) {
+                    throw new Exception("Reference number '{$finalRef}' is invalid (must contain letters). Please select a valid full reference from the dropdown.");
+                }
+                
+                return $finalRef;
+            })(),
             'gsm' => intval($_POST['gsm']),
             'roll_number' => trim($_POST['roll_number']),
             'specimen_area' => floatval($_POST['specimen_area']),
@@ -314,7 +407,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_test'])) {
         $gsm_formatted = number_format($data['gsm'] / 100, 1); // e.g., 400 -> 4.0
         $lab_test_formatted = 'LT' . $generated_lab_test_no;
         $roll_formatted = 'R' . $data['roll_number'];
-        $data['sample_id'] = "{$gsm_formatted}L{$year}{$month}{$day}-{$lab_test_formatted}-{$roll_formatted}";
         
         // Generate Report Number in format: WPT-YYYYMMDD-XXXXX (resets at 8 AM daily)
         // Use MAX to get the highest number for today, then increment
@@ -354,39 +446,168 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_test'])) {
         // Even admin submissions go through checker workflow
         // All submissions start as 'pending' for checker review
         
-        // Add sample_id, shift, and reference_number columns if they don't exist
+        // Add shift and reference_number columns if they don't exist
         $columns_to_add = [
-            ['name' => 'sample_id', 'definition' => 'VARCHAR(100) AFTER report_number'],
             ['name' => 'shift', 'definition' => 'VARCHAR(10) AFTER test_date'],
-            ['name' => 'reference_number', 'definition' => 'VARCHAR(100)'],
-            ['name' => 'bundle_reference', 'definition' => 'VARCHAR(100) NULL AFTER reference_number']
+            ['name' => 'reference_number', 'definition' => 'VARCHAR(255)'], // Increased from 100 to 255 to ensure full reference fits
+            ['name' => 'bundle_reference', 'definition' => 'VARCHAR(255) NULL AFTER reference_number'] // Increased from 100 to 255
         ];
         
         foreach ($columns_to_add as $col) {
             $check = $conn->query("SHOW COLUMNS FROM water_permeability_tests LIKE '{$col['name']}'");
             if ($check->num_rows == 0) {
                 $conn->query("ALTER TABLE water_permeability_tests ADD COLUMN {$col['name']} {$col['definition']}");
+                error_log("WPT: Added column {$col['name']} with definition: {$col['definition']}");
+            } else {
+                // Check if column exists but might be too small - alter it to ensure it's large enough
+                if ($col['name'] === 'reference_number' || $col['name'] === 'bundle_reference') {
+                    $colInfo = $conn->query("SHOW COLUMNS FROM water_permeability_tests WHERE Field = '{$col['name']}'");
+                    if ($colInfo && $row = $colInfo->fetch_assoc()) {
+                        // Check if it's VARCHAR and smaller than 255
+                        if (preg_match('/varchar\((\d+)\)/i', $row['Type'], $matches)) {
+                            $currentSize = (int)$matches[1];
+                            if ($currentSize < 255) {
+                                $conn->query("ALTER TABLE water_permeability_tests MODIFY COLUMN {$col['name']} VARCHAR(255)");
+                                error_log("WPT: Updated column {$col['name']} size from {$currentSize} to 255");
+                            }
+                        }
+                    }
+                }
             }
         }
         
         // Get bundle reference if individual roll is selected
+        // Or handle from/to reference selection
+        // Generate individual roll references from from-to range (same as other tests)
+        $bulk_rolls = [];
+        if (isset($_POST['from_reference']) && isset($_POST['to_reference']) && 
+            !empty(trim($_POST['from_reference'])) && !empty(trim($_POST['to_reference']))) {
+            
+            $fromRef = trim($_POST['from_reference']);
+            $toRef = trim($_POST['to_reference']);
+            
+            // Extract base reference and roll numbers
+            $fromBaseRef = '';
+            $fromRollNum = 0;
+            $toBaseRef = '';
+            $toRollNum = 0;
+            
+            if (preg_match('/^(.+)-(\d+)$/', $fromRef, $fromMatches)) {
+                $fromBaseRef = $fromMatches[1];
+                $fromRollNum = (int)$fromMatches[2];
+            } else {
+                $fromBaseRef = $fromRef;
+                $fromRollNum = 1;
+            }
+            
+            if (preg_match('/^(.+)-(\d+)$/', $toRef, $toMatches)) {
+                $toBaseRef = $toMatches[1];
+                $toRollNum = (int)$toMatches[2];
+            } else {
+                $toBaseRef = $toRef;
+                $toRollNum = 1;
+            }
+            
+            // If same base, generate all references from fromRollNum to toRollNum
+            if ($fromBaseRef === $toBaseRef && $fromRollNum > 0 && $toRollNum > 0) {
+                for ($roll = $fromRollNum; $roll <= $toRollNum; $roll++) {
+                    $bulk_rolls[] = $fromBaseRef . '-' . $roll;
+                }
+                error_log("Water Test: Generated " . count($bulk_rolls) . " individual references from range: " . $fromRef . " to " . $toRef);
+            } else {
+                // Different bases - add both endpoints
+                $bulk_rolls[] = $fromRef;
+                if ($toRef !== $fromRef) {
+                    $bulk_rolls[] = $toRef;
+                }
+                error_log("Water Test: WARNING - Different base references in range. Generated " . count($bulk_rolls) . " references.");
+            }
+        }
+        
         $bundle_reference = null;
         if (isset($_POST['individual_roll_reference']) && !empty($_POST['individual_roll_reference']) 
             && isset($_POST['reference_number']) && !empty($_POST['reference_number'])) {
             $bundle_reference = trim($_POST['reference_number']); // Original bundle reference
+        } elseif (!empty($bulk_rolls)) {
+            // Range selected - bundle_reference will be set for all rolls
+            $bundle_reference = trim($_POST['from_reference']) . '|' . trim($_POST['to_reference']);
+        } elseif (isset($_POST['from_reference']) && isset($_POST['to_reference']) && 
+                  !empty($_POST['from_reference']) && !empty($_POST['to_reference'])) {
+            // Line-based selection: can store range info if needed in the future
+            // For now, we use from_reference as the main reference
+        }
+        
+        // Final safety check - absolutely prevent saving "2" or other invalid short references
+        $finalReference = trim($data['reference_number']);
+        
+        // Log the reference before validation
+        error_log("WPT Final Check - Reference to save: '" . $finalReference . "' (length: " . strlen($finalReference) . ")");
+        
+        if (empty($finalReference)) {
+            throw new Exception("Cannot save test: Reference number is required. Please select a reference from the dropdown.");
+        }
+        if (strlen($finalReference) <= 3) {
+            throw new Exception("Cannot save test: Reference number '" . $finalReference . "' is too short (length: " . strlen($finalReference) . "). Please select a valid full reference from the dropdown.");
+        }
+        if (!preg_match('/[A-Za-z]/', $finalReference)) {
+            throw new Exception("Cannot save test: Reference number '{$finalReference}' is invalid (must contain letters). Please select a valid full reference from the dropdown.");
+        }
+        
+        // Process each roll in the range (or single reference)
+        $rolls_to_process = !empty($bulk_rolls) ? $bulk_rolls : [];
+        if (empty($rolls_to_process) && !empty($finalReference)) {
+            $rolls_to_process = [$finalReference];
+        }
+        
+        if (empty($rolls_to_process)) {
+            throw new Exception("No reference selected. Please select a reference or range.");
         }
         
         $stmt = $conn->prepare("INSERT INTO water_permeability_tests 
-            (report_number, sample_id, lab_test_number, reference_number, bundle_reference, gsm, roll_number, test_date, shift, test_results, 
+            (report_number, lab_test_number, reference_number, bundle_reference, gsm, roll_number, test_date, shift, test_results, 
              test_performed_by, checked_by, approved_by, checked_at, approved_at, 
              reporter_id, reporter_name, status, remarks) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
         
-        $stmt->bind_param('ssisssisssssssssiss', 
+        $inserted_count = 0;
+        $report_numbers = [];
+        $base_report_no = $data['report_no'];
+        $base_lab_test_no = $data['lab_test_no'];
+        
+        foreach ($rolls_to_process as $roll_ref) {
+            // For bulk rolls, use the individual roll as reference_number
+            $current_reference = !empty($bulk_rolls) ? $roll_ref : $finalReference;
+            
+            // Validate the current reference
+            if (strlen($current_reference) <= 3 || !preg_match('/[A-Za-z]/', $current_reference)) {
+                error_log("Water Test: Skipping invalid reference: " . $current_reference);
+                continue;
+            }
+            
+            // Generate unique report number for each roll
+            if ($inserted_count > 0) {
+                // Generate new report number for subsequent rolls
+                $date_formatted = date('Ymd');
+                $countStmt = $conn->prepare("SELECT COUNT(*) as cnt FROM water_permeability_tests WHERE DATE(created_at) = CURDATE()");
+                $countStmt->execute();
+                $countResult = $countStmt->get_result();
+                $countRow = $countResult->fetch_assoc();
+                $seq = (int)$countRow['cnt'] + 1;
+                $data['report_no'] = "WPT-{$date_formatted}-" . str_pad($seq, 3, '0', STR_PAD_LEFT);
+                $data['lab_test_no'] = (string)$seq;
+            }
+            $report_numbers[] = $data['report_no'];
+        
+        // Log the reference right before binding to prepared statement
+            error_log("WPT Database Insert - reference_number value: '" . $current_reference . "' (length: " . strlen($current_reference) . ")");
+        error_log("WPT Database Insert - bundle_reference value: " . ($bundle_reference ? "'" . $bundle_reference . "'" : 'NULL'));
+        
+        // Fix bind_param types: reference_number should be 's' (string), not 'i' (integer)
+        // Types: report_no(s), lab_test_no(s), reference_number(s), bundle_reference(s), gsm(i), roll_number(s), test_date(s), shift(s), test_results(s), test_performed_by(s), checked_by(s), approved_by(s), checked_at(s), approved_at(s), reporter_id(i), reporter_name(s), status(s), remarks(s)
+        $stmt->bind_param('ssssissssssssssiss', 
             $data['report_no'],
-            $data['sample_id'], 
             $data['lab_test_no'],
-            $data['reference_number'],
+                $current_reference,  // Use current roll reference
             $bundle_reference, 
             $data['gsm'], 
             $data['roll_number'], 
@@ -404,17 +625,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_test'])) {
             $data['remarks']
         );
         
+        // Log successful insertion
+            error_log("WPT Database Insert - About to execute with reference_number: '" . $current_reference . "'");
+        
         if (!$stmt->execute()) {
             $error_msg = $stmt->error;
-            error_log("Insert failed: " . $error_msg);
-            throw new Exception("Failed to submit test: " . $error_msg);
+                error_log("Water Test: Failed to insert roll " . $roll_ref . ": " . $error_msg);
+                continue;
         }
         
         // Check if row was actually inserted
         $inserted_id = $conn->insert_id;
         if (!$inserted_id) {
             error_log("No insert ID returned. Affected rows: " . $conn->affected_rows);
-            throw new Exception("Failed to insert record - no ID returned");
+                error_log("WPT Database Insert - Failed to insert, reference_number was: '" . $current_reference . "'");
+                continue;
+            }
+            
+            $inserted_count++;
+        }
+        
+        $stmt->close();
+        
+        if ($inserted_count === 0) {
+            throw new Exception("Failed to save any tests. Please check your data and try again.");
         }
         
         // Check bundle completion if this is from a bundle and was approved
@@ -423,14 +657,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_test'])) {
         }
         
         $conn->commit();
+        
+        // Generate success message based on count
+        if ($inserted_count > 1) {
+            $report_list = implode(', ', array_slice($report_numbers, 0, 3)) . (count($report_numbers) > 3 ? '...' : '');
         if ($status === 'pending') {
-            $message = "✅ Water Permeability Test submitted for checking! Report: " . htmlspecialchars($data['report_no']);
+                $message = "{$inserted_count} Water Permeability Tests submitted for checking! Reports: " . htmlspecialchars($report_list);
         } elseif ($status === 'checked') {
-            $message = "✅ Water Permeability Test forwarded to admin for approval! Report: " . htmlspecialchars($data['report_no']);
+                $message = "{$inserted_count} Water Permeability Tests forwarded to admin for approval! Reports: " . htmlspecialchars($report_list);
         } else {
-            $message = "✅ Water Permeability Test approved and submitted successfully! Report: " . htmlspecialchars($data['report_no']);
+                $message = "{$inserted_count} Water Permeability Tests approved and submitted successfully! Reports: " . htmlspecialchars($report_list);
+            }
+        } else {
+            if ($status === 'pending') {
+                $message = "Water Permeability Test submitted for checking! Report: " . htmlspecialchars($report_numbers[0]);
+            } elseif ($status === 'checked') {
+                $message = "Water Permeability Test forwarded to admin for approval! Report: " . htmlspecialchars($report_numbers[0]);
+            } else {
+                $message = "Water Permeability Test approved and submitted successfully! Report: " . htmlspecialchars($report_numbers[0]);
+            }
         }
-        $stmt->close();
         
         // Store success message in session and redirect to refresh dropdown
         $_SESSION['success_message'] = $message;
@@ -560,7 +806,6 @@ function createWaterPermeabilityTable($conn) {
     $create_table = "CREATE TABLE IF NOT EXISTS water_permeability_tests (
         id INT AUTO_INCREMENT PRIMARY KEY,
         report_number VARCHAR(100) UNIQUE NOT NULL,
-        sample_id VARCHAR(100),
         lab_test_number VARCHAR(50) NOT NULL,
         reference_number VARCHAR(100),
         gsm INT NOT NULL,
@@ -580,7 +825,6 @@ function createWaterPermeabilityTable($conn) {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         INDEX idx_report_number (report_number),
-        INDEX idx_sample_id (sample_id),
         INDEX idx_reference_number (reference_number),
         INDEX idx_shift (shift),
         INDEX idx_status (status),
@@ -695,7 +939,7 @@ $generated_report_no = generateNextReportNumber($conn);
   <h1> Water Permeability Test (ISO 11058)</h1>
 
   <?php if ($message): ?>
-    <div class="alert alert-success">✅ <?php echo $message; ?></div>
+    <div class="alert alert-success"><?php echo $message; ?></div>
   <?php endif; ?>
 
   <?php if ($error): ?>
@@ -703,7 +947,7 @@ $generated_report_no = generateNextReportNumber($conn);
   <?php endif; ?>
 
   <div style="margin-bottom: 15px;">
-    <a href="../index.php" style="background:#e74c3c; color:#fff; text-decoration: none; padding: 6px 12px; border-radius: 4px; display: inline-block; font-size: 14px;">
+    <a href="../admin/lab_testing_dashboard.php" style="background:#e74c3c; color:#fff; text-decoration: none; padding: 6px 12px; border-radius: 4px; display: inline-block; font-size: 14px;">
       ← Back to Dashboard
     </a>
   </div>
@@ -817,7 +1061,7 @@ $generated_report_no = generateNextReportNumber($conn);
     </div>
   <?php endif; ?>
   
-  <form method="POST" action="">
+  <form method="POST" action="" onsubmit="return validateWPTForm();">
 
     <!-- Date/Time and Shift Display -->
     <div id="dateTimeDisplay" class="summary-info"></div>
@@ -888,75 +1132,58 @@ $generated_report_no = generateNextReportNumber($conn);
         <input type="text" name="report_no" id="report_no" value="<?php echo htmlspecialchars($generated_report_no); ?>" readonly class="readonly">
       </div>
       <div class="form-group">
-        <label>Sample ID:</label>
-        <input type="text" name="sample_id" id="sample_id" readonly class="readonly">
-      </div>
-      <div class="form-group">
         <label>Lab Test No.:</label>
         <input type="text" name="lab_test_no" id="lab_test_no" value="<?php echo htmlspecialchars($generated_lab_test_no); ?>" readonly class="readonly">
       </div>
       <div class="form-group">
         <label>Test Date:</label>
-        <input type="date" name="test_date" id="test_date" value="<?php echo date('Y-m-d'); ?>" required onchange="generateSampleId()">
+        <input type="date" name="test_date" id="test_date" value="<?php echo date('Y-m-d'); ?>" required>
       </div>
     </div>
 
     <div class="form-row">
-      <div class="form-group">
+      <div class="form-group" style="grid-column: 1 / -1;">
         <label>Reference Number:</label>
-        <select id="reference_number" name="reference_number" onchange="handleWPTReferenceSelection(this.value)" required>
+        
+        <!-- Line Selection Buttons -->
+        <div id="wpt_line_selection_buttons" style="display:flex; gap:10px; margin-bottom:10px;">
+          <button type="button" id="wpt_line1_btn" class="line-btn" onclick="filterWPTByLine('L1')" style="padding:8px 16px; border:2px solid #3498db; border-radius:6px; background:#e3f2fd; color:#1565C0; font-weight:600; cursor:pointer;">
+            Line 1
+          </button>
+          <button type="button" id="wpt_line2_btn" class="line-btn" onclick="filterWPTByLine('L2')" style="padding:8px 16px; border:2px solid #3498db; border-radius:6px; background:#e3f2fd; color:#1565C0; font-weight:600; cursor:pointer;">
+            Line 2
+          </button>
+          <button type="button" id="wpt_line_all_btn" class="line-btn active" onclick="filterWPTByLine('all')" style="padding:8px 16px; border:2px solid #3498db; border-radius:6px; background:#2196F3; color:#ffffff; font-weight:600; cursor:pointer;">
+            All Lines
+          </button>
+        </div>
+        
+        <!-- From/To Reference Selection (shown when line is selected) -->
+        <div id="wpt_bulk_reference_selection" style="display:none; margin-bottom:10px; padding:10px; background:#f8f9fa; border:1px solid #ddd; border-radius:6px;">
+          <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+            <label style="font-weight:600; margin:0;">From Reference:</label>
+            <select id="wpt_from_reference" name="from_reference" style="min-width:250px; padding:5px; border:1px solid #ccc; border-radius:4px;" onchange="updateWPTReferenceRange(true); handleWPTFromToReferenceChange();">
+              <option value="">-- Select From Reference --</option>
+            </select>
+            <label style="font-weight:600; margin:0;">To Reference:</label>
+            <select id="wpt_to_reference" name="to_reference" style="min-width:250px; padding:5px; border:1px solid #ccc; border-radius:4px;" onchange="updateWPTReferenceRange(false); handleWPTFromToReferenceChange();">
+              <option value="">-- Select To Reference --</option>
+            </select>
+            <button type="button" onclick="applyWPTBulkReferenceSelection()" style="padding:6px 12px; background:#3498db; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:600;">
+              Apply
+            </button>
+            <button type="button" onclick="clearWPTBulkReferenceSelection()" style="padding:6px 12px; background:#6c757d; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:600;">
+              Clear
+            </button>
+          </div>
+          <!-- Hidden input to store the selected product_reference when line-based selection is used -->
+          <input type="hidden" id="wpt_line_based_product_reference" name="product_reference" value="">
+        </div>
+        
+        <!-- Production Product Reference Dropdown (shown when "All Lines" is selected) -->
+        <select id="reference_number" name="reference_number" onchange="handleWPTReferenceSelection(this.value)" required style="padding:10px; border:1px solid #ccc; border-radius:6px; width:100%;">
           <option value="">Select Reference Number</option>
-          <?php
-          // Fetch reference numbers from roll_received (roll received entry) - support bundles
-          $bundleReferences = [];
-          $singleReferences = [];
-          
-          $refQuery = "SELECT DISTINCT r.reference_number, MAX(r.created_at) as created_at
-                       FROM roll_received r
-                       LEFT JOIN water_permeability_tests wpt ON r.reference_number = wpt.reference_number
-                         AND wpt.status IN ('pending', 'checked', 'approved')
-                       WHERE r.reference_number IS NOT NULL 
-                         AND r.reference_number != ''
-                         AND r.is_deleted = 0
-                         AND wpt.reference_number IS NULL
-                       GROUP BY r.reference_number
-                       ORDER BY created_at DESC 
-                       LIMIT 100";
-          $refResult = $conn->query($refQuery);
-          if ($refResult && $refResult->num_rows > 0) {
-              while ($refRow = $refResult->fetch_assoc()) {
-                  $ref = $refRow['reference_number'];
-                  
-                  // Check if this is a bundle reference (ends with -N pattern)
-                  if (preg_match('/-(\d+)$/', $ref, $matches)) {
-                      $rollCount = (int)$matches[1];
-                      $baseRef = preg_replace('/-\d+$/', '', $ref);
-                      
-                      $bundleReferences[] = [
-                          'reference' => $ref,
-                          'base_reference' => $baseRef,
-                          'roll_count' => $rollCount
-                      ];
-                  } else {
-                      $singleReferences[] = $ref;
-                  }
-              }
-          }
-          
-          // Show bundle references
-          foreach($bundleReferences as $bundle): ?>
-            <option value="<?php echo htmlspecialchars($bundle['reference']); ?>" data-is-bundle="true" data-base-ref="<?php echo htmlspecialchars($bundle['base_reference']); ?>" data-roll-count="<?php echo $bundle['roll_count']; ?>">
-              <?php echo htmlspecialchars($bundle['reference']); ?> (Bundle - <?php echo $bundle['roll_count']; ?> rolls)
-            </option>
-          <?php endforeach; ?>
-          
-          <!-- Show single roll references -->
-          <?php foreach($singleReferences as $ref): ?>
-            <option value="<?php echo htmlspecialchars($ref); ?>" data-is-bundle="false">
-              <?php echo htmlspecialchars($ref); ?>
-            </option>
-          <?php endforeach; ?>
-          ?>
+          <!-- References will be loaded dynamically via JavaScript from API -->
         </select>
         
         <!-- Individual Roll Selector (shown when bundle is selected) -->
@@ -1172,48 +1399,109 @@ function updateTimeBD() {
 setInterval(updateTimeBD, 1000);
 updateTimeBD();
 
-function generateSampleId() {
-  const refSelect = document.getElementById('reference_number');
-  const labTestNo = document.getElementById('lab_test_no')?.value || '';
-  const refValue = refSelect ? refSelect.value.trim() : '';
+// Track if references are currently being loaded to prevent duplicate calls
+let wptReferencesLoading = false;
 
-  if (!refValue || !labTestNo) return;
-
-  // Base is everything up to first dash (e.g., 4.0L125DEC16 from 4.0L125DEC16-R02-GT0.9.H0.1)
-  const parts = refValue.split('-');
-  const base = parts[0] || refValue;
-
-  // Roll part: first segment starting with R (e.g., R02)
-  let rollPart = '';
-  for (const p of parts) {
-    if (p.toUpperCase().startsWith('R')) {
-      rollPart = p.toUpperCase();
-      break;
+// Load references list on page load (same as sun test)
+function loadWPTReferencesList() {
+    // Prevent multiple simultaneous calls
+    if (wptReferencesLoading) {
+        console.log('WPT References already loading, skipping...');
+        return;
     }
-  }
-  if (!rollPart) {
-    const m = refValue.match(/(R\d+)/i);
-    if (m) rollPart = m[1].toUpperCase();
-  }
-  if (!rollPart) rollPart = 'R01';
-
-  // Lab test number -> LTXX
-  const labTestFormatted = 'LT' + String(labTestNo).padStart(2, '0');
-
-  // Final sample ID: BASE-LTXX-RYY (e.g., 4.0L125DEC16-LT01-R02)
-  const sampleId = `${base}-${labTestFormatted}-${rollPart}`;
-
-  // Set hidden roll number for backend (strip leading R)
-  const rollNumeric = rollPart.replace(/^R/i, '');
-  const rollNumberInput = document.getElementById('roll_number');
-  if (rollNumberInput) rollNumberInput.value = rollNumeric;
-
-  document.getElementById('sample_id').value = sampleId;
+    
+    const select = document.getElementById('reference_number');
+    if (!select) {
+        console.error('Reference dropdown not found');
+        return;
+    }
+    
+    wptReferencesLoading = true;
+    
+    // Clear ALL existing options completely
+    select.innerHTML = '<option value="">Select Reference Number</option>';
+    
+    // Track added references to prevent duplicates
+    const addedReferences = new Set();
+    
+    // Add cache-busting parameter to ensure fresh data after submission
+    const cacheBuster = '?t=' + new Date().getTime();
+    fetch('api/get_references_list_wpt.php' + cacheBuster)
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                
+                // Add bundle references first
+                if (data.bundleReferences && data.bundleReferences.length > 0) {
+                    data.bundleReferences.forEach(bundle => {
+                        // Skip if already added (deduplication)
+                        if (addedReferences.has(bundle.reference)) {
+                            return;
+                        }
+                        addedReferences.add(bundle.reference);
+                        
+                        const option = document.createElement('option');
+                        option.value = bundle.reference;
+                        option.setAttribute('data-is-bundle', 'true');
+                        option.setAttribute('data-base-ref', bundle.base_reference);
+                        option.setAttribute('data-roll-count', bundle.roll_count);
+                        option.setAttribute('data-line', bundle.line || '');
+                        option.textContent = bundle.reference + ' (Bundle - ' + bundle.roll_count + ' rolls)';
+                        select.appendChild(option);
+                    });
+                }
+                
+                // Add single roll references (skip if already added as bundle)
+                if (data.references && data.references.length > 0) {
+                    data.references.forEach(ref => {
+                        const refValue = typeof ref === 'string' ? ref : ref.reference;
+                        
+                        // Skip if already added (deduplication)
+                        if (addedReferences.has(refValue)) {
+                            return;
+                        }
+                        addedReferences.add(refValue);
+                        
+                        const lineIndicator = typeof ref === 'object' ? (ref.line || '') : '';
+                        const option = document.createElement('option');
+                        option.value = refValue;
+                        option.setAttribute('data-is-bundle', 'false');
+                        option.setAttribute('data-line', lineIndicator);
+                        option.textContent = refValue;
+                        select.appendChild(option);
+                    });
+                }
+                
+                console.log('WPT References loaded: ' + (data.references ? data.references.length : 0) + ' single, ' + (data.bundleReferences ? data.bundleReferences.length : 0) + ' bundles, ' + addedReferences.size + ' unique total');
+            } else {
+                console.error('Failed to load references:', data.error);
+            }
+        })
+        .catch(err => console.error('Error loading references:', err))
+        .finally(() => {
+            wptReferencesLoading = false;
+        });
 }
 
-// Call generateSampleId on page load
+// Load references when page loads
+let wptReferencesLoaded = false;
 document.addEventListener('DOMContentLoaded', function() {
-  generateSampleId();
+    if (!wptReferencesLoaded) {
+        loadWPTReferencesList();
+        wptReferencesLoaded = true;
+    }
+});
+
+// Also reload references when the page is shown (after redirect)
+window.addEventListener('pageshow', function(event) {
+    // Only reload if not already loaded, or if page was restored from cache
+    if (event.persisted || !wptReferencesLoaded) {
+        wptReferencesLoaded = true;
+        // Small delay to ensure DOM is ready
+        setTimeout(function() {
+            loadWPTReferencesList();
+        }, 100);
+    }
 });
 
 // Calculate values for a single row in the experimental data table
@@ -1281,6 +1569,518 @@ function calculateAverages() {
 
   if (nK > 0) document.getElementById('avg_permeability').value = (totalK / nK).toFixed(3);
   if (nV > 0) document.getElementById('avg_velocity').value = (totalV / nV).toFixed(3);
+}
+
+// Filter references by Line (L1 or L2)
+function filterWPTByLine(line) {
+    const productRefSelect = document.getElementById('reference_number');
+    const bulkRefSelection = document.getElementById('wpt_bulk_reference_selection');
+    
+    // Update button styles
+    const line1Btn = document.getElementById('wpt_line1_btn');
+    const line2Btn = document.getElementById('wpt_line2_btn');
+    const lineAllBtn = document.getElementById('wpt_line_all_btn');
+    
+    if (line1Btn) line1Btn.classList.remove('active');
+    if (line2Btn) line2Btn.classList.remove('active');
+    if (lineAllBtn) lineAllBtn.classList.remove('active');
+    
+    if (line === 'L1' && line1Btn) {
+        line1Btn.classList.add('active');
+        line1Btn.style.background = '#2196F3';
+        line1Btn.style.color = '#ffffff';
+        line2Btn.style.background = '#e3f2fd';
+        line2Btn.style.color = '#1565C0';
+        lineAllBtn.style.background = '#e3f2fd';
+        lineAllBtn.style.color = '#1565C0';
+    } else if (line === 'L2' && line2Btn) {
+        line2Btn.classList.add('active');
+        line2Btn.style.background = '#2196F3';
+        line2Btn.style.color = '#ffffff';
+        line1Btn.style.background = '#e3f2fd';
+        line1Btn.style.color = '#1565C0';
+        lineAllBtn.style.background = '#e3f2fd';
+        lineAllBtn.style.color = '#1565C0';
+    } else if (line === 'all' && lineAllBtn) {
+        lineAllBtn.classList.add('active');
+        lineAllBtn.style.background = '#2196F3';
+        lineAllBtn.style.color = '#ffffff';
+        line1Btn.style.background = '#e3f2fd';
+        line1Btn.style.color = '#1565C0';
+        line2Btn.style.background = '#e3f2fd';
+        line2Btn.style.color = '#1565C0';
+    }
+    
+    if (line === 'L1' || line === 'L2') {
+        // Hide single reference dropdown
+        productRefSelect.style.display = 'none';
+        productRefSelect.value = '';
+        productRefSelect.removeAttribute('required');
+        productRefSelect.removeAttribute('name');
+        
+        // Show From/To reference selection
+        if (bulkRefSelection) {
+            bulkRefSelection.style.display = 'block';
+            populateWPTLineReferences(line);
+        }
+        
+        // Make From/To required (name attributes already in HTML)
+        const fromRefSelect = document.getElementById('wpt_from_reference');
+        const toRefSelect = document.getElementById('wpt_to_reference');
+        if (fromRefSelect) {
+            fromRefSelect.setAttribute('required', 'required');
+        }
+        if (toRefSelect) {
+            toRefSelect.setAttribute('required', 'required');
+        }
+    } else {
+        // Show single reference dropdown for "All Lines"
+        productRefSelect.style.display = 'block';
+        productRefSelect.setAttribute('required', 'required');
+        productRefSelect.setAttribute('name', 'reference_number');
+        
+        // Hide From/To reference selection
+        if (bulkRefSelection) {
+            bulkRefSelection.style.display = 'none';
+            clearWPTBulkReferenceSelection();
+        }
+        
+        // Remove required from From/To and remove names
+        // Remove required from From/To, clear values, and remove names to prevent submission
+        const fromRefSelect = document.getElementById('wpt_from_reference');
+        const toRefSelect = document.getElementById('wpt_to_reference');
+        if (fromRefSelect) {
+            fromRefSelect.removeAttribute('required');
+            fromRefSelect.removeAttribute('name'); // Remove name so it won't be submitted
+            fromRefSelect.value = '';
+        }
+        if (toRefSelect) {
+            toRefSelect.removeAttribute('required');
+            toRefSelect.removeAttribute('name'); // Remove name so it won't be submitted
+            toRefSelect.value = '';
+        }
+        
+        // Clear hidden input
+        const lineBasedProductRef = document.getElementById('wpt_line_based_product_reference');
+        if (lineBasedProductRef) {
+            lineBasedProductRef.value = '';
+        }
+        
+        // Filter options for "All Lines"
+        const currentValue = productRefSelect.value;
+        Array.from(productRefSelect.options).forEach(option => {
+            if (option.value === '') {
+                option.style.display = '';
+                return;
+            }
+            option.style.display = '';
+        });
+        
+        // Clear selection if current value doesn't match filter
+        if (currentValue) {
+            const selectedOption = productRefSelect.querySelector(`option[value="${currentValue}"]`);
+            if (selectedOption && selectedOption.style.display === 'none') {
+                productRefSelect.value = '';
+                handleWPTReferenceSelection('');
+            }
+        }
+    }
+}
+
+// Populate From/To reference dropdowns with references for selected line
+function populateWPTLineReferences(line) {
+    const productRefSelect = document.getElementById('reference_number');
+    const fromRefSelect = document.getElementById('wpt_from_reference');
+    const toRefSelect = document.getElementById('wpt_to_reference');
+    
+    if (!productRefSelect || !fromRefSelect || !toRefSelect) return;
+    
+    // Clear existing options
+    fromRefSelect.innerHTML = '<option value="">-- Select From Reference --</option>';
+    toRefSelect.innerHTML = '<option value="">-- Select To Reference --</option>';
+    
+    // Collect all references for the selected line
+    const lineReferences = [];
+    Array.from(productRefSelect.options).forEach(option => {
+        if (option.value && option.value !== '') {
+            const optionLine = option.getAttribute('data-line') || '';
+            if (optionLine === line) {
+                const isBundle = option.getAttribute('data-is-bundle') === 'true';
+                lineReferences.push({
+                    value: option.value,
+                    text: option.textContent,
+                    isBundle: isBundle,
+                    baseRef: option.getAttribute('data-base-ref') || '',
+                    rollCount: parseInt(option.getAttribute('data-roll-count')) || 1
+                });
+            }
+        }
+    });
+    
+    // Sort references by date (extract date from reference number)
+    function extractDateFromReference(ref) {
+        const monthAbbr = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+        for (let i = 0; i < monthAbbr.length; i++) {
+            const month = monthAbbr[i];
+            const pattern = new RegExp(month + '(\\d{2})');
+            const match = ref.match(pattern);
+            if (match) {
+                const day = parseInt(match[1]);
+                return ((i + 1) * 100) + day;
+            }
+        }
+        return 9999;
+    }
+    
+    // Sort by date first, then alphabetically for same date
+    lineReferences.sort((a, b) => {
+        const dateA = extractDateFromReference(a.value);
+        const dateB = extractDateFromReference(b.value);
+        if (dateA !== dateB) {
+            return dateA - dateB;
+        }
+        return a.value.localeCompare(b.value);
+    });
+    
+    // Populate both dropdowns - ensure values are valid full references
+    lineReferences.forEach(ref => {
+        // Skip if value is too short or invalid
+        if (!ref.value || ref.value.length <= 3 || !ref.value.match(/[A-Za-z]/)) {
+            console.warn('Skipping invalid reference:', ref.value);
+            return;
+        }
+        
+        const fromOption = document.createElement('option');
+        fromOption.value = ref.value;
+        fromOption.textContent = ref.text;
+        fromOption.setAttribute('data-is-bundle', ref.isBundle);
+        fromOption.setAttribute('data-base-ref', ref.baseRef);
+        fromOption.setAttribute('data-roll-count', ref.rollCount);
+        fromRefSelect.appendChild(fromOption);
+        
+        const toOption = document.createElement('option');
+        toOption.value = ref.value;
+        toOption.textContent = ref.text;
+        toOption.setAttribute('data-is-bundle', ref.isBundle);
+        toOption.setAttribute('data-base-ref', ref.baseRef);
+        toOption.setAttribute('data-roll-count', ref.rollCount);
+        toRefSelect.appendChild(toOption);
+    });
+}
+
+// Update To Reference dropdown based on From Reference selection
+function updateWPTReferenceRange(autoSelect = true) {
+    const fromRefSelect = document.getElementById('wpt_from_reference');
+    const toRefSelect = document.getElementById('wpt_to_reference');
+    
+    if (!fromRefSelect || !toRefSelect) return;
+    
+    const fromValue = fromRefSelect.value;
+    if (!fromValue) {
+        const allOptions = Array.from(toRefSelect.options);
+        allOptions.forEach(option => {
+            option.style.display = '';
+        });
+        return;
+    }
+    
+    // Get the selected From reference option
+    const fromOption = fromRefSelect.options[fromRefSelect.selectedIndex];
+    const isBundle = fromOption?.getAttribute('data-is-bundle') === 'true';
+    let baseRef = fromOption?.getAttribute('data-base-ref') || '';
+    let rollCount = parseInt(fromOption?.getAttribute('data-roll-count')) || 1;
+    
+    // Extract base reference from the selected value if not provided
+    if (!baseRef) {
+        const rollMatch = fromValue.match(/^(.+)-(\d+)$/);
+        if (rollMatch) {
+            baseRef = rollMatch[1];
+        } else {
+            baseRef = fromValue;
+        }
+    }
+    
+    // Find the bundle reference to get the actual roll count
+    if (baseRef) {
+        Array.from(fromRefSelect.options).forEach(option => {
+            if (option.value && option.value !== '') {
+                const optionBaseRef = option.getAttribute('data-base-ref') || option.value.replace(/-\d+$/, '');
+                const optionIsBundle = option.getAttribute('data-is-bundle') === 'true';
+                if (optionIsBundle && optionBaseRef === baseRef) {
+                    rollCount = parseInt(option.getAttribute('data-roll-count')) || rollCount;
+                }
+            }
+        });
+    }
+    
+    // Find the index of the selected From reference in the To dropdown
+    let fromIndex = -1;
+    Array.from(toRefSelect.options).forEach((option, index) => {
+        if (option.value === fromValue) {
+            fromIndex = index;
+        }
+    });
+    
+    // If From reference is a bundle, we need to find the last roll of that bundle
+    let targetFromIndex = fromIndex;
+    if (isBundle && baseRef && rollCount > 1) {
+        const lastRollRef = baseRef + '-' + rollCount;
+        
+        let foundLastRoll = false;
+        Array.from(toRefSelect.options).forEach((option, index) => {
+            if (option.value === lastRollRef) {
+                targetFromIndex = index;
+                foundLastRoll = true;
+            }
+        });
+        
+        if (!foundLastRoll) {
+            Array.from(toRefSelect.options).forEach((option, index) => {
+                if (index > fromIndex && option.value) {
+                    const optionBaseRef = option.getAttribute('data-base-ref') || option.value.replace(/-\d+$/, '');
+                    if (optionBaseRef !== baseRef) {
+                        if (targetFromIndex === fromIndex) {
+                            targetFromIndex = index;
+                        }
+                    }
+                }
+            });
+            
+            if (targetFromIndex === fromIndex) {
+                targetFromIndex = fromIndex + 1;
+            }
+        }
+    }
+    
+    // Show only references from the target From reference onwards
+    Array.from(toRefSelect.options).forEach((option, index) => {
+        if (index === 0) {
+            option.style.display = '';
+        } else if (index >= targetFromIndex) {
+            option.style.display = '';
+        } else {
+            option.style.display = 'none';
+        }
+    });
+    
+    // Auto-select the last roll of the bundle in To dropdown
+    if (autoSelect) {
+        let actualBaseRef = baseRef;
+        let actualRollCount = rollCount;
+        
+        if (!actualBaseRef) {
+            const rollMatch = fromValue.match(/^(.+)-(\d+)$/);
+            if (rollMatch) {
+                actualBaseRef = rollMatch[1];
+            } else {
+                actualBaseRef = fromValue;
+            }
+        }
+        
+        if (actualBaseRef) {
+            Array.from(fromRefSelect.options).forEach(option => {
+                if (option.value && option.value !== '') {
+                    const optionBaseRef = option.getAttribute('data-base-ref') || option.value.replace(/-\d+$/, '');
+                    const optionIsBundle = option.getAttribute('data-is-bundle') === 'true';
+                    if (optionIsBundle && optionBaseRef === actualBaseRef) {
+                        actualRollCount = parseInt(option.getAttribute('data-roll-count')) || actualRollCount;
+                    }
+                }
+            });
+        }
+        
+        if (actualBaseRef && actualRollCount > 1) {
+            const lastRollRef = actualBaseRef + '-' + actualRollCount;
+            let found = false;
+            Array.from(toRefSelect.options).forEach(option => {
+                if (option.value === lastRollRef && option.style.display !== 'none') {
+                    toRefSelect.value = lastRollRef;
+                    found = true;
+                    return;
+                }
+            });
+            
+            // If exact match not found, find the highest roll number from this bundle that's visible
+            if (!found) {
+                let highestRoll = 0;
+                let highestRollRef = '';
+                Array.from(toRefSelect.options).forEach(option => {
+                    if (option.style.display !== 'none' && option.value) {
+                        const optionBaseRef = option.getAttribute('data-base-ref') || option.value.replace(/-\d+$/, '');
+                        if (optionBaseRef === actualBaseRef) {
+                            const rollMatch = option.value.match(/-(\d+)$/);
+                            if (rollMatch) {
+                                const rollNum = parseInt(rollMatch[1]);
+                                if (rollNum > highestRoll && rollNum <= actualRollCount) {
+                                    highestRoll = rollNum;
+                                    highestRollRef = option.value;
+                                }
+                            }
+                        }
+                    }
+                });
+                if (highestRollRef) {
+                    toRefSelect.value = highestRollRef;
+                }
+            }
+        } else if (fromIndex >= 0) {
+            // Not a bundle, just select the same reference
+            toRefSelect.value = fromValue;
+        }
+    }
+}
+
+// Apply bulk reference selection
+function applyWPTBulkReferenceSelection() {
+    const fromRef = document.getElementById('wpt_from_reference').value;
+    const toRef = document.getElementById('wpt_to_reference').value;
+    
+    if (!fromRef || !toRef) {
+        alert('Please select both From and To references');
+        return;
+    }
+    
+    // Store the range in hidden input
+    const lineBasedProductRef = document.getElementById('wpt_line_based_product_reference');
+    if (lineBasedProductRef) {
+        lineBasedProductRef.value = fromRef + ' to ' + toRef;
+    }
+    
+    // Update the main reference dropdown to show the range
+    const productRefSelect = document.getElementById('reference_number');
+    if (productRefSelect) {
+        // Find or create an option for the range
+        let rangeOption = Array.from(productRefSelect.options).find(opt => opt.value === fromRef + '|' + toRef);
+        if (!rangeOption) {
+            rangeOption = document.createElement('option');
+            rangeOption.value = fromRef + '|' + toRef;
+            rangeOption.textContent = fromRef + ' to ' + toRef;
+            productRefSelect.appendChild(rangeOption);
+        }
+        productRefSelect.value = rangeOption.value;
+    }
+}
+
+// Clear bulk reference selection
+function clearWPTBulkReferenceSelection() {
+    const fromRefSelect = document.getElementById('wpt_from_reference');
+    const toRefSelect = document.getElementById('wpt_to_reference');
+    const lineBasedProductRef = document.getElementById('wpt_line_based_product_reference');
+    
+    if (fromRefSelect) fromRefSelect.value = '';
+    if (toRefSelect) toRefSelect.value = '';
+    if (lineBasedProductRef) lineBasedProductRef.value = '';
+    
+    // Reset To dropdown to show all options
+    if (toRefSelect) {
+        Array.from(toRefSelect.options).forEach(option => {
+            option.style.display = '';
+        });
+    }
+}
+
+// Handle From/To reference change
+function handleWPTFromToReferenceChange() {
+    // This function can be extended to perform validation or other actions
+    // when From/To references change
+}
+
+// Validate form before submission
+function validateWPTForm() {
+    const productRefSelect = document.getElementById('reference_number');
+    const fromRefSelect = document.getElementById('wpt_from_reference');
+    const toRefSelect = document.getElementById('wpt_to_reference');
+    const individualRollSelect = document.getElementById('wpt_individual_roll_reference');
+    
+    // Check if line-based selection is active (From/To visible)
+    const bulkRefSelection = document.getElementById('wpt_bulk_reference_selection');
+    const isLineBased = bulkRefSelection && bulkRefSelection.style.display !== 'none';
+    
+    if (isLineBased) {
+        // Validate From/To references
+        const fromValue = fromRefSelect ? fromRefSelect.value : '';
+        const toValue = toRefSelect ? toRefSelect.value : '';
+        
+        if (!fromValue || !toValue) {
+            alert('Please select both From Reference and To Reference');
+            if (!fromValue && fromRefSelect) fromRefSelect.focus();
+            else if (!toValue && toRefSelect) toRefSelect.focus();
+            return false;
+        }
+        
+        // Validate that references are valid full references (not too short)
+        if (fromValue && fromValue.length <= 3) {
+            alert('Invalid From Reference selected. Please select a valid full reference.');
+            if (fromRefSelect) fromRefSelect.focus();
+            return false;
+        }
+        
+        if (toValue && toValue.length <= 3) {
+            alert('Invalid To Reference selected. Please select a valid full reference.');
+            if (toRefSelect) toRefSelect.focus();
+            return false;
+        }
+        
+        // Ensure the reference field name is removed so it doesn't interfere
+        if (productRefSelect) {
+            productRefSelect.removeAttribute('name');
+        }
+        
+        // Ensure from/to have their names set (already in HTML, but ensure it's there)
+        if (fromRefSelect) fromRefSelect.setAttribute('name', 'from_reference');
+        if (toRefSelect) toRefSelect.setAttribute('name', 'to_reference');
+    } else {
+        // Validate single reference or individual roll
+        const refValue = productRefSelect ? productRefSelect.value : '';
+        const individualValue = individualRollSelect && individualRollSelect.style.display !== 'none' 
+            ? individualRollSelect.value : '';
+        
+        if (!refValue && !individualValue) {
+            alert('Please select a reference');
+            if (productRefSelect) productRefSelect.focus();
+            return false;
+        }
+        
+        // Ensure the reference field has its name set
+        if (productRefSelect) {
+            productRefSelect.setAttribute('name', 'reference_number');
+            
+            // Debug: Log the selected reference value
+            const selectedRef = productRefSelect.value;
+            console.log('WPT Form Submit - Selected reference_number:', selectedRef);
+            
+            // Validate that the selected reference is valid (full reference)
+            if (selectedRef && (selectedRef.length <= 3 || !selectedRef.match(/[A-Za-z]/))) {
+                alert('Invalid reference selected: "' + selectedRef + '". Please select a valid full reference.');
+                productRefSelect.focus();
+                return false;
+            }
+        }
+        
+        // Remove names from from/to so they don't interfere
+        if (fromRefSelect) fromRefSelect.removeAttribute('name');
+        if (toRefSelect) toRefSelect.removeAttribute('name');
+    }
+    
+    // Final check before submission - ensure we have a valid reference
+    const form = document.querySelector('form[onsubmit*="validateWPTForm"]') || document.querySelector('form');
+    if (form) {
+        const formData = new FormData(form);
+        const refValue = formData.get('reference_number') || formData.get('from_reference') || formData.get('individual_roll_reference');
+        console.log('WPT Form Submit - Final reference to submit:', refValue);
+        
+        if (!refValue) {
+            alert('No reference selected. Please select a reference.');
+            return false;
+        }
+        
+        if (refValue.length <= 3 || !refValue.match(/[A-Za-z]/)) {
+            alert('Invalid reference detected: "' + refValue + '". Please select a valid full reference.');
+            return false;
+        }
+    }
+    
+    return true;
 }
 
 // Handle reference selection - check if bundle and show individual roll selector
@@ -1391,7 +2191,6 @@ function handleWPTIndividualRollSelection(selectedValue) {
                         if (data.data.gsm) document.getElementById('gsm').value = data.data.gsm;
                         if (data.data.roll_number) document.getElementById('roll_number').value = data.data.roll_number;
                         if (data.data.specimen_area) document.getElementById('specimen_area').value = data.data.specimen_area;
-                        generateSampleId();
                     }
                     // Still try to load reference data (may have roll-specific info)
                     loadWPTReferenceData(selectedValue);
@@ -1418,7 +2217,6 @@ function loadWPTReferenceData(refNumber) {
   if (!finalRef) {
     document.getElementById('gsm').value = '';
     document.getElementById('roll_number').value = '';
-    generateSampleId();
     return;
   }
   
@@ -1433,7 +2231,6 @@ function loadWPTReferenceData(refNumber) {
         if (!document.getElementById('roll_number').value && data.data.roll_number) {
             document.getElementById('roll_number').value = data.data.roll_number || '';
         }
-        generateSampleId();
       } else {
         // Don't show alert if bundle data was loaded successfully
         if (!document.getElementById('gsm').value && !document.getElementById('roll_number').value) {

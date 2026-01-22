@@ -1,5 +1,5 @@
-﻿<?php
-// submit_fg_entry.php
+<?php
+// submit_fg_received_entry.php
 
 session_start();
 require_once '../config/security_config.php';
@@ -27,405 +27,430 @@ if (SecurityConfig::isAccountLocked($_SESSION['username'])) {
 // Connect to database
 $conn = SecurityConfig::getConnection();
 
+/**
+ * Expand reference ranges into individual references
+ * Handles formats like "REF-1 to REF-4" -> ["REF-1", "REF-2", "REF-3", "REF-4"]
+ * Also handles comma-separated references
+ */
+function expandReferenceRanges($referenceString) {
+    if (empty($referenceString)) {
+        return [];
+    }
+    
+    $references = [];
+    $referenceString = trim($referenceString);
+    
+    // First, handle comma-separated references
+    $parts = array_map('trim', explode(',', $referenceString));
+    
+    foreach ($parts as $part) {
+        $part = trim($part);
+        if (empty($part)) continue;
+        
+        // Check if this part is a range (contains " to ")
+        if (preg_match('/^(.+?)\s+to\s+(.+)$/i', $part, $matches)) {
+            $fromRef = trim($matches[1]);
+            $toRef = trim($matches[2]);
+            
+            // Try to extract the pattern (e.g., "REF-1" -> base="REF-", num=1)
+            if (preg_match('/^(.+?)-(\d+)$/', $fromRef, $fromMatches) && 
+                preg_match('/^(.+?)-(\d+)$/', $toRef, $toMatches)) {
+                $baseFrom = $fromMatches[1];
+                $baseTo = $toMatches[1];
+                $numFrom = (int)$fromMatches[2];
+                $numTo = (int)$toMatches[2];
+                
+                // Only expand if bases match and numbers are valid
+                if ($baseFrom === $baseTo && $numFrom <= $numTo) {
+                    for ($i = $numFrom; $i <= $numTo; $i++) {
+                        $references[] = $baseFrom . '-' . $i;
+                    }
+                    continue;
+                }
+            }
+            
+            // If pattern doesn't match, just add both references as-is
+            $references[] = $fromRef;
+            $references[] = $toRef;
+        } else {
+            // Not a range, add as-is
+            $references[] = $part;
+        }
+    }
+    
+    return array_unique($references); // Remove duplicates
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     try {
         // Get form data
-        $dateTime          = $_POST['date_time'] ?? date('Y-m-d H:i:s');
-        $shift             = $_POST['shift'] ?? '';
-        $productType       = $_POST['product_type'] ?? '';
-        $rollEntryType     = $_POST['roll_entry_type'] ?? '';
-        $referenceNumber   = $_POST['reference_number'] ?? '';
-        $cncCuttingBatch   = $_POST['cnc_cutting_batch'] ?? '';
-        // Get shift_in_charge value
-        $shiftInCharge = trim($_POST['shift_in_charge'] ?? $_POST['qc_inspector'] ?? '');
+        $entryId = $_POST['entry_id'] ?? '';
+        $dateTime = $_POST['date_time'] ?? date('Y-m-d H:i:s');
+        $shift = $_POST['shift'] ?? '';
+        $productType = $_POST['product_type'] ?? '';
+        $tripNumber = $_POST['trip_number'] ?? '';
+        $referenceNumber = $_POST['reference_number'] ?? '';
+        $deliveredQuantity = trim($_POST['delivered_quantity'] ?? '0');
+        $cncCuttingBatch = trim($_POST['cnc_cutting_batch'] ?? '');
+        $receivedQuantity = trim($_POST['received_quantity'] ?? '0');
         
-        // Aggressively check and prevent '0' from being saved
-        // Check for empty, '0', 0, or any variation
-        if (empty($shiftInCharge) || 
-            $shiftInCharge === '0' || 
-            $shiftInCharge === 0 || 
-            $shiftInCharge === '0.0' ||
-            trim($shiftInCharge) === '' ||
-            strtolower(trim($shiftInCharge)) === '0') {
-            
-            // Get session values
-            $sessionName = trim($_SESSION['full_name'] ?? $_SESSION['username'] ?? '');
-            
-            // If session name is also empty or '0', use 'User' as default
-            if (empty($sessionName) || $sessionName === '0' || $sessionName === 0) {
-                $shiftInCharge = 'User';
-            } else {
-                $shiftInCharge = $sessionName;
-            }
-        }
+        // DEBUG: Log initial values
+        error_log("FG Received Entry - Initial POST values:");
+        error_log("  product_type = '" . $productType . "'");
+        error_log("  cnc_cutting_batch from POST = '" . $cncCuttingBatch . "'");
+        error_log("  reference_number from POST = '" . $referenceNumber . "'");
         
-        // Final safety check - absolutely prevent '0' from being saved
-        if ($shiftInCharge === '0' || $shiftInCharge === 0 || trim($shiftInCharge) === '0') {
-            $shiftInCharge = 'User';
-        }
-        $projectId         = $_POST['project_id'] ?? '';
-        $bagSize           = $_POST['bag_size'] ?? '';
-        $rollSize          = $_POST['roll_size'] ?? '';
-        $recommendedWeight = $_POST['recommended_weight'] ?? '';
-        // Handle weight fields - get from appropriate field based on product type
-        // For rolls: use total_weight field (stored as actual_weight in DB)
-        // For bags: use actual_weight_bag field (stored as actual_weight in DB)
-        if ($productType === 'roll') {
-            $actualWeight = trim($_POST['total_weight'] ?? '');
-        } else {
-            $actualWeight = trim($_POST['actual_weight_bag'] ?? '');
-        }
-        $totalArea         = trim($_POST['total_area'] ?? '');
-        $measurementType   = trim($_POST['measurement_type'] ?? '');
-        $qualityChecked    = $_POST['quality_checked'] ?? '';
-        $passedQty         = $_POST['passed_qty'] ?? '';
-        $rejectedQty       = $_POST['rejected_qty'] ?? '';
-        $packagingType     = $_POST['packaging_type'] ?? null;
-        
-        // For rolls, set default values for bag-specific fields
-        if ($productType === 'roll') {
-            if (!empty($rollSize)) {
-                $bagSize = $rollSize; // Use roll size as bag_size for rolls
-            }
-            // Set recommended weight to empty for rolls (not applicable)
-            if (empty($recommendedWeight) || $recommendedWeight === '') {
-                $recommendedWeight = null;
-            }
-            // Set quality fields to 0 for rolls (not applicable)
-            if (empty($qualityChecked) || $qualityChecked === '') {
-                $qualityChecked = 0;
-            }
-            if (empty($passedQty) || $passedQty === '') {
-                $passedQty = 0;
-            }
-            if (empty($rejectedQty) || $rejectedQty === '') {
-                $rejectedQty = 0;
-            }
-        }
-
-        // Batch number handling
-        if (isset($_POST['batch_number']) && $_POST['batch_number'] !== '') {
-            $batchNumber = $_POST['batch_number'];
-        } else {
-            $batchNumber = 'AUTO-' . time(); // fallback if form input is empty
-        }
-
-        // Debug logs (check in PHP error log)
-        error_log("FG Entry Debug - POST batch_number: " . ($_POST['batch_number'] ?? 'NOT SET'));
-        error_log("FG Entry Debug - Final batch_number used: " . $batchNumber);
-
-        // Required fields validation (allow 0 values)
-        $required = [
-            'fg_id', 'product_type', 'reference_number', 'shift_in_charge', 'project_id'
-        ];
-        
-        // Add product-specific required fields
+        // For bags, ensure CNC cutting batch is properly captured
+        // IMPORTANT: If form sent CNC batch in reference_number field, extract it here
         if ($productType === 'bag') {
-            $required[] = 'bag_size';
-            $required[] = 'recommended_weight';
-            $required[] = 'actual_weight_bag'; // Use the bag-specific field name
-            $required[] = 'quality_checked';
-            $required[] = 'passed_qty';
-            $required[] = 'rejected_qty';
-        } elseif ($productType === 'roll') {
-            // For rolls, require roll_size and measurement_type
-            // actual_weight or total_area will be validated separately based on measurement_type
-        }
-        
-        // Also accept old field name for backward compatibility
-        if (empty($_POST['shift_in_charge']) && !empty($_POST['qc_inspector'])) {
-            $shiftInCharge = $_POST['qc_inspector'];
-        }
-
-        foreach ($required as $field) {
-            // Special handling for shift_in_charge - allow session fallback
-            if ($field === 'shift_in_charge') {
-                $fieldValue = trim($_POST['shift_in_charge'] ?? $_POST['qc_inspector'] ?? '');
-                if (empty($fieldValue)) {
-                    $fieldValue = $_SESSION['full_name'] ?? $_SESSION['username'] ?? '';
+            // If CNC cutting batch is empty, check if it was sent in reference_number by mistake
+            if (empty($cncCuttingBatch) && !empty($referenceNumber)) {
+                // If reference_number looks like a batch number (e.g., "CW-01"), use it as CNC batch
+                if (preg_match('/^[A-Za-z]+-?\d+$/', $referenceNumber)) {
+                    $cncCuttingBatch = $referenceNumber;
+                    $referenceNumber = ''; // Clear it since it was actually the CNC batch
+                    error_log("FG Received Entry - Bag: Extracted cnc_cutting_batch from reference_number: " . $cncCuttingBatch);
                 }
-                if (empty($fieldValue)) {
-                    $errorMsg = "Missing required field: " . $field;
-                    header("Location: ../forms/fg_entry.php?error=" . urlencode($errorMsg));
-                    exit();
-                }
-            } elseif (!isset($_POST[$field]) || $_POST[$field] === '') {
-                $errorMsg = "Missing required field: " . $field;
-                header("Location: ../forms/fg_entry.php?error=" . urlencode($errorMsg));
-                exit();
-            }
-        }
-        
-        // Additional validation for rolls
-        if ($productType === 'roll') {
-            // Check roll_size (might be in bag_size field for rolls)
-            $rollSize = $_POST['roll_size'] ?? $_POST['bag_size'] ?? '';
-            if (empty($rollSize)) {
-                header("Location: ../forms/fg_entry.php?error=" . urlencode("Missing required field: roll_size"));
-                exit();
             }
             
-            // Check measurement_type
-            if (empty($measurementType)) {
-                header("Location: ../forms/fg_entry.php?error=" . urlencode("Missing required field: measurement_type"));
-                exit();
-            }
-            
-            // Validate based on measurement type
-            if ($measurementType === 'weight') {
-                // For rolls, ensure we're getting the total_weight from the roll field
-                // Check if total_weight is provided and valid
-                if (empty($actualWeight) || $actualWeight === '' || $actualWeight === '0') {
-                    header("Location: ../forms/fg_entry.php?error=" . urlencode("Missing total weight for weight measurement. Please enter a valid weight value."));
-                    exit();
-                }
-                
-                $actualWeightFloat = floatval($actualWeight);
-                if ($actualWeightFloat <= 0 || !is_numeric($actualWeight)) {
-                    header("Location: ../forms/fg_entry.php?error=" . urlencode("Invalid total weight value. Please enter a valid weight value greater than 0."));
-                    exit();
-                }
-            } elseif ($measurementType === 'area') {
-                // Check if total_area is provided and valid
-                $totalAreaFloat = floatval($totalArea);
-                if (empty($totalArea) || $totalArea === '' || $totalArea === '0' || $totalAreaFloat <= 0 || !is_numeric($totalArea)) {
-                    header("Location: ../forms/fg_entry.php?error=" . urlencode("Missing or invalid total_area for area measurement. Please enter a valid area value greater than 0."));
-                    exit();
-                }
-            }
+            // Final check - ensure we have a CNC cutting batch value
+            error_log("FG Received Entry - Bag: Final cncCuttingBatch = '" . $cncCuttingBatch . "'");
         }
+        
+        $availableQuantity = trim($_POST['available_quantity'] ?? '0');
+        $shiftInCharge = trim($_POST['shift_in_charge'] ?? $_SESSION['full_name'] ?? $_SESSION['username'] ?? 'User');
+        $remarks = $_POST['remarks'] ?? '';
+        $summary = $_POST['summary'] ?? '';
 
-        // Get FG ID from form
-        $fgId = $_POST['fg_id'] ?? '';
-
-        // Validate FG ID format (must match current shift date)
-        $current_hour = (int)date('H');
-        $shift_date = ($current_hour < 8) ? date('Y-m-d', strtotime('-1 day')) : date('Y-m-d');
-        $expected_date = date('Ymd', strtotime($shift_date));
-
-        if (!preg_match('/^FG-' . $expected_date . '-\d{3}$/', $fgId)) {
-            header("Location: ../forms/fg_entry.php?error=invalid_fg_id");
+        // Validate required fields
+        if (empty($entryId)) {
+            header("Location: ../forms/fg_received_entry.php?error=missing_field&field=entry_id");
             exit();
+        }
+        
+        if (empty($productType)) {
+            header("Location: ../forms/fg_received_entry.php?error=missing_field&field=product_type");
+            exit();
+        }
+        
+        if (empty($shiftInCharge) || $shiftInCharge === '0') {
+            $shiftInCharge = $_SESSION['full_name'] ?? $_SESSION['username'] ?? 'User';
+        }
+        
+        if ($productType === 'roll') {
+            if (empty($tripNumber)) {
+                header("Location: ../forms/fg_received_entry.php?error=missing_field&field=trip_number");
+                exit();
+            }
+            if (empty($referenceNumber)) {
+                header("Location: ../forms/fg_received_entry.php?error=missing_field&field=reference_number");
+                exit();
+            }
+        } elseif ($productType === 'bag') {
+            // For bags, CNC cutting batch is required
+            if (empty($cncCuttingBatch)) {
+                error_log("FG Received Entry - Bag validation FAILED: cncCuttingBatch is empty!");
+                header("Location: ../forms/fg_received_entry.php?error=missing_field&field=cnc_cutting_batch");
+                exit();
+            }
+            
+            error_log("FG Received Entry - Bag validation passed: cncCuttingBatch = '" . $cncCuttingBatch . "'");
+            
+            if (empty($receivedQuantity) || $receivedQuantity <= 0) {
+                header("Location: ../forms/fg_received_entry.php?error=missing_field&field=received_quantity");
+                exit();
+            }
         }
 
         // Ensure table exists
         $createTable = "
-            CREATE TABLE IF NOT EXISTS fg_entry (
+            CREATE TABLE IF NOT EXISTS fg_received_entry (
                 id INT AUTO_INCREMENT PRIMARY KEY,
-                fg_id VARCHAR(50) UNIQUE,
+                entry_id VARCHAR(50) UNIQUE,
                 date_time DATETIME,
                 shift VARCHAR(20),
                 product_type VARCHAR(20),
-                roll_entry_type VARCHAR(20),
-                reference_number VARCHAR(100),
-                cnc_cutting_batch VARCHAR(100),
-                shift_in_charge VARCHAR(100),
-                project_id INT,
-                bag_size VARCHAR(100),
-                recommended_weight DECIMAL(10,2) NULL,
-                actual_weight DECIMAL(10,2),
-                total_area DECIMAL(10,2) NULL,
-                measurement_type VARCHAR(20) NULL,
-                quality_checked INT,
-                passed_qty INT,
-                rejected_qty INT,
-                packaging_type VARCHAR(100) NULL,
-                batch_number VARCHAR(100) DEFAULT '',
+                trip_number INT DEFAULT NULL,
+                reference_number TEXT,
                 delivered_quantity DECIMAL(10,2) DEFAULT 0,
+                cnc_cutting_batch VARCHAR(100) DEFAULT NULL,
+                received_quantity DECIMAL(10,2) DEFAULT 0,
+                available_quantity DECIMAL(10,2) DEFAULT 0,
+                weight_kg DECIMAL(10,2) DEFAULT NULL,
+                area_sqm DECIMAL(10,2) DEFAULT NULL,
+                shift_in_charge VARCHAR(100) DEFAULT 'User',
+                remarks TEXT,
+                summary TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (project_id) REFERENCES projects(id)
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
             )
         ";
         $conn->query($createTable);
         
-        // Add missing columns if table already exists (proper MySQL syntax)
-        $fgColsCheck = $conn->query("SHOW COLUMNS FROM fg_entry");
-        $existingFgCols = [];
-        if ($fgColsCheck) {
-            while ($row = $fgColsCheck->fetch_assoc()) {
-                $existingFgCols[] = $row['Field'];
+        // Add missing columns if table already exists
+        $colsCheck = $conn->query("SHOW COLUMNS FROM fg_received_entry");
+        $existingCols = [];
+        if ($colsCheck) {
+            while ($row = $colsCheck->fetch_assoc()) {
+                $existingCols[] = $row['Field'];
             }
         }
-        if (!in_array('roll_entry_type', $existingFgCols)) {
-            $conn->query("ALTER TABLE fg_entry ADD COLUMN roll_entry_type VARCHAR(20) AFTER product_type");
+        if (!in_array('cnc_cutting_batch', $existingCols)) {
+            $conn->query("ALTER TABLE fg_received_entry ADD COLUMN cnc_cutting_batch VARCHAR(100) DEFAULT NULL AFTER delivered_quantity");
         }
-        if (!in_array('delivered_quantity', $existingFgCols)) {
-            $conn->query("ALTER TABLE fg_entry ADD COLUMN delivered_quantity DECIMAL(10,2) DEFAULT 0 AFTER batch_number");
+        if (!in_array('received_quantity', $existingCols)) {
+            $conn->query("ALTER TABLE fg_received_entry ADD COLUMN received_quantity DECIMAL(10,2) DEFAULT 0 AFTER cnc_cutting_batch");
         }
-        if (!in_array('total_area', $existingFgCols)) {
-            $conn->query("ALTER TABLE fg_entry ADD COLUMN total_area DECIMAL(10,2) NULL AFTER actual_weight");
+        if (!in_array('available_quantity', $existingCols)) {
+            $conn->query("ALTER TABLE fg_received_entry ADD COLUMN available_quantity DECIMAL(10,2) DEFAULT 0 AFTER received_quantity");
         }
-        if (!in_array('measurement_type', $existingFgCols)) {
-            $conn->query("ALTER TABLE fg_entry ADD COLUMN measurement_type VARCHAR(20) NULL AFTER actual_weight");
+        if (!in_array('weight_kg', $existingCols)) {
+            $conn->query("ALTER TABLE fg_received_entry ADD COLUMN weight_kg DECIMAL(10,2) DEFAULT NULL AFTER available_quantity");
+        }
+        if (!in_array('area_sqm', $existingCols)) {
+            $conn->query("ALTER TABLE fg_received_entry ADD COLUMN area_sqm DECIMAL(10,2) DEFAULT NULL AFTER weight_kg");
         }
         
-        // Allow NULL for recommended_weight (not applicable for rolls)
-        $conn->query("ALTER TABLE fg_entry MODIFY COLUMN recommended_weight DECIMAL(10,2) NULL");
-        
-        // Allow NULL for packaging_type (field removed from form)
-        $conn->query("ALTER TABLE fg_entry MODIFY COLUMN packaging_type VARCHAR(100) NULL");
-        
-        // Rename qc_inspector column to shift_in_charge if it exists
-        if (in_array('qc_inspector', $existingFgCols) && !in_array('shift_in_charge', $existingFgCols)) {
-            $conn->query("ALTER TABLE fg_entry CHANGE COLUMN qc_inspector shift_in_charge VARCHAR(100) DEFAULT 'User'");
-        }
-        // If shift_in_charge doesn't exist, add it with default
-        if (!in_array('shift_in_charge', $existingFgCols) && !in_array('qc_inspector', $existingFgCols)) {
-            $conn->query("ALTER TABLE fg_entry ADD COLUMN shift_in_charge VARCHAR(100) DEFAULT 'User' AFTER cnc_cutting_batch");
-        }
-        // Update existing column to have default value if it doesn't
-        if (in_array('shift_in_charge', $existingFgCols)) {
-            $conn->query("ALTER TABLE fg_entry MODIFY COLUMN shift_in_charge VARCHAR(100) DEFAULT 'User'");
+        // Check if entry_id already exists
+        $checkStmt = $conn->prepare("SELECT id FROM fg_received_entry WHERE entry_id = ?");
+        if ($checkStmt) {
+            $checkStmt->bind_param("s", $entryId);
+            $checkStmt->execute();
+            $result = $checkStmt->get_result();
+            if ($result && $result->num_rows > 0) {
+                $checkStmt->close();
+                header("Location: ../forms/fg_received_entry.php?error=system_error&message=Entry ID already exists");
+                exit();
+            }
+            $checkStmt->close();
         }
 
-        // Insert into fg_entry
+        // Convert date_time string to proper format
+        $dateTimeValue = $dateTime;
+        if (preg_match('/(\d{1,2})\/(\d{1,2})\/(\d{4}),?\s+(\d{1,2}):(\d{2}):?(\d{2})?\s*(AM|PM)?/i', $dateTime, $matches)) {
+            $month = $matches[1];
+            $day = $matches[2];
+            $year = $matches[3];
+            $hour = (int)$matches[4];
+            $minute = $matches[5];
+            $second = isset($matches[6]) ? $matches[6] : '00';
+            $ampm = isset($matches[7]) ? strtoupper($matches[7]) : '';
+            
+            if ($ampm === 'PM' && $hour < 12) {
+                $hour += 12;
+            } elseif ($ampm === 'AM' && $hour == 12) {
+                $hour = 0;
+            }
+            
+            $dateTimeValue = sprintf('%04d-%02d-%02d %02d:%02d:%02d', $year, $month, $day, $hour, $minute, $second);
+        }
+
+        // Prepare values
+        $deliveredQuantityValue = (!empty($deliveredQuantity) && $deliveredQuantity !== '') ? (float)$deliveredQuantity : 0;
+        $tripNumberValue = (!empty($tripNumber) && $tripNumber !== '') ? (int)$tripNumber : 0;
+        $receivedQuantityValue = (!empty($receivedQuantity) && $receivedQuantity !== '') ? (float)$receivedQuantity : 0;
+        $availableQuantityValue = (!empty($availableQuantity) && $availableQuantity !== '') ? (float)$availableQuantity : 0;
+
+        // For bags, available quantity equals received quantity
+        if ($productType === 'bag' && $receivedQuantityValue > 0) {
+            $availableQuantityValue = $receivedQuantityValue;
+        }
+
+        // Expand reference ranges into individual references
+        $individualReferences = [];
+        if ($productType === 'roll') {
+            if (empty($referenceNumber)) {
+                header("Location: ../forms/fg_received_entry.php?error=system_error&message=" . urlencode('Reference number is required for rolls!'));
+                exit();
+            }
+            $individualReferences = expandReferenceRanges($referenceNumber);
+        } else {
+            // For bags: Just use a placeholder identifier - we'll use the CNC batch value directly in the insert
+            $individualReferences = ['BAG-' . $entryId];
+        }
+
+        // Only validate reference number for rolls
+        if ($productType === 'roll' && (empty($individualReferences) || (count($individualReferences) === 1 && empty($individualReferences[0])))) {
+            header("Location: ../forms/fg_received_entry.php?error=system_error&message=" . urlencode('Invalid reference number!'));
+            exit();
+        }
+
+        // Prepare insert statement
         $stmt = $conn->prepare("
-            INSERT INTO fg_entry (
-                fg_id, date_time, shift, product_type, roll_entry_type, reference_number, cnc_cutting_batch, 
-                shift_in_charge, project_id, bag_size, recommended_weight, actual_weight, total_area, measurement_type,
-                quality_checked, passed_qty, rejected_qty, packaging_type, batch_number
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO fg_received_entry (
+                entry_id, date_time, shift, product_type, trip_number, reference_number, 
+                delivered_quantity, cnc_cutting_batch, received_quantity, available_quantity,
+                weight_kg, area_sqm, shift_in_charge, remarks, summary
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ");
 
-        // CRITICAL: Final check before bind_param - absolutely prevent '0' from being saved
-        // Check every possible variation of '0'
-        if (empty($shiftInCharge) || 
-            $shiftInCharge === '0' || 
-            $shiftInCharge === 0 || 
-            trim($shiftInCharge) === '' ||
-            trim($shiftInCharge) === '0' ||
-            strtolower(trim($shiftInCharge)) === '0') {
-            
-            $sessionName = trim($_SESSION['full_name'] ?? $_SESSION['username'] ?? '');
-            if (!empty($sessionName) && $sessionName !== '0' && $sessionName !== 0) {
-                $shiftInCharge = $sessionName;
-            } else {
-                $shiftInCharge = 'User'; // Absolute fallback
-            }
+        if (!$stmt) {
+            error_log("FG Received Entry - Prepare failed: " . $conn->error);
+            header("Location: ../forms/fg_received_entry.php?error=system_error&message=" . urlencode($conn->error));
+            exit();
         }
-        
-        // One more check - if it's still '0' after all checks, force it to 'User'
-        if ($shiftInCharge === '0' || $shiftInCharge === 0 || (string)$shiftInCharge === '0') {
-            $shiftInCharge = 'User';
-        }
-        
-        // Final check just before bind_param
-        if ($shiftInCharge === "0" || $shiftInCharge === 0 || trim($shiftInCharge) === "0") {
-            $shiftInCharge = $_SESSION['full_name'] ?? $_SESSION['username'] ?? "User";
-        }
-        
-        if (empty($shiftInCharge)) {
-            $shiftInCharge = "User";
-        }
-        
-        // Convert empty strings to NULL for optional fields
-        $recommendedWeightValue = (!empty($recommendedWeight) && $recommendedWeight !== '' && $recommendedWeight !== '0') ? (float)$recommendedWeight : null;
-        $totalAreaValue = (!empty($totalArea) && $totalArea !== '') ? (float)$totalArea : null;
-        $actualWeightValue = (!empty($actualWeight) && $actualWeight !== '') ? (float)$actualWeight : null;
-        $measurementTypeValue = (!empty($measurementType) && $measurementType !== '') ? $measurementType : null;
-        
-        // Bind params: s = string, i = integer, d = decimal
-        $stmt->bind_param(
-            "ssssssssisdddsiiiss",
-            $fgId,
-            $dateTime,
-            $shift,
-            $productType,
-            $rollEntryType,
-            $referenceNumber,
-            $cncCuttingBatch,
-            $shiftInCharge,
-            $projectId,
-            $bagSize,
-            $recommendedWeightValue,
-            $actualWeightValue,
-            $totalAreaValue,
-            $measurementTypeValue,
-            $qualityChecked,
-            $passedQty,
-            $rejectedQty,
-            $packagingType,
-            $batchNumber
-        );
 
-        if ($stmt->execute()) {
-            // If it's a bundle, mark all individual rolls as used in fg_entry
-            if ($productType === 'roll' && $rollEntryType === 'bundle' && !empty($_POST['bundle_roll_list'])) {
-                $bundleRollList = $_POST['bundle_roll_list'];
-                $individualRolls = explode(', ', $bundleRollList);
+        // For rolls: fetch quantities, weights, and areas
+        $refQuantities = [];
+        $refWeights = [];
+        $refAreas = [];
+
+        if ($productType === 'roll' && !empty($tripNumberValue)) {
+            foreach ($individualReferences as $ref) {
+                $refQuantities[$ref] = 0;
+                $refWeights[$ref] = 0;
+                $refAreas[$ref] = 0;
                 
-                foreach ($individualRolls as $rollRef) {
-                    $rollRef = trim($rollRef);
-                    if (!empty($rollRef)) {
-                        // Insert a marker entry for each roll in the bundle to prevent reuse
-                        $packagingTypeValue = $packagingType ? "'{$packagingType}'" : "NULL";
-                        $conn->query("INSERT IGNORE INTO fg_entry 
-                            (fg_id, date_time, shift, product_type, roll_entry_type, reference_number, shift_in_charge, project_id, bag_size, 
-                             recommended_weight, actual_weight, quality_checked, passed_qty, rejected_qty, packaging_type, batch_number)
-                            VALUES 
-                            ('{$fgId}-{$rollRef}', '{$dateTime}', '{$shift}', 'roll', 'individual', '{$rollRef}', '{$shiftInCharge}', {$projectId}, '{$bagSize}', 
-                             0, 0, 0, 0, 0, {$packagingTypeValue}, 'BUNDLE-{$batchNumber}')
-                        ");
+                $qtyStmt = $conn->prepare("
+                    SELECT SUM(rt.amount_kg) as total_amount, COALESCE(re.total_area, 0) as total_area
+                    FROM roll_transfer rt
+                    LEFT JOIN roll_entry re ON rt.reference_number = re.reference_number
+                    WHERE rt.reference_number = ? AND rt.trip = ? AND rt.to_location = 'FG'
+                    GROUP BY re.total_area
+                ");
+                
+                if ($qtyStmt) {
+                    $qtyStmt->bind_param("si", $ref, $tripNumberValue);
+                    $qtyStmt->execute();
+                    $qtyResult = $qtyStmt->get_result();
+                    if ($qtyRow = $qtyResult->fetch_assoc()) {
+                        $refQuantities[$ref] = (float)($qtyRow['total_amount'] ?? 0);
+                        $refWeights[$ref] = (float)($qtyRow['total_amount'] ?? 0);
+                        $refAreas[$ref] = (float)($qtyRow['total_area'] ?? 0);
+                    }
+                    $qtyStmt->close();
+                }
+                
+                if ($refQuantities[$ref] <= 0) {
+                    $qtyStmt2 = $conn->prepare("SELECT total_weight, COALESCE(total_area, 0) as total_area FROM roll_entry WHERE reference_number = ?");
+                    if ($qtyStmt2) {
+                        $qtyStmt2->bind_param("s", $ref);
+                        $qtyStmt2->execute();
+                        $qtyResult2 = $qtyStmt2->get_result();
+                        if ($qtyRow2 = $qtyResult2->fetch_assoc()) {
+                            $refQuantities[$ref] = (float)($qtyRow2['total_weight'] ?? 0);
+                            $refWeights[$ref] = (float)($qtyRow2['total_weight'] ?? 0);
+                            $refAreas[$ref] = (float)($qtyRow2['total_area'] ?? 0);
+                        }
+                        $qtyStmt2->close();
                     }
                 }
             }
-            
-            // Also insert into legacy fg table for delivery tracking
-            $productName = "Finished Product - " . $bagSize; // Generate product name from bag size
-            $receivedQty = $actualWeight; // Use actual weight as received quantity
-            
-            $fgStmt = $conn->prepare("
-                INSERT INTO fg (
-                    product_name, prod_id, project_id, received_qty, delivery_qty, 
-                    client, batch_number, is_deleted, who_did
-                ) VALUES (?, ?, ?, ?, 0, (SELECT project_name FROM projects WHERE id = ?), ?, 0, ?)
-            ");
-            
-            $whoDidUser = $_SESSION['username'] ?? 'System';
-            
-            $fgStmt->bind_param(
-                "siidiss",
-                $productName,      // s
-                $projectId,        // i - for backward compatibility (prod_id)
-                $projectId,        // i - new project_id field
-                $receivedQty,      // d
-                $projectId,        // i - for subquery to get client name
-                $batchNumber,      // s
-                $whoDidUser        // s
-            );
-            
-            $fgStmt->execute();
-            $fgStmt->close();
-            
-            // Different success message for rolls vs bags
-            if ($productType === 'roll') {
-                if ($rollEntryType === 'bundle') {
-                    $successMsg = "âœ… FG Entry saved successfully! Bundle of rolls (Total Weight: " . $actualWeight . " kg)";
-                } else {
-                    $successMsg = "âœ… FG Entry saved successfully! Roll (Weight: " . $actualWeight . " kg)";
+        }
+
+        // Calculate quantity per reference
+        if ($productType === 'bag') {
+            $refKey = 'BAG-' . $entryId;
+            $refQuantities[$refKey] = $receivedQuantityValue;
+            error_log("FG Received Entry - Bag Processing: Setting quantity for key '" . $refKey . "' = " . $receivedQuantityValue);
+        } else {
+            // For rolls, if quantities not found, divide equally
+            $totalFetchedQty = array_sum($refQuantities);
+            if ($totalFetchedQty <= 0 && $receivedQuantityValue > 0) {
+                $qtyPerRef = $receivedQuantityValue / count($individualReferences);
+                foreach ($individualReferences as $ref) {
+                    $refQuantities[$ref] = $qtyPerRef;
                 }
             } else {
-                $successMsg = "âœ… FG Entry saved successfully! Passed Qty: " . $passedQty . " pcs";
+                // Use fetched quantities, but adjust to match total if needed
+                if ($totalFetchedQty > 0 && $receivedQuantityValue > 0 && abs($totalFetchedQty - $receivedQuantityValue) > 0.01) {
+                    $ratio = $receivedQuantityValue / $totalFetchedQty;
+                    foreach ($refQuantities as $ref => $qty) {
+                        $refQuantities[$ref] = $qty * $ratio;
+                    }
+                }
+            }
+        }
+
+        // Insert rows
+        $insertedCount = 0;
+        $entryIdBase = $entryId;
+
+        foreach ($individualReferences as $index => $ref) {
+            $currentEntryId = $entryIdBase;
+            
+            if (count($individualReferences) > 1 && $index > 0) {
+                $currentEntryId = $entryIdBase . '-' . ($index + 1);
             }
             
-            header("Location: ../forms/fg_entry.php?success=" . urlencode($successMsg) . "&fg_id=" . urlencode($fgId));
-        } else {
-            header("Location: ../forms/fg_entry.php?error=database_error&message=" . urlencode($stmt->error));
+            $refQty = $refQuantities[$ref] ?? 0;
+            $refAvailableQty = $refQty;
+            $refWeight = $refWeights[$ref] ?? 0;
+            $refArea = $refAreas[$ref] ?? 0;
+            
+            // Determine final values based on product type
+            if ($productType === 'bag') {
+                // For bags: reference_number is NULL/empty, cnc_cutting_batch contains the batch value
+                $finalReferenceNumber = null;
+                $finalCncBatch = $cncCuttingBatch; // Use the CNC batch from the form directly
+                
+                error_log("FG Received Entry - Bag Insert Parameters:");
+                error_log("  Entry ID: " . $currentEntryId);
+                error_log("  CNC Batch: '" . $finalCncBatch . "'");
+                error_log("  Reference: NULL");
+                error_log("  Quantity: " . $refQty);
+            } else {
+                // For rolls: reference_number contains the roll reference, cnc_cutting_batch is NULL
+                $finalReferenceNumber = $ref;
+                $finalCncBatch = null;
+                
+                error_log("FG Received Entry - Roll Insert Parameters:");
+                error_log("  Entry ID: " . $currentEntryId);
+                error_log("  Reference: " . $finalReferenceNumber);
+                error_log("  CNC Batch: NULL");
+                error_log("  Quantity: " . $refQty);
+            }
+            
+            $stmt->bind_param(
+                "ssssissddddssss",
+                $currentEntryId,
+                $dateTimeValue,
+                $shift,
+                $productType,
+                $tripNumberValue,
+                $finalReferenceNumber,
+                $deliveredQuantityValue,
+                $finalCncBatch,
+                $refQty,
+                $refAvailableQty,
+                $refWeight,
+                $refArea,
+                $shiftInCharge,
+                $remarks,
+                $summary
+            );
+            
+            if ($stmt->execute()) {
+                $insertedCount++;
+                error_log("FG Received Entry - Successfully inserted entry with ID: " . $currentEntryId);
+            } else {
+                error_log("FG Received Entry - Execute failed for " . $currentEntryId . ": " . $stmt->error);
+            }
         }
 
         $stmt->close();
 
+        if ($insertedCount > 0) {
+            $successMsg = $insertedCount > 1 
+                ? "FG Received Entry saved successfully! Created {$insertedCount} entries."
+                : "FG Received Entry saved successfully!";
+            header("Location: ../forms/fg_received_entry.php?success=fg_received_saved&entry_id=" . urlencode($entryIdBase));
+            exit();
+        } else {
+            error_log("FG Received Entry - No rows inserted");
+            header("Location: ../forms/fg_received_entry.php?error=system_error&message=" . urlencode('Failed to insert any records'));
+            exit();
+        }
+
     } catch (Exception $e) {
-        error_log("FG Entry Error: " . $e->getMessage());
-        header("Location: ../forms/fg_entry.php?error=system_error&message=" . urlencode($e->getMessage()));
+        error_log("FG Received Entry - Exception: " . $e->getMessage());
+        header("Location: ../forms/fg_received_entry.php?error=system_error&message=" . urlencode($e->getMessage()));
+        exit();
     }
 } else {
-    header("Location: ../forms/fg_entry.php");
+    header("Location: ../forms/fg_received_entry.php");
+    exit();
 }
 
 $conn->close();
 ?>
-
-
-
-

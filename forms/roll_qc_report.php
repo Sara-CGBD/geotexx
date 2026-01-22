@@ -91,26 +91,77 @@ $conn->query("CREATE TABLE IF NOT EXISTS roll_qc_reports (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
 // Fetch all reference numbers with roll numbers and available quantities from fiber_to_roll_entry
+// Only show references that have remaining amount (available_amount > 0)
 $references = [];
+
+// First, get all fiber_to_roll_entry records
 $refQuery = $conn->query("
     SELECT 
         ftr.reference_number, 
         ftr.roll_no, 
         ftr.line_no,
-        ftr.total_weight as original_weight,
-        COALESCE(SUM(rqc.product_amount), 0) as used_amount,
-        (ftr.total_weight - COALESCE(SUM(rqc.product_amount), 0)) as available_amount
+        ftr.total_weight as original_weight
     FROM fiber_to_roll_entry ftr
-    LEFT JOIN roll_qc_reports rqc 
-        ON ftr.reference_number COLLATE {$collation} = rqc.reference_number COLLATE {$collation}
-    WHERE ftr.reference_number IS NOT NULL
-    GROUP BY ftr.reference_number, ftr.roll_no, ftr.line_no, ftr.total_weight
-    HAVING available_amount > 0
+    WHERE ftr.reference_number IS NOT NULL 
+        AND ftr.reference_number != ''
+        AND ftr.total_weight IS NOT NULL
+        AND ftr.total_weight > 0
     ORDER BY ftr.created_at DESC
 ");
+
 if ($refQuery) {
     while ($row = $refQuery->fetch_assoc()) {
-        $references[] = $row;
+        // Use original_weight from the query result (aliased from total_weight)
+        $originalWeight = isset($row['original_weight']) ? (float)$row['original_weight'] : (isset($row['total_weight']) ? (float)$row['total_weight'] : 0);
+        
+        if ($originalWeight <= 0) {
+            continue; // Skip entries with no weight
+        }
+        
+        $referenceNumber = $row['reference_number'] ?? '';
+        $rollNo = $row['roll_no'] ?? null;
+        
+        if (empty($referenceNumber)) {
+            continue; // Skip entries without reference number
+        }
+        
+        // Calculate used amount from roll_qc_reports
+        // Use direct query with proper escaping instead of COLLATE in prepared statement
+        $referenceEscaped = $conn->real_escape_string($referenceNumber);
+        
+        if ($rollNo === null || $rollNo === '') {
+            $usedQueryStr = "
+                SELECT COALESCE(SUM(product_amount), 0) as used_amount
+                FROM roll_qc_reports 
+                WHERE reference_number = '{$referenceEscaped}'
+                AND (roll_no IS NULL OR roll_no = '')
+            ";
+        } else {
+            $rollNoEscaped = $conn->real_escape_string($rollNo);
+            $usedQueryStr = "
+                SELECT COALESCE(SUM(product_amount), 0) as used_amount
+                FROM roll_qc_reports 
+                WHERE reference_number = '{$referenceEscaped}'
+                AND roll_no = '{$rollNoEscaped}'
+            ";
+        }
+        
+        $usedResult = $conn->query($usedQueryStr);
+        $usedAmount = 0;
+        if ($usedResult && $usedRow = $usedResult->fetch_assoc()) {
+            $usedAmount = (float)$usedRow['used_amount'];
+        }
+        
+        // Calculate available amount
+        $availableAmount = $originalWeight - $usedAmount;
+        
+        // Only include if there's remaining amount
+        if ($availableAmount > 0.01) {
+            $row['original_weight'] = $originalWeight;
+            $row['used_amount'] = $usedAmount;
+            $row['available_amount'] = $availableAmount;
+            $references[] = $row;
+        }
     }
 }
 
@@ -148,6 +199,167 @@ $conn->close();
   .actions button { padding:10px 20px; font-size:15px; border:none; border-radius:6px; cursor:pointer; margin:0 10px; font-weight:600;}
   .submit-btn { background:#2ecc71; color:#fff; }
   .submit-btn:hover { background:#27ae60; }
+  
+  /* Quantity Limit Popup Styles */
+  .qty-limit-popup-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(15, 23, 42, 0.75);
+    backdrop-filter: blur(8px);
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    visibility: hidden;
+    transition: all 0.3s ease;
+  }
+  
+  .qty-limit-popup-overlay.show {
+    opacity: 1;
+    visibility: visible;
+  }
+  
+  .qty-limit-popup {
+    background: white;
+    border-radius: 16px;
+    max-width: 400px;
+    width: 90%;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    position: relative;
+    transform: scale(0.9) translateY(20px);
+    transition: all 0.3s ease;
+    overflow: hidden;
+  }
+  
+  .qty-limit-popup.show {
+    transform: scale(1) translateY(0);
+  }
+  
+  .qty-limit-popup-header {
+    background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+    padding: 16px 20px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    color: white;
+  }
+  
+  .qty-limit-popup-icon {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 28px;
+    flex-shrink: 0;
+  }
+  
+  .qty-limit-popup-title {
+    font-size: 18px;
+    font-weight: 700;
+    margin: 0;
+    text-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+  }
+  
+  .qty-limit-popup-body {
+    padding: 20px 24px 24px;
+  }
+  
+  .qty-limit-popup-message {
+    font-size: 14px;
+    color: #64748b;
+    margin-bottom: 16px;
+    line-height: 1.5;
+  }
+  
+  .qty-limit-popup-details {
+    background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+    border: 1px solid #fbbf24;
+    border-radius: 12px;
+    padding: 14px 16px;
+    margin-bottom: 20px;
+    font-size: 13px;
+    color: #78350f;
+  }
+  
+  .qty-limit-popup-details strong {
+    color: #92400e;
+    font-weight: 600;
+    display: inline-block;
+    min-width: 70px;
+  }
+  
+  .qty-limit-popup-details-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 0;
+  }
+  
+  .qty-limit-popup-details-row:last-child {
+    padding-bottom: 0;
+  }
+  
+  .qty-limit-popup-details-row:first-child {
+    padding-top: 0;
+  }
+  
+  .qty-limit-popup-button {
+    background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+    color: white;
+    border: none;
+    padding: 12px 32px;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+    width: 100%;
+  }
+  
+  .qty-limit-popup-button:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 16px rgba(239, 68, 68, 0.4);
+  }
+  
+  .qty-limit-popup-button:active {
+    transform: translateY(0);
+    box-shadow: 0 2px 8px rgba(239, 68, 68, 0.3);
+  }
+  
+  .qty-limit-popup-close {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.2);
+    border: none;
+    color: #ffffff;
+    font-size: 18px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+  }
+  
+  .qty-limit-popup-close:hover {
+    background: rgba(255, 255, 255, 0.3);
+    transform: scale(1.1);
+  }
+  
+  .qty-limit-popup-close:active {
+    transform: scale(0.95);
+  }
 </style>
 </head>
 <body>
@@ -181,16 +393,29 @@ $conn->close();
       <label>Reference Number:</label>
       <select id="ref_number" name="ref_number" onchange="loadRollData()" required>
         <option value="">-- Select Reference Number --</option>
-        <?php foreach($references as $ref): ?>
-        <option value="<?php echo htmlspecialchars($ref['reference_number']); ?>" 
-                data-roll="<?php echo htmlspecialchars($ref['roll_no']); ?>"
-                data-line="<?php echo htmlspecialchars($ref['line_no']); ?>"
-                data-available="<?php echo $ref['available_amount']; ?>"
-                data-original="<?php echo $ref['original_weight']; ?>">
-          <?php echo htmlspecialchars($ref['reference_number']); ?> (Roll <?php echo htmlspecialchars($ref['roll_no']); ?>) - Available: <?php echo number_format($ref['available_amount'], 2); ?> kg
-        </option>
-        <?php endforeach; ?>
+        <?php if (empty($references)): ?>
+          <option value="" disabled>-- No references with remaining amount found --</option>
+        <?php else: ?>
+          <?php foreach($references as $ref): ?>
+          <option value="<?php echo htmlspecialchars($ref['reference_number']); ?>" 
+                  data-roll="<?php echo htmlspecialchars($ref['roll_no'] ?? ''); ?>"
+                  data-line="<?php echo htmlspecialchars($ref['line_no'] ?? ''); ?>"
+                  data-available="<?php echo number_format($ref['available_amount'], 2); ?>"
+                  data-original="<?php echo number_format($ref['original_weight'], 2); ?>">
+            <?php echo htmlspecialchars($ref['reference_number']); ?> 
+            <?php if (!empty($ref['roll_no'])): ?>
+              (Roll <?php echo htmlspecialchars($ref['roll_no']); ?>) 
+            <?php endif; ?>
+            - Available: <?php echo number_format($ref['available_amount'], 2); ?> kg
+          </option>
+          <?php endforeach; ?>
+        <?php endif; ?>
       </select>
+      <?php if (empty($references)): ?>
+        <small style="color: #e74c3c; font-weight: 600; display: block; margin-top: 5px;">
+          No references found with remaining amount. Please create roll entries first or check if all amounts have been used.
+        </small>
+      <?php endif; ?>
     </div>
 
     <!-- Product Amount -->
@@ -239,8 +464,25 @@ $conn->close();
   </form>
 </div>
 
+<!-- Quantity Limit Exceeded Popup -->
+<div id="qtyLimitPopupOverlay" class="qty-limit-popup-overlay" onclick="closeQtyLimitPopup()">
+  <div id="qtyLimitPopup" class="qty-limit-popup" onclick="event.stopPropagation()">
+    <button type="button" class="qty-limit-popup-close" onclick="closeQtyLimitPopup()" aria-label="Close">×</button>
+    <div class="qty-limit-popup-header">
+      <div class="qty-limit-popup-icon">⚠️</div>
+      <h3 class="qty-limit-popup-title">Quantity Limit Exceeded</h3>
+    </div>
+    <div class="qty-limit-popup-body">
+      <p class="qty-limit-popup-message" id="qtyLimitPopupMessage"></p>
+      <div class="qty-limit-popup-details" id="qtyLimitPopupDetails"></div>
+      <button type="button" class="qty-limit-popup-button" onclick="closeQtyLimitPopup()">Got It</button>
+    </div>
+  </div>
+</div>
+
 <script>
 let availableAmount = 0;
+let lastPopupAmount = null;
 
 async function loadRollData() {
   const refSelect = document.getElementById('ref_number');
@@ -346,13 +588,88 @@ function validateAmount() {
     warningElement.textContent = `⚠️ Amount exceeds available quantity (${availableAmount.toFixed(2)} kg)`;
     warningElement.style.display = 'block';
     amountInput.setCustomValidity('Amount exceeds available quantity');
+    amountInput.style.borderColor = "#e74c3c";
+    
+    // Show popup notification (only once per amount value to avoid spam)
+    if (lastPopupAmount !== amount) {
+      showQtyLimitPopup(amount, availableAmount);
+      lastPopupAmount = amount;
+    }
     return false;
   } else {
+    // Reset popup tracking when amount is valid
+    if (amount <= availableAmount) {
+      lastPopupAmount = null;
+    }
+    
     warningElement.style.display = 'none';
     amountInput.setCustomValidity('');
+    amountInput.style.borderColor = "#ccc";
     return true;
   }
 }
+
+function showQtyLimitPopup(enteredAmount, maxAmount) {
+  const popup = document.getElementById('qtyLimitPopup');
+  const overlay = document.getElementById('qtyLimitPopupOverlay');
+  const message = document.getElementById('qtyLimitPopupMessage');
+  const details = document.getElementById('qtyLimitPopupDetails');
+  
+  // Shorter, more user-friendly message
+  message.textContent = `Only ${maxAmount.toFixed(2)} kg available. You entered ${enteredAmount.toFixed(2)} kg.`;
+  
+  // Simplified details structure
+  const excess = (enteredAmount - maxAmount).toFixed(2);
+  details.innerHTML = `
+    <div class="qty-limit-popup-details-row">
+      <strong>Available:</strong>
+      <span>${maxAmount.toFixed(2)} kg</span>
+    </div>
+    <div class="qty-limit-popup-details-row">
+      <strong>Excess:</strong>
+      <span style="color: #dc2626; font-weight: 700;">${excess} kg</span>
+    </div>
+  `;
+  
+  overlay.classList.add('show');
+  // Small delay to ensure overlay is rendered first
+  setTimeout(() => {
+    popup.classList.add('show');
+  }, 10);
+}
+
+function closeQtyLimitPopup() {
+  try {
+    const popup = document.getElementById('qtyLimitPopup');
+    const overlay = document.getElementById('qtyLimitPopupOverlay');
+    
+    if (popup && overlay) {
+      popup.classList.remove('show');
+      overlay.classList.remove('show');
+      
+      // Focus back on product_amount input field
+      setTimeout(() => {
+        const amountInput = document.getElementById('product_amount');
+        if (amountInput) {
+          amountInput.focus();
+          amountInput.select();
+        }
+      }, 100);
+    }
+  } catch (error) {
+    console.error('Error closing popup:', error);
+  }
+}
+
+// Close popup on ESC key
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') {
+    const popup = document.getElementById('qtyLimitPopup');
+    if (popup && popup.classList.contains('show')) {
+      closeQtyLimitPopup();
+    }
+  }
+});
 
 function validateForm() {
   if (!document.getElementById('ref_number').value) {

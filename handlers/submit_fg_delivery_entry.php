@@ -17,6 +17,60 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 
 $conn = SecurityConfig::getConnection();
 
+/**
+ * Expand reference ranges into individual references
+ * Handles formats like "REF-1 to REF-4" -> ["REF-1", "REF-2", "REF-3", "REF-4"]
+ * Also handles comma-separated references
+ */
+function expandReferenceRanges($referenceString) {
+    if (empty($referenceString)) {
+        return [];
+    }
+    
+    $references = [];
+    $referenceString = trim($referenceString);
+    
+    // First, handle comma-separated references
+    $parts = array_map('trim', explode(',', $referenceString));
+    
+    foreach ($parts as $part) {
+        $part = trim($part);
+        if (empty($part)) continue;
+        
+        // Check if this part is a range (contains " to ")
+        if (preg_match('/^(.+?)\s+to\s+(.+)$/i', $part, $matches)) {
+            $fromRef = trim($matches[1]);
+            $toRef = trim($matches[2]);
+            
+            // Try to extract the pattern (e.g., "REF-1" -> base="REF-", num=1)
+            if (preg_match('/^(.+?)-(\d+)$/', $fromRef, $fromMatches) && 
+                preg_match('/^(.+?)-(\d+)$/', $toRef, $toMatches)) {
+                $baseFrom = $fromMatches[1];
+                $baseTo = $toMatches[1];
+                $numFrom = (int)$fromMatches[2];
+                $numTo = (int)$toMatches[2];
+                
+                // Only expand if bases match and numbers are valid
+                if ($baseFrom === $baseTo && $numFrom <= $numTo) {
+                    for ($i = $numFrom; $i <= $numTo; $i++) {
+                        $references[] = $baseFrom . '-' . $i;
+                    }
+                    continue;
+                }
+            }
+            
+            // If pattern doesn't match, just add both references as-is
+            $references[] = $fromRef;
+            $references[] = $toRef;
+        } else {
+            // Not a range, add as-is
+            $references[] = $part;
+        }
+    }
+    
+    return array_unique($references); // Remove duplicates
+}
+
 try {
     // Get form data
     $deliveryId = $_POST['delivery_id'] ?? '';
@@ -27,12 +81,27 @@ try {
     $deliveryQty = (float)($_POST['delivery_qty'] ?? 0);
     $deliveryProductType = $_POST['delivery_product_type'] ?? 'bag'; // roll or bag
     
+    // Parse individual reference quantities (for rolls)
+    $referenceQuantitiesMap = [];
+    if ($deliveryProductType === 'roll' && !empty($_POST['reference_quantities'])) {
+        $referenceQuantitiesJson = $_POST['reference_quantities'];
+        $referenceQuantitiesArray = json_decode($referenceQuantitiesJson, true);
+        if (is_array($referenceQuantitiesArray)) {
+            foreach ($referenceQuantitiesArray as $refQty) {
+                if (isset($refQty['reference']) && isset($refQty['delivery_quantity'])) {
+                    $referenceQuantitiesMap[trim($refQty['reference'])] = (float)$refQty['delivery_quantity'];
+                }
+            }
+        }
+    }
+    
     // CNC cutting batch is only for bags, not for rolls
     $cncCuttingBatch = '';
     if ($deliveryProductType === 'bag') {
         $cncCuttingBatch = $_POST['cnc_cutting_batch'] ?? '';
     }
     $deliveryRollEntryType = $_POST['delivery_roll_entry_type'] ?? ''; // individual or bundle
+    $deliveryQuantityUnit = $_POST['delivery_quantity_unit'] ?? 'kg'; // kg or sqm
     $clientId = !empty($_POST['client_id']) ? (int)$_POST['client_id'] : 0;
     $clientName = $_POST['client_name'] ?? '';
     $challanNo = $_POST['challan_no'] ?? '';
@@ -106,6 +175,9 @@ try {
     // For bags: Calculate remaining quantity from branding entries (print_qty - delivered_qty)
     // For rolls: Get stock from FG entry using reference_number
     
+    // Initialize rollReferencesData for rolls (will be populated in the else block)
+    $rollReferencesData = [];
+    
     if ($deliveryProductType === 'bag') {
         // For bags, calculate remaining quantity from branding entries
         // Check if is_deleted column exists in branding_entries
@@ -154,6 +226,8 @@ try {
         $actualWeight = 0;
         $productType = 'bag';
         $deliveredQty = $totalDelivered;
+        $refWeightKg = 0; // Bags don't have weight_kg
+        $refAreaSqm = 0; // Bags don't have area_sqm
         
         // Set reference_number to empty for bags (not used)
         $referenceNumber = '';
@@ -164,63 +238,150 @@ try {
         }
         
     } else {
-        // For rolls, use existing logic with reference_number
-        $checkStmt = $conn->prepare("SELECT 
-                                        fe.id,
-                                        fe.passed_qty, 
-                                        fe.actual_weight,
-                                        fe.product_type,
-                                        COALESCE(SUM(fd.delivery_quantity), 0) as delivered_quantity,
-                                        CASE 
-                                            WHEN fe.product_type = 'roll' THEN (fe.actual_weight - COALESCE(SUM(fd.delivery_quantity), 0))
-                                            ELSE (fe.passed_qty - COALESCE(SUM(fd.delivery_quantity), 0))
-                                        END as remaining_quantity
-                                      FROM fg_entry fe
-                                      LEFT JOIN fg_deliveries fd ON fe.id = fd.fg_entry_id
-                                      WHERE fe.reference_number = ?
-                                      GROUP BY fe.id, fe.passed_qty, fe.actual_weight, fe.product_type");
-        $checkStmt->bind_param('s', $referenceNumber);
-        $checkStmt->execute();
-        $result = $checkStmt->get_result();
+        // For rolls, expand references first (handles comma-separated and ranges)
+        $referenceNumber = trim($referenceNumber);
         
-        if ($result->num_rows === 0) {
-            header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode('No FG Entry found for this reference!\n\nSolution:\n1. Check FG Entry form - ensure this reference exists\n2. If no FG Entry exists, create one first'));
-            $checkStmt->close();
+        if (empty($referenceNumber)) {
+            header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode('Invalid reference number!'));
             exit();
         }
         
-        $fgData = $result->fetch_assoc();
+        // Expand references (handles comma-separated and ranges like "REF-1 to REF-4")
+        $individualReferences = expandReferenceRanges($referenceNumber);
+        
+        if (empty($individualReferences)) {
+            header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode('Invalid reference number!'));
+            exit();
+        }
+        
+        // For rolls, we'll process each reference separately
+        // Store reference data for processing later (already initialized above)
+        $checkStmt = $conn->prepare("SELECT 
+                                        fre.id,
+                                        fre.reference_number,
+                                        fre.received_quantity,
+                                        fre.available_quantity,
+                                        fre.product_type,
+                                        COALESCE(fre.weight_kg, 0) as weight_kg,
+                                        COALESCE(fre.area_sqm, 0) as area_sqm,
+                                        COALESCE(SUM(fd.delivery_quantity), 0) as delivered_quantity,
+                                        (fre.received_quantity - COALESCE(SUM(fd.delivery_quantity), 0)) as remaining_quantity
+                                      FROM fg_received_entry fre
+                                      LEFT JOIN fg_deliveries fd ON fre.id = fd.fg_entry_id AND fd.delivery_product_type = 'roll'
+                                      WHERE fre.product_type = 'roll'
+                                        AND fre.reference_number = ?
+                                      GROUP BY fre.id, fre.reference_number, fre.received_quantity, fre.available_quantity, fre.product_type, fre.weight_kg, fre.area_sqm
+                                      LIMIT 1");
+        
+        foreach ($individualReferences as $ref) {
+            $ref = trim($ref);
+            if (empty($ref)) continue;
+            
+            $checkStmt->bind_param('s', $ref);
+            $checkStmt->execute();
+            $result = $checkStmt->get_result();
+            
+            if ($result->num_rows === 0) {
+                $checkStmt->close();
+                
+                // Better error message
+                $errorMsg = 'No FG Received Entry found for reference: "' . htmlspecialchars($ref) . '"\n\n';
+                $errorMsg .= 'Solution:\n';
+                $errorMsg .= '1. Check FG Received Entry form - ensure this reference exists\n';
+                $errorMsg .= '2. If no FG Received Entry exists, create one first';
+                
+                header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode($errorMsg));
+                exit();
+            }
+            
+            $fgData = $result->fetch_assoc();
+            $rollReferencesData[] = [
+                'reference' => $ref,
+                'fg_entry_id' => $fgData['id'],
+                'received_quantity' => (float)$fgData['received_quantity'],
+                'delivered_quantity' => (float)$fgData['delivered_quantity'],
+                'remaining_quantity' => (float)$fgData['remaining_quantity'],
+                'weight_kg' => (float)($fgData['weight_kg'] ?? 0),
+                'area_sqm' => (float)($fgData['area_sqm'] ?? 0)
+            ];
+        }
+        
         $checkStmt->close();
         
-        // Use the ID from the query if not provided in form
-        if (empty($fgEntryId)) {
-            $fgEntryId = $fgData['id'];
+        // For backward compatibility with existing code structure, use first reference data
+        // But we'll process all references in the delivery insertion section
+        if (!empty($rollReferencesData)) {
+            $firstRefData = $rollReferencesData[0];
+            if (empty($fgEntryId)) {
+                $fgEntryId = $firstRefData['fg_entry_id'];
+            }
+            $passedQty = $firstRefData['received_quantity'];
+            $actualWeight = $firstRefData['received_quantity'];
+            $productType = 'roll';
+            $deliveredQty = $firstRefData['delivered_quantity'];
+            
+            // Calculate total remaining quantity across all references based on selected unit
+            $deliveryQuantityUnit = $_POST['delivery_quantity_unit'] ?? 'kg'; // kg or sqm
+            
+            if ($deliveryQuantityUnit === 'sqm') {
+                // For sqm, use area_sqm (which is fixed per reference, not reduced by deliveries)
+                $totalRemainingQty = 0;
+                foreach ($rollReferencesData as $refData) {
+                    $totalRemainingQty += $refData['area_sqm'];
+                }
+                $remainingQty = $totalRemainingQty;
+            } else {
+                // For kg, use remaining_quantity (received - delivered)
+                $totalRemainingQty = 0;
+                foreach ($rollReferencesData as $refData) {
+                    $totalRemainingQty += $refData['remaining_quantity'];
+                }
+                $remainingQty = $totalRemainingQty;
+            }
+            
+            $refWeightKg = $firstRefData['weight_kg'];
+            $refAreaSqm = $firstRefData['area_sqm'];
+        } else {
+            header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode('No valid references found!'));
+            exit();
         }
-        
-        $passedQty = (float)$fgData['passed_qty'];
-        $actualWeight = (float)$fgData['actual_weight'];
-        $productType = $fgData['product_type'];
-        $deliveredQty = (float)$fgData['delivered_quantity'];
-        $remainingQty = (float)$fgData['remaining_quantity'];
     }
     
-    // Check if there's any stock available
-    if ($remainingQty <= 0) {
+    // Get delivery quantity unit for validation
+    $deliveryQuantityUnit = $_POST['delivery_quantity_unit'] ?? 'kg';
+    
+    // Check if there's any stock available based on selected unit
+    if ($deliveryQuantityUnit === 'sqm' && $productType === 'roll') {
+        // For sqm, check if area_sqm > 0
+        $totalAreaSqm = 0;
+        if (!empty($rollReferencesData)) {
+            foreach ($rollReferencesData as $refData) {
+                $totalAreaSqm += $refData['area_sqm'];
+            }
+        }
+        if ($totalAreaSqm <= 0) {
+            header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode('No area (sqm) available for this reference!'));
+            exit();
+        }
+        // Update remainingQty to total area for sqm validation
+        $remainingQty = $totalAreaSqm;
+    } else if ($remainingQty <= 0) {
         if ($productType === 'roll' && $actualWeight <= 0) {
-            header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode('No stock available for delivery!\n\nReason:\n• The FG Entry for this reference has 0 Actual Weight, OR\n• All stock has already been delivered\n\nSolution:\n1. Check FG Entry form - ensure Actual Weight > 0\n2. Verify delivery history for this reference'));
+            header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode('No stock available for delivery!\n\nReason:\n• The FG Received Entry for this reference has 0 Received Quantity, OR\n• All stock has already been delivered\n\nSolution:\n1. Check FG Received Entry form - ensure Received Quantity > 0\n2. Verify delivery history for this reference'));
             exit();
         } else if ($passedQty <= 0) {
-            header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode('No stock available for delivery!\n\nReason:\n• The FG Entry for this reference has 0 Passed Quantity, OR\n• All stock has already been delivered\n\nSolution:\n1. Check FG Entry form - ensure Passed Quantity > 0\n2. Verify delivery history for this reference'));
+            header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode('No stock available for delivery!\n\nReason:\n• The FG Received Entry for this reference has 0 Received Quantity, OR\n• All stock has already been delivered\n\nSolution:\n1. Check FG Received Entry form - ensure Received Quantity > 0\n2. Verify delivery history for this reference'));
             exit();
         } else {
-            header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode('All stock has already been delivered for this reference!\n\nPassed Qty: ' . $passedQty . '\nDelivered: ' . $deliveredQty . '\nRemaining: 0'));
+            header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode('All stock has already been delivered for this reference!\n\nReceived Qty: ' . $passedQty . '\nDelivered: ' . $deliveredQty . '\nRemaining: 0'));
             exit();
         }
     }
     
     // Prevent delivery quantity exceeding available stock
+    // For rolls with multiple references, $remainingQty is now the sum of all remaining quantities
     if ($deliveryQty > $remainingQty) {
-        $unit = ($deliveryProductType === 'roll') ? 'kg' : 'pcs';
+        $unit = ($deliveryProductType === 'roll') ? ($deliveryQuantityUnit === 'sqm' ? 'sqm' : 'kg') : 'pcs';
         header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode("Delivery quantity ({$deliveryQty} {$unit}) exceeds available stock ({$remainingQty} {$unit})!\n\nPlease reduce the quantity."));
         exit();
     }
@@ -240,6 +401,8 @@ try {
         bag_size VARCHAR(50),
         packaging_type VARCHAR(50),
         delivery_quantity DECIMAL(10,2) NOT NULL,
+        weight_kg DECIMAL(10,2) DEFAULT NULL,
+        area_sqm DECIMAL(10,2) DEFAULT NULL,
         client_id INT,
         client_name VARCHAR(200),
         unit_price DECIMAL(10,2),
@@ -284,110 +447,183 @@ try {
     if (!in_array('delivered_at', $existingDeliveryCols)) {
         $conn->query("ALTER TABLE fg_deliveries ADD COLUMN delivered_at DATETIME AFTER delivered_by");
     }
+    if (!in_array('weight_kg', $existingDeliveryCols)) {
+        $conn->query("ALTER TABLE fg_deliveries ADD COLUMN weight_kg DECIMAL(10,2) DEFAULT NULL AFTER delivery_quantity");
+    }
+    if (!in_array('area_sqm', $existingDeliveryCols)) {
+        $conn->query("ALTER TABLE fg_deliveries ADD COLUMN area_sqm DECIMAL(10,2) DEFAULT NULL AFTER weight_kg");
+    }
+    if (!in_array('delivery_quantity_unit', $existingDeliveryCols)) {
+        $conn->query("ALTER TABLE fg_deliveries ADD COLUMN delivery_quantity_unit VARCHAR(10) DEFAULT 'kg' AFTER delivery_quantity");
+    }
     
-    // Insert delivery record
-    // Parameters breakdown:
-    // 1. delivery_id - string (s)
-    // 2. fg_entry_id - integer (i)
-    // 3. reference_number - string (s)
-    // 4. cnc_cutting_batch - string (s)
-    // 5. delivery_date - string (s)
-    // 6. shift - string (s)
-    // 7. challan_no - string (s)
-    // 8. truck_no - string (s)
-    // 9. destination - string (s)
-    // 10. bag_size - string (s)
-    // 11. packaging_type - string (s)
-    // 12. delivery_quantity - decimal (d)
-    // 13. delivery_product_type - string (s)
-    // 14. delivery_roll_entry_type - string (s)
-    // 15. client_id - integer (i)
-    // 16. client_name - string (s)
-    // 17. unit_price - decimal (d)
-    // 18. total_cost - decimal (d)
-    // 19. remarks - string (s)
-    // 20. delivered_by - string (s)
-    // 21. delivered_at - string (s)
-    // Type string: "sisssssssssdssisddsss" (21 characters)
-    
+    // Prepare INSERT statement
     $stmt = $conn->prepare("INSERT INTO fg_deliveries 
         (delivery_id, fg_entry_id, reference_number, cnc_cutting_batch, delivery_date, shift, 
          challan_no, truck_no, destination, bag_size, packaging_type, delivery_quantity, 
-         delivery_product_type, delivery_roll_entry_type, client_id, client_name, 
+         delivery_quantity_unit, weight_kg, area_sqm, delivery_product_type, delivery_roll_entry_type, client_id, client_name, 
          unit_price, total_cost, remarks, delivered_by, delivered_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
     
-    // Handle nullable fg_entry_id for bags - use 0 for bags, actual ID for rolls
-    // MySQL will treat 0 as NULL if column allows NULL, or we can use actual NULL
-    $fgEntryIdValue = ($deliveryProductType === 'bag' && (empty($fgEntryId) || $fgEntryId == 0)) ? null : (int)$fgEntryId;
+    $insertedCount = 0;
+    $totalDeliveredQty = 0;
+    $updatedFgEntryIds = [];
     
-    // For NULL values in mysqli, we need to use a different approach
-    // Convert NULL to 0 for binding, then update after if needed
-    $fgEntryIdForBind = ($fgEntryIdValue === null) ? 0 : (int)$fgEntryIdValue;
-    
-    $stmt->bind_param(
-        'sisssssssssdssisddsss',  // Type string: 21 characters
-        $deliveryId,              // 1. s - delivery_id
-        $fgEntryIdForBind,        // 2. i - fg_entry_id (0 for bags)
-        $referenceNumber,         // 3. s - reference_number
-        $cncCuttingBatch,         // 4. s - cnc_cutting_batch
-        $deliveryDate,            // 5. s - delivery_date
-        $shift,                   // 6. s - shift
-        $challanNo,               // 7. s - challan_no
-        $truckNo,                 // 8. s - truck_no
-        $destination,             // 9. s - destination
-        $bagSize,                 // 10. s - bag_size
-        $packagingType,           // 11. s - packaging_type
-        $deliveryQty,             // 12. d - delivery_quantity
-        $deliveryProductType,     // 13. s - delivery_product_type
-        $deliveryRollEntryType,   // 14. s - delivery_roll_entry_type
-        $clientId,                // 15. i - client_id
-        $clientName,              // 16. s - client_name
-        $unitPrice,               // 17. d - unit_price
-        $totalCost,               // 18. d - total_cost
-        $remarks,                 // 19. s - remarks
-        $deliveredBy,             // 20. s - delivered_by
-        $deliveredAt              // 21. s - delivered_at
-    );
-    
-    if (!$stmt->execute()) {
-        throw new Exception('Failed to insert delivery record: ' . $stmt->error);
-    }
-    
-    // Get insert ID before closing statement
-    $insertId = $conn->insert_id;
-    $stmt->close();
-    
-    // If fg_entry_id should be NULL for bags, update it after insert
-    if ($fgEntryIdValue === null && $insertId) {
-        $conn->query("UPDATE fg_deliveries SET fg_entry_id = NULL WHERE id = $insertId");
-    }
-    
-    // Update fg_entry: recalculate delivered_quantity from actual deliveries to ensure accuracy
-    // Only for rolls (bags don't use fg_entry_id)
-    if ($deliveryProductType === 'roll' && !empty($fgEntryId) && $fgEntryId > 0) {
-        $updateStmt = $conn->prepare("UPDATE fg_entry fe
-                                       SET delivered_quantity = (
-                                           SELECT COALESCE(SUM(fd.delivery_quantity), 0)
-                                           FROM fg_deliveries fd
-                                           WHERE fd.fg_entry_id = fe.id
-                                       )
-                                       WHERE fe.id = ?");
-        $updateStmt->bind_param('i', $fgEntryId);
-        
-        if (!$updateStmt->execute()) {
-            throw new Exception('Failed to update delivered quantity: ' . $updateStmt->error);
+    // For rolls with multiple references, store each reference in a separate row
+    if ($deliveryProductType === 'roll' && !empty($rollReferencesData)) {
+        $deliveryIdBase = $deliveryId;
+        foreach ($rollReferencesData as $index => $refData) {
+            $currentDeliveryId = $deliveryIdBase;
+            // For multiple references, append suffix to delivery_id (except first one keeps original)
+            if (count($rollReferencesData) > 1 && $index > 0) {
+                $currentDeliveryId = $deliveryIdBase . '-' . ($index + 1);
+            }
+            
+            // Use user-input delivery quantity if provided, otherwise use remaining quantity
+            $refReferenceNumber = $refData['reference'];
+            $refDeliveryQty = isset($referenceQuantitiesMap[$refReferenceNumber]) 
+                ? $referenceQuantitiesMap[$refReferenceNumber] 
+                : $refData['remaining_quantity'];
+            $refFgEntryId = $refData['fg_entry_id'];
+            $refWeightKg = $refData['weight_kg'];
+            $refAreaSqm = $refData['area_sqm'];
+            
+            // Calculate cost for this reference
+            $refTotalCost = $refDeliveryQty * $unitPrice;
+            
+            // Bind parameters for this reference
+            // Type string: 24 parameters
+            // s(1) i(1) s(10) d(1) s(1) d(3) s(2) i(1) s(1) d(2) s(1) = 24
+            $stmt->bind_param(
+                'sisssssssssdsddssisddsss',  // Type string: 24 characters
+                $currentDeliveryId,        // 1. s - delivery_id
+                $refFgEntryId,             // 2. i - fg_entry_id
+                $refReferenceNumber,       // 3. s - reference_number
+                $cncCuttingBatch,          // 4. s - cnc_cutting_batch (empty for rolls)
+                $deliveryDate,             // 5. s - delivery_date
+                $shift,                    // 6. s - shift
+                $challanNo,                // 7. s - challan_no
+                $truckNo,                  // 8. s - truck_no
+                $destination,              // 9. s - destination
+                $bagSize,                  // 10. s - bag_size (empty for rolls)
+                $packagingType,            // 11. s - packaging_type (empty for rolls)
+                $refDeliveryQty,           // 12. d - delivery_quantity
+                $deliveryQuantityUnit,     // 13. s - delivery_quantity_unit (kg or sqm)
+                $refWeightKg,              // 14. d - weight_kg
+                $refAreaSqm,               // 15. d - area_sqm
+                $deliveryProductType,      // 16. s - delivery_product_type
+                $deliveryRollEntryType,    // 17. s - delivery_roll_entry_type
+                $clientId,                 // 18. i - client_id
+                $clientName,               // 19. s - client_name
+                $unitPrice,                // 20. d - unit_price
+                $refTotalCost,             // 21. d - total_cost
+                $remarks,                  // 22. s - remarks
+                $deliveredBy,              // 23. s - delivered_by
+                $deliveredAt              // 24. s - delivered_at
+            );
+            
+            if ($stmt->execute()) {
+                $insertedCount++;
+                $totalDeliveredQty += $refDeliveryQty;
+                if (!in_array($refFgEntryId, $updatedFgEntryIds)) {
+                    $updatedFgEntryIds[] = $refFgEntryId;
+                }
+            } else {
+                error_log("FG Delivery - Execute failed for reference {$refReferenceNumber}: " . $stmt->error);
+                throw new Exception('Failed to insert delivery record for reference ' . $refReferenceNumber . ': ' . $stmt->error);
+            }
         }
-        $updateStmt->close();
         
-        // Check if fully delivered and update status
-        $newRemaining = $remainingQty - $deliveryQty;
-        if ($newRemaining <= 0) {
-            $conn->query("UPDATE fg_entry SET status = 'Fully Delivered' WHERE id = $fgEntryId");
+        $stmt->close();
+        
+        // Update fg_received_entry for each reference
+        foreach ($updatedFgEntryIds as $fgEntryIdToUpdate) {
+            // Calculate total delivered quantity for this fg_received_entry
+            $totalDeliveredStmt = $conn->prepare("SELECT COALESCE(SUM(fd.delivery_quantity), 0) as total_delivered
+                                                   FROM fg_deliveries fd
+                                                   WHERE fd.fg_entry_id = ? AND fd.delivery_product_type = 'roll'");
+            $totalDeliveredStmt->bind_param('i', $fgEntryIdToUpdate);
+            $totalDeliveredStmt->execute();
+            $totalDeliveredResult = $totalDeliveredStmt->get_result();
+            $totalDeliveredData = $totalDeliveredResult->fetch_assoc();
+            $totalDelivered = (float)($totalDeliveredData['total_delivered'] ?? 0);
+            $totalDeliveredStmt->close();
+            
+            // Get original received_quantity to calculate new available_quantity
+            $getReceivedStmt = $conn->prepare("SELECT received_quantity FROM fg_received_entry WHERE id = ?");
+            $getReceivedStmt->bind_param('i', $fgEntryIdToUpdate);
+            $getReceivedStmt->execute();
+            $getReceivedResult = $getReceivedStmt->get_result();
+            $getReceivedData = $getReceivedResult->fetch_assoc();
+            $originalReceived = (float)($getReceivedData['received_quantity'] ?? 0);
+            $getReceivedStmt->close();
+            
+            // Update delivered_quantity and available_quantity
+            $newAvailable = $originalReceived - $totalDelivered;
+            $updateStmt = $conn->prepare("UPDATE fg_received_entry 
+                                           SET delivered_quantity = ?,
+                                               available_quantity = ?
+                                           WHERE id = ?");
+            $updateStmt->bind_param('ddi', $totalDelivered, $newAvailable, $fgEntryIdToUpdate);
+            
+            if (!$updateStmt->execute()) {
+                throw new Exception('Failed to update delivered quantity: ' . $updateStmt->error);
+            }
+            $updateStmt->close();
         }
+        
+        // Calculate new remaining for success message
+        $newRemaining = $remainingQty - $totalDeliveredQty;
+        
     } else {
+        // For bags, use existing single-row logic
+        // Handle nullable fg_entry_id for bags - use 0 for bags, actual ID for rolls
+        $fgEntryIdValue = ($deliveryProductType === 'bag' && (empty($fgEntryId) || $fgEntryId == 0)) ? null : (int)$fgEntryId;
+        $fgEntryIdForBind = ($fgEntryIdValue === null) ? 0 : (int)$fgEntryIdValue;
+        
+        $stmt->bind_param(
+            'sisssssssssdsdddssisdds',  // Type string: 24 characters
+            $deliveryId,              // 1. s - delivery_id
+            $fgEntryIdForBind,        // 2. i - fg_entry_id (0 for bags)
+            $referenceNumber,         // 3. s - reference_number
+            $cncCuttingBatch,         // 4. s - cnc_cutting_batch
+            $deliveryDate,            // 5. s - delivery_date
+            $shift,                   // 6. s - shift
+            $challanNo,               // 7. s - challan_no
+            $truckNo,                 // 8. s - truck_no
+            $destination,             // 9. s - destination
+            $bagSize,                 // 10. s - bag_size
+            $packagingType,           // 11. s - packaging_type
+            $deliveryQty,             // 12. d - delivery_quantity
+            $deliveryQuantityUnit,    // 13. s - delivery_quantity_unit (kg or sqm)
+            $refWeightKg,             // 14. d - weight_kg
+            $refAreaSqm,              // 15. d - area_sqm
+            $deliveryProductType,     // 16. s - delivery_product_type
+            $deliveryRollEntryType,   // 17. s - delivery_roll_entry_type
+            $clientId,                // 18. i - client_id
+            $clientName,              // 19. s - client_name
+            $unitPrice,               // 20. d - unit_price
+            $totalCost,               // 21. d - total_cost
+            $remarks,                 // 22. s - remarks
+            $deliveredBy,             // 23. s - delivered_by
+            $deliveredAt              // 24. s - delivered_at
+        );
+        
+        if (!$stmt->execute()) {
+            throw new Exception('Failed to insert delivery record: ' . $stmt->error);
+        }
+        
+        $insertId = $conn->insert_id;
+        $stmt->close();
+        
+        // If fg_entry_id should be NULL for bags, update it after insert
+        if ($fgEntryIdValue === null && $insertId) {
+            $conn->query("UPDATE fg_deliveries SET fg_entry_id = NULL WHERE id = $insertId");
+        }
+        
         // For bags, calculate new remaining
         $newRemaining = $remainingQty - $deliveryQty;
+        $totalDeliveredQty = $deliveryQty;
     }
     
     $conn->close();
@@ -396,16 +632,23 @@ try {
     $unitLabel = ($deliveryProductType === 'roll') ? 'kg' : 'pcs';
     $productLabel = ($deliveryProductType === 'roll') ? 'Rolls' : 'Bags';
     
-    $successMsg = " {$deliveryQty} {$productLabel} delivered successfully!\n\n";
-    $successMsg .= "Delivery ID: {$deliveryId}\n";
-    if ($deliveryProductType === 'roll') {
-        $successMsg .= "Reference: {$referenceNumber}\n";
+    if ($deliveryProductType === 'roll' && !empty($rollReferencesData) && count($rollReferencesData) > 1) {
+        $successMsg = count($rollReferencesData) . " reference(s) delivered successfully!\n\n";
+        $successMsg .= "Delivery ID: {$deliveryId} (and variations)\n";
+        $successMsg .= "Total Quantity: {$totalDeliveredQty} {$unitLabel}\n";
+        $successMsg .= "Client: {$clientName}";
     } else {
-        $successMsg .= "CNC Batch: {$cncCuttingBatch}\n";
+        $successMsg = " {$totalDeliveredQty} {$productLabel} delivered successfully!\n\n";
+        $successMsg .= "Delivery ID: {$deliveryId}\n";
+        if ($deliveryProductType === 'roll') {
+            $successMsg .= "Reference: {$referenceNumber}\n";
+        } else {
+            $successMsg .= "CNC Batch: {$cncCuttingBatch}\n";
+        }
+        $successMsg .= "Quantity: {$totalDeliveredQty} {$unitLabel}\n";
+        $successMsg .= "Remaining Stock: {$newRemaining} {$unitLabel}\n";
+        $successMsg .= "Client: {$clientName}";
     }
-    $successMsg .= "Quantity: {$deliveryQty} {$unitLabel}\n";
-    $successMsg .= "Remaining Stock: {$newRemaining} {$unitLabel}\n";
-    $successMsg .= "Client: {$clientName}";
     
     header("Location: ../forms/fg_delivery_entry.php?success=" . urlencode($successMsg));
     exit();
