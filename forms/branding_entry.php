@@ -221,41 +221,33 @@ $brandingId = 'BR-' . date('Ymd') . '-' . str_pad($nextBrandingNumber, 3, '0', S
       <input type="text" id="printMachine" name="printMachine" required>
     </div>
 
-    <!-- Bag Size (Buttons + Manual Input) -->
+    <!-- Bag Size (Read-only - Auto-filled from CNC entry) -->
     <div class="form-group">
-      <label>Bag Size:</label>
-      <div class="btn-group" id="bagSizeGroup">
-        <button type="button" class="btn btn-bag-size" onclick="selectBagSize('2000mmX1500mm', this)">2000mmX1500mm</button>
-        <button type="button" class="btn btn-bag-size" onclick="selectBagSize('1200mmX950mm', this)">1200mmX950mm</button>
-        <button type="button" class="btn btn-bag-size" onclick="selectBagSize('1250mmX1000mm', this)">1250mmX1000mm</button>
-        <button type="button" class="btn btn-bag-size" onclick="selectBagSize('1225mmX1000mm', this)">1225mmX1000mm</button>
-        <button type="button" class="btn btn-bag-size" onclick="selectBagSize('1300mmX1050mm', this)">1300mmX1050mm</button>
-        <button type="button" class="btn btn-bag-size" onclick="selectBagSize('1600mmX850mm', this)">1600mmX850mm</button>
-        <button type="button" class="btn btn-bag-size" onclick="selectBagSize('1100mmX850mm', this)">1100mmX850mm</button>
-        <button type="button" class="btn btn-bag-size" onclick="selectBagSize('1200mmX600mm', this)">1200mmX600mm</button>
-        <button type="button" class="btn btn-bag-size" onclick="selectBagSize('1100mmX800mm', this)">1100mmX800mm</button>
-        <button type="button" class="btn btn-bag-size" onclick="selectBagSize('1125mmX900mm', this)">1125mmX900mm</button>
-        <button type="button" class="btn btn-bag-size" onclick="selectBagSize('1150mmX800mm', this)">1150mmX800mm</button>
-        <button type="button" class="btn btn-bag-size" onclick="selectBagSize('1150mmX850mm', this)">1150mmX850mm</button>
-        <button type="button" class="btn btn-bag-size" onclick="selectBagSize('1150mmX900mm', this)">1150mmX900mm</button>
-        <button type="button" class="btn btn-bag-size" onclick="selectBagSize('1700mmX1250mm', this)">1700mmX1250mm</button>
-        <button type="button" class="btn btn-bag-size" onclick="selectBagSize('1050mmX800mm', this)">1050mmX800mm</button>
-        <button type="button" class="btn btn-bag-size" onclick="selectBagSize('1075mmX850mm', this)">1075mmX850mm</button>
-        <button type="button" class="btn btn-bag-size" onclick="selectBagSize('1000mmX800mm', this)">1000mmX800mm</button>
-        <button type="button" class="btn btn-bag-size" onclick="selectBagSize('950mmX750mm', this)">950mmX750mm</button>
-        <button type="button" class="btn btn-bag-size" onclick="selectBagSize('950mmX500mm', this)">950mmX500mm</button>
-        <button type="button" class="btn btn-bag-size" onclick="selectBagSize('830mmX600mm', this)">830mmX600mm</button>
-        <button type="button" class="btn btn-bag-size" onclick="selectBagSize('1030mmX700mm', this)">1030mmX700mm</button>
-        <button type="button" class="btn btn-bag-size" onclick="selectBagSize('300mmX299mm', this)">300mmX299mm</button>
-        <button type="button" class="btn btn-bag-size" onclick="selectBagSize('500mmX499mm', this)">500mmX499mm</button>
-        <button type="button" class="btn btn-bag-size" onclick="selectBagSize('700mmX700mm', this)">700mmX700mm</button>
-        <button type="button" class="btn btn-bag-size" onclick="selectBagSize('850mmX700mm', this)">850mmX700mm</button>
-        <button type="button" class="btn btn-bag-size" onclick="selectBagSize('1030mmX750mm', this)">1030mmX750mm</button>
-        <button type="button" class="btn btn-bag-size" onclick="selectBagSize('1000mmX700mm', this)">1000mmX700mm</button>
-        <button type="button" class="btn btn-bag-size custom-bag-size-btn" onclick="selectBagSize('custom', this)" style="background:#6c757d;color:#fff;">Custom (Enter manually)</button>
-      </div>
-      <input type="text" id="bagSizeCustom" placeholder="Enter custom bag size" style="margin-top: 10px; display:none;">
-      <input type="hidden" id="bagSize" name="bagSize" value="">
+        <label for="bagSize" style="display: block; margin-bottom: 8px; font-weight: 600; color: #2d3748;">
+            Bag Size <span style="color: #e53e3e;">*</span>
+        </label>
+        <input 
+            type="text" 
+            id="bagSize" 
+            name="bagSize" 
+            value="" 
+            readonly 
+            style="
+                width: 100%;
+                padding: 12px 16px;
+                border: 2px solid #e2e8f0;
+                border-radius: 8px;
+                font-size: 14px;
+                background-color: #f7fafc;
+                color: #4a5568;
+                cursor: not-allowed;
+                transition: all 0.3s ease;
+            "
+            placeholder="Will be auto-filled when you select a CNC Cutting Batch"
+        >
+        <small style="display: block; margin-top: 6px; color: #718096; font-size: 12px;">
+            Bag size is automatically fetched from the selected CNC cutting batch
+        </small>
     </div>
 
     <!-- GSM Selection (shown dynamically if multiple GSM options) -->
@@ -280,6 +272,13 @@ $brandingId = 'BR-' . date('Ymd') . '-' . str_pad($nextBrandingNumber, 3, '0', S
       <small id="print_warning" style="color:#e74c3c; font-weight:600; display:none; margin-top:5px;"></small>
     </div>
 
+    <!-- NCP Piece -->
+    <div class="form-group">
+      <label>NCP Piece:</label>
+      <input type="number" id="ncpPiece" name="ncpPiece" min="0" value="0" oninput="updateSummary()">
+      <small style="color:#7f8c8d; font-size:0.85em; display:block; margin-top:5px;">Enter the number of NCP (Non-Conforming Product) pieces</small>
+    </div>
+
     <!-- Summary Section -->
     <div class="form-group">
       <div id="summaryBox" class="summary-info"></div>
@@ -295,59 +294,21 @@ $brandingId = 'BR-' . date('Ymd') . '-' . str_pad($nextBrandingNumber, 3, '0', S
 </div>
 
 <script>
-// Auto-select bag size based on value from database
+// Bag size is now auto-filled from CNC entry - no UI selection needed
+// These functions are kept for backward compatibility but do nothing
 function autoSelectBagSize(bagSizeValue) {
-    if (!bagSizeValue) return;
-    
-    // Normalize the bag size value (handle case differences and spacing)
-    const normalizedValue = bagSizeValue.trim().toLowerCase();
-    
-    // Find the matching button in bagSizeGroup
-    const bagSizeButtons = document.querySelectorAll('#bagSizeGroup .btn-bag-size');
-    let found = false;
-    
-    bagSizeButtons.forEach(btn => {
-        const btnValue = btn.textContent.trim().toLowerCase();
-        if (btnValue === normalizedValue || btnValue.replace(/\s+/g, '') === normalizedValue.replace(/\s+/g, '')) {
-            // Found matching button, select it
-            selectBagSize(btn.textContent.trim(), btn);
-            found = true;
-        }
-    });
-    
-    // If no button match found, check if it's a custom size
-    if (!found) {
-        // Try to find custom button and activate custom input
-        const customBtn = document.querySelector('#bagSizeGroup .custom-bag-size-btn');
-        if (customBtn) {
-            selectBagSize('custom', customBtn);
-            const customInput = document.getElementById('bagSizeCustom');
-            if (customInput) {
-                customInput.value = bagSizeValue;
-                customInput.style.display = 'block';
-            }
-        }
+    // Bag size is auto-filled from CNC entry, no UI selection needed
+    const bagSizeInput = document.getElementById('bagSize');
+    if (bagSizeInput && bagSizeValue) {
+        bagSizeInput.value = bagSizeValue;
     }
 }
 
 function selectBagSize(value, btn){
-  // toggle selected class
-  document.querySelectorAll('#bagSizeGroup .btn-bag-size').forEach(b=>b.classList.remove('selected'));
-  if(btn){ btn.classList.add('selected'); }
+  // Bag size is auto-filled from CNC entry, no UI selection needed
   const hidden = document.getElementById('bagSize');
-  const custom = document.getElementById('bagSizeCustom');
-  if(value === 'custom'){
-    hidden.value = '';
-    custom.style.display = 'block';
-    custom.focus();
-    // Hide GSM/thickness sections for custom
-    document.getElementById('gsmSection').style.display = 'none';
-    document.getElementById('thicknessSection').style.display = 'none';
-  } else {
-    custom.style.display = 'none';
-    custom.value = '';
+  if (hidden && value && value !== 'custom') {
     hidden.value = value;
-    
     // Fetch GSM and thickness options for this bag size
     fetchBagOptions(value);
   }
@@ -361,6 +322,11 @@ function fetchBagOptions(bagSize) {
       const gsmSection = document.getElementById('gsmSection');
       const gsmGroup = document.getElementById('gsmGroup');
       const gsmHidden = document.getElementById('gsm');
+      
+      // Skip if elements don't exist
+      if (!gsmSection || !gsmGroup || !gsmHidden) {
+        return;
+      }
       
       // Clear previous selections
       gsmGroup.innerHTML = '';
@@ -758,10 +724,12 @@ function updateSummary() {
     
     const printMachine = document.getElementById("printMachine").value;
     
-    // Get bag size (from hidden or custom input)
-    let bagSize = document.getElementById("bagSize").value || document.getElementById("bagSizeCustom").value;
+    // Get bag size (from hidden field - auto-filled from CNC entry)
+    const bagSizeInput = document.getElementById("bagSize");
+    let bagSize = bagSizeInput ? bagSizeInput.value : '';
     
     const printQty = document.getElementById("printQty").value;
+    const ncpPiece = document.getElementById("ncpPiece").value || 0;
     
     // Build summary
     if (dateTime && shift) {
@@ -772,12 +740,17 @@ function updateSummary() {
         if (printMachine) summary += ` | Print Machine: ${printMachine}`;
         if (bagSize) summary += ` | Bag Size: ${bagSize}`;
         if (printQty) summary += ` | Print Qty: ${printQty}`;
+        if (ncpPiece && parseInt(ncpPiece) > 0) summary += ` | NCP: ${ncpPiece}`;
         
-        document.getElementById("summaryBox").innerText = summary;
-        document.getElementById("summary").value = summary;
+        const summaryBox = document.getElementById("summaryBox");
+        const summaryInput = document.getElementById("summary");
+        if (summaryBox) summaryBox.innerText = summary;
+        if (summaryInput) summaryInput.value = summary;
     } else {
-        document.getElementById("summaryBox").innerText = "";
-        document.getElementById("summary").value = "";
+        const summaryBox = document.getElementById("summaryBox");
+        const summaryInput = document.getElementById("summary");
+        if (summaryBox) summaryBox.innerText = "";
+        if (summaryInput) summaryInput.value = "";
     }
 }
 
@@ -785,8 +758,9 @@ function clearForm() {
     document.getElementById('brandingEntryForm').reset();
     document.querySelectorAll('.btn-group button').forEach(btn => btn.classList.remove('selected'));
     document.querySelectorAll('input[type="hidden"]').forEach(input => input.value = '');
-    document.getElementById("bagSizeCustom").style.display = "none";
-    document.getElementById("cncCuttingBatch").value = '';
+    // bagSizeCustom removed - bag_size is now auto-filled from CNC entry
+    const cncBatchSelect = document.getElementById("cncCuttingBatch");
+    if (cncBatchSelect) cncBatchSelect.value = '';
     
     // Clear validation messages
     const availableText = document.getElementById('available_print_text');
@@ -799,6 +773,12 @@ function clearForm() {
         printQtyInput.removeAttribute('data-max-qty');
         printQtyInput.removeAttribute('max');
         printQtyInput.style.border = '1px solid #ccc';
+        printQtyInput.value = '';
+    }
+    
+    const ncpPieceInput = document.getElementById('ncpPiece');
+    if (ncpPieceInput) {
+        ncpPieceInput.value = 0;
     }
     
     updateSummary();
@@ -824,7 +804,7 @@ function validateForm() {
 }
 
 // Add event listeners for input fields
-["cncCuttingBatch", "printMachine", "bagSizeCustom", "printQty"].forEach(id => {
+["cncCuttingBatch", "printMachine", "printQty"].forEach(id => {
     const elem = document.getElementById(id);
     if (elem) {
         elem.addEventListener("input", updateSummary);
@@ -856,27 +836,57 @@ function loadCNCCuttingBatches() {
     }
     
     fetch('api/get_sewing_cnc_batches.php')
-        .then(response => {
-            if (!response.ok) {
-                throw new Error('Network response was not ok');
+        .then(async response => {
+            // Get response as text first to handle both JSON and HTML errors
+            const responseText = await response.text();
+            let data;
+            
+            try {
+                data = JSON.parse(responseText);
+            } catch (e) {
+                // If JSON parsing fails, it might be HTML error
+                console.error('Failed to parse JSON response:', responseText.substring(0, 500));
+                throw new Error('Server returned invalid response. Check console for details.');
             }
-            return response.json();
+            
+            if (!response.ok) {
+                // If we got JSON, use the error message from it
+                const errorMsg = data.error || data.message || 'Network response was not ok';
+                console.error('API Error:', errorMsg);
+                console.error('Debug Info:', data.debug_info);
+                throw new Error(errorMsg);
+            }
+            
+            // Check if data has success flag
+            if (data.success === false) {
+                const errorMsg = data.error || 'Unknown error occurred';
+                console.error('API returned error:', errorMsg);
+                console.error('Debug Info:', data.debug_info);
+                throw new Error(errorMsg);
+            }
+            
+            return data;
         })
         .then(data => {
             console.log('API Response:', data); // Debug log
+            console.log('Success:', data.success); // Debug log
+            console.log('Batches:', data.batches); // Debug log
+            console.log('Error:', data.error); // Debug log
+            console.log('Debug Info:', data.debug_info); // Debug log
             
             if (loadingText) {
                 loadingText.innerHTML = '';
                 loadingText.style.display = 'none';
             }
             
-            if (!data.success) {
+            if (!data || data.success === false) {
                 batchSelect.innerHTML = '<option value="">-- Failed to load batches --</option>';
+                const errorMsg = data?.error || 'Unknown error occurred';
                 if (loadingText) {
                     loadingText.innerHTML = `
                         <div style="display: flex; align-items: center; gap: 10px; padding: 12px 16px; background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%); border: 1px solid #fca5a5; border-radius: 10px; color: #991b1b; font-size: 0.9rem; box-shadow: 0 2px 8px rgba(239, 68, 68, 0.1);">
                             <i class="fas fa-exclamation-circle" style="font-size: 1.1rem; color: #dc2626;"></i>
-                            <span style="font-weight: 500;">Error loading batches. Please try again.</span>
+                            <span style="font-weight: 500;">Error loading batches: ${errorMsg}</span>
                         </div>
                     `;
                     loadingText.style.display = 'block';
@@ -884,8 +894,10 @@ function loadCNCCuttingBatches() {
                 return;
             }
             
-            const batches = data.batches || [];
-            console.log('Batches found:', batches.length, data.debug_info); // Debug log
+            // Ensure batches is an array
+            const batches = Array.isArray(data.batches) ? data.batches : [];
+            console.log('Batches found:', batches.length, 'Type:', typeof data.batches, 'Is Array:', Array.isArray(data.batches)); // Debug log
+            console.log('Full data structure:', JSON.stringify(data, null, 2)); // Debug log
             batchSelect.innerHTML = '<option value="">-- Select CNC Cutting Batch --</option>';
             
             if (batches.length === 0) {
@@ -912,11 +924,40 @@ function loadCNCCuttingBatches() {
                 const option = document.createElement('option');
                 option.value = batch.batch;
                 
-                // Store batch data for reference lookup
+                // Create composite key for batch data (batch + bag_size)
+                const batchKey = batch.bag_size ? `${batch.batch}||${batch.bag_size}` : batch.batch;
+                
+                // Store batch data for reference lookup (using composite key)
+                window.batchDataMap[batchKey] = batch;
+                // Also store by batch name only for backward compatibility
                 window.batchDataMap[batch.batch] = batch;
                 
-                // Build display text: batch - references - quantity
+                // Store full batch data as JSON on the option element
+                option.setAttribute('data-batch-data', JSON.stringify(batch));
+                
+                // Build display text: batch - date - references - quantity
                 let displayText = batch.batch;
+                
+                // Add date if available
+                if (batch.batch_date) {
+                    // Format date: convert "2026-01-25" to "Jan 25, 2026" or keep as is
+                    const dateStr = batch.batch_date;
+                    try {
+                        const date = new Date(dateStr);
+                        if (!isNaN(date.getTime())) {
+                            const formattedDate = date.toLocaleDateString('en-US', { 
+                                year: 'numeric', 
+                                month: 'short', 
+                                day: 'numeric' 
+                            });
+                            displayText += ` - ${formattedDate}`;
+                        } else {
+                            displayText += ` - ${dateStr}`;
+                        }
+                    } catch (e) {
+                        displayText += ` - ${dateStr}`;
+                    }
+                }
                 
                 // Add reference numbers if available
                 if (batch.references && batch.references.length > 0) {
@@ -930,23 +971,39 @@ function loadCNCCuttingBatches() {
                     }
                 }
                 
-                // Add remaining quantity (use exact cutting quantity from cnc_entries)
-                const qty = batch.remaining_qty || batch.total_cutting_qty || batch.total_sewing_qty || 0;
+                // Add remaining quantity (use merged remaining_qty from grouped query)
+                const qty = batch.remaining_qty || batch.total_remaining_qty || 0;
                 if (qty > 0) {
                     displayText += ` - ${formatNumber(qty)}`;
                 }
                 
                 option.textContent = displayText;
+                
+                // Store bag_size as data attribute for auto-filling
+                if (batch.bag_size) {
+                    option.setAttribute('data-bag-size', batch.bag_size);
+                }
+                
                 batchSelect.appendChild(option);
             });
         })
         .catch(error => {
             console.error('Error fetching batches:', error);
+            console.error('Error message:', error.message);
+            console.error('Error stack:', error.stack);
+            
+            // Show detailed error message
+            const errorMsg = error.message || 'Unknown error occurred';
             if (loadingText) {
-                loadingText.innerHTML = '';
-                loadingText.style.display = 'none';
+                loadingText.innerHTML = `
+                    <div style="display: flex; align-items: center; gap: 10px; padding: 12px 16px; background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%); border: 1px solid #fca5a5; border-radius: 10px; color: #991b1b; font-size: 0.9rem; box-shadow: 0 2px 8px rgba(239, 68, 68, 0.1);">
+                        <i class="fas fa-exclamation-circle" style="font-size: 1.1rem; color: #dc2626;"></i>
+                        <span style="font-weight: 500;">Error loading batches: ${errorMsg}</span>
+                    </div>
+                `;
+                loadingText.style.display = 'block';
             }
-            batchSelect.innerHTML = '<option value="">-- Error loading batches --</option>';
+            batchSelect.innerHTML = '<option value="">-- Error loading batches: ' + errorMsg + ' --</option>';
             if (loadingText) {
                 loadingText.innerHTML = `
                     <div style="display: flex; align-items: center; gap: 10px; padding: 12px 16px; background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%); border: 1px solid #fca5a5; border-radius: 10px; color: #991b1b; font-size: 0.9rem; box-shadow: 0 2px 8px rgba(239, 68, 68, 0.1);">
@@ -968,18 +1025,22 @@ function formatNumber(num) {
 function updateReferenceFromBatch() {
     const batchSelect = document.getElementById('cncCuttingBatch');
     const refInput = document.getElementById('referenceNumber');
+    const bagSizeInput = document.getElementById('bagSize');
     const printQtyInput = document.getElementById('printQty');
     const availableText = document.getElementById('available_print_text');
     
     if (!batchSelect || !refInput) return;
     
     const selectedBatch = batchSelect.value;
+    const selectedOption = batchSelect.options[batchSelect.selectedIndex];
     
     if (!selectedBatch) {
         refInput.value = '';
+        if (bagSizeInput) bagSizeInput.value = '';
         if (printQtyInput) {
             printQtyInput.removeAttribute('data-max-qty');
             printQtyInput.removeAttribute('max');
+            printQtyInput.value = '';
         }
         if (availableText) {
             availableText.style.display = 'none';
@@ -987,9 +1048,35 @@ function updateReferenceFromBatch() {
         return;
     }
     
-    // Get batch data from stored map
-    if (window.batchDataMap && window.batchDataMap[selectedBatch]) {
-        const batch = window.batchDataMap[selectedBatch];
+    // Get batch data from option element (most reliable)
+    let batch = null;
+    if (selectedOption) {
+        const batchDataJson = selectedOption.getAttribute('data-batch-data');
+        if (batchDataJson) {
+            try {
+                batch = JSON.parse(batchDataJson);
+            } catch (e) {
+                console.error('Error parsing batch data:', e);
+            }
+        }
+    }
+    
+    // Fallback to batchDataMap if not found on option
+    if (!batch && window.batchDataMap) {
+        // Try composite key first (batch + bag_size)
+        const bagSize = selectedOption ? (selectedOption.getAttribute('data-bag-size') || '') : '';
+        const compositeKey = bagSize ? `${selectedBatch}||${bagSize}` : selectedBatch;
+        batch = window.batchDataMap[compositeKey] || window.batchDataMap[selectedBatch];
+    }
+    
+    // Auto-fill bag_size from the selected batch's data attribute
+    if (selectedOption && bagSizeInput) {
+        const bagSize = selectedOption.getAttribute('data-bag-size') || '';
+        bagSizeInput.value = bagSize;
+    }
+    
+    // Process batch data if found
+    if (batch) {
         
         // Update reference number
         if (batch.references && batch.references.length > 0) {
@@ -998,11 +1085,22 @@ function updateReferenceFromBatch() {
             refInput.value = '';
         }
         
+        // Auto-fill bag_size from batch data (if not already set from data attribute)
+        if (bagSizeInput && !bagSizeInput.value && batch.bag_size) {
+            bagSizeInput.value = batch.bag_size;
+        }
+        
         // Update print quantity limit using remaining quantity (use exact cutting quantity from cnc_entries)
-        const maxQty = batch.remaining_qty || batch.total_cutting_qty || batch.total_sewing_qty || 0;
+        const maxQty = batch.remaining_qty || batch.total_remaining_qty || 0;
+        console.log('Batch selected:', batch, 'Remaining Qty:', maxQty); // Debug log
+        
         if (printQtyInput && maxQty > 0) {
             printQtyInput.setAttribute('data-max-qty', maxQty);
             printQtyInput.setAttribute('max', maxQty);
+            
+            // Automatically set print quantity to the available remaining quantity
+            printQtyInput.value = maxQty;
+            console.log('Set print quantity to:', maxQty); // Debug log
             
             // Show available quantity with modern UI
             if (availableText) {
@@ -1035,12 +1133,8 @@ function updateReferenceFromBatch() {
                 availableText.style.display = 'block';
             }
             
-            // Check if current quantity exceeds the new limit (but don't auto-adjust)
-            const currentQty = parseInt(printQtyInput.value) || 0;
-            if (currentQty > maxQty) {
-                // Just validate to show warning, but don't change the value
-                validatePrintQty();
-            }
+            // Trigger input event to update summary
+            printQtyInput.dispatchEvent(new Event('input', { bubbles: true }));
         } else {
             if (printQtyInput) {
                 printQtyInput.removeAttribute('data-max-qty');
@@ -1051,10 +1145,7 @@ function updateReferenceFromBatch() {
             }
         }
         
-        // Auto-select bag size from batch data
-        if (batch.bag_size) {
-            autoSelectBagSize(batch.bag_size);
-        }
+        // Bag size is now auto-filled from CNC entry (hidden field, no UI selection needed)
     } else {
         refInput.value = '';
         if (printQtyInput) {

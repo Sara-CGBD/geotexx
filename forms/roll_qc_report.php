@@ -90,80 +90,141 @@ $conn->query("CREATE TABLE IF NOT EXISTS roll_qc_reports (
     INDEX idx_reference_number (reference_number)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
-// Fetch all reference numbers with roll numbers and available quantities from fiber_to_roll_entry
-// Only show references that have remaining amount (available_amount > 0)
+// Fetch all reference numbers with roll numbers from gsm_roll_entry only
+// Only amounts that have passed through GSM and Roll Entry are shown (not raw fiber input entries)
 $references = [];
 
-// First, get all fiber_to_roll_entry records
-$refQuery = $conn->query("
-    SELECT 
-        ftr.reference_number, 
-        ftr.roll_no, 
-        ftr.line_no,
-        ftr.total_weight as original_weight
-    FROM fiber_to_roll_entry ftr
-    WHERE ftr.reference_number IS NOT NULL 
-        AND ftr.reference_number != ''
-        AND ftr.total_weight IS NOT NULL
-        AND ftr.total_weight > 0
-    ORDER BY ftr.created_at DESC
-");
+// Check if gsm_roll_entry table exists
+$tableExists = false;
+$tableCheck = $conn->query("SHOW TABLES LIKE 'gsm_roll_entry'");
+if ($tableCheck && $tableCheck->num_rows > 0) {
+    $tableExists = true;
+}
 
-if ($refQuery) {
-    while ($row = $refQuery->fetch_assoc()) {
-        // Use original_weight from the query result (aliased from total_weight)
-        $originalWeight = isset($row['original_weight']) ? (float)$row['original_weight'] : (isset($row['total_weight']) ? (float)$row['total_weight'] : 0);
-        
-        if ($originalWeight <= 0) {
-            continue; // Skip entries with no weight
-        }
-        
-        $referenceNumber = $row['reference_number'] ?? '';
-        $rollNo = $row['roll_no'] ?? null;
-        
-        if (empty($referenceNumber)) {
-            continue; // Skip entries without reference number
-        }
-        
-        // Calculate used amount from roll_qc_reports
-        // Use direct query with proper escaping instead of COLLATE in prepared statement
-        $referenceEscaped = $conn->real_escape_string($referenceNumber);
-        
-        if ($rollNo === null || $rollNo === '') {
-            $usedQueryStr = "
-                SELECT COALESCE(SUM(product_amount), 0) as used_amount
-                FROM roll_qc_reports 
-                WHERE reference_number = '{$referenceEscaped}'
-                AND (roll_no IS NULL OR roll_no = '')
-            ";
-        } else {
-            $rollNoEscaped = $conn->real_escape_string($rollNo);
-            $usedQueryStr = "
-                SELECT COALESCE(SUM(product_amount), 0) as used_amount
-                FROM roll_qc_reports 
-                WHERE reference_number = '{$referenceEscaped}'
-                AND roll_no = '{$rollNoEscaped}'
-            ";
-        }
-        
-        $usedResult = $conn->query($usedQueryStr);
-        $usedAmount = 0;
-        if ($usedResult && $usedRow = $usedResult->fetch_assoc()) {
-            $usedAmount = (float)$usedRow['used_amount'];
-        }
-        
-        // Calculate available amount
-        $availableAmount = $originalWeight - $usedAmount;
-        
-        // Only include if there's remaining amount
-        if ($availableAmount > 0.01) {
-            $row['original_weight'] = $originalWeight;
-            $row['used_amount'] = $usedAmount;
-            $row['available_amount'] = $availableAmount;
-            $references[] = $row;
+// IMPORTANT: Only show amounts that have passed through GSM and Roll Entry
+// This ensures we track the exact amount that was processed, not the full amount from fiber input entries
+// The gsm_roll_entry.total_weight represents the sum of weights from selected fiber input entries
+// that were actually used in GSM and Roll Entry
+
+// First, get all gsm_roll_entry records (primary source - these are the references generated in GSM and Roll Input)
+if ($tableExists) {
+    $gsmQuery = $conn->query("
+        SELECT 
+            g.reference as reference_number, 
+            g.roll_no, 
+            g.line_number as line_no,
+            COALESCE(g.total_weight, 0) as original_weight
+        FROM gsm_roll_entry g
+        WHERE g.reference IS NOT NULL 
+            AND g.reference != ''
+            AND g.roll_no IS NOT NULL
+        ORDER BY g.created_at DESC
+    ");
+    
+    if ($gsmQuery) {
+        while ($row = $gsmQuery->fetch_assoc()) {
+            $referenceNumber = $row['reference_number'] ?? '';
+            $rollNo = $row['roll_no'] ?? null;
+            
+            if (empty($referenceNumber)) {
+                continue;
+            }
+            
+            // Get original weight from gsm_roll_entry (this is the amount that passed through GSM and Roll Entry)
+            // This weight is calculated from the selected fiber input entries when the GSM Roll Entry was created
+            $originalWeight = isset($row['original_weight']) ? (float)$row['original_weight'] : 0;
+            
+            // If total_weight is 0 or null, calculate from fiber_input_entries JSON
+            // This ensures we get the exact amount that was selected and passed through GSM and Roll Entry
+            if ($originalWeight <= 0) {
+                // Fetch the fiber_input_entries JSON to get entry IDs
+                $fiberEntriesQuery = $conn->query("
+                    SELECT fiber_input_entries 
+                    FROM gsm_roll_entry 
+                    WHERE reference = '{$conn->real_escape_string($referenceNumber)}' 
+                    AND roll_no = " . (int)$rollNo . "
+                    LIMIT 1
+                ");
+                if ($fiberEntriesQuery && $fiberRow = $fiberEntriesQuery->fetch_assoc()) {
+                    $fiberEntries = json_decode($fiberRow['fiber_input_entries'] ?? '[]', true);
+                    if (is_array($fiberEntries) && !empty($fiberEntries)) {
+                        // Build list of entry IDs
+                        $entryIds = [];
+                        foreach ($fiberEntries as $entry) {
+                            if (isset($entry['entry_id']) && !empty($entry['entry_id'])) {
+                                $entryIds[] = "'" . $conn->real_escape_string($entry['entry_id']) . "'";
+                            }
+                        }
+                        
+                        // Fetch total weights from fiber_to_roll_entry table
+                        if (!empty($entryIds)) {
+                            $entryIdsStr = implode(',', $entryIds);
+                            $weightQuery = $conn->query("
+                                SELECT COALESCE(SUM(total_weight), 0) as total_weight_sum
+                                FROM fiber_to_roll_entry
+                                WHERE entry_id IN ({$entryIdsStr})
+                            ");
+                            if ($weightQuery && $weightRow = $weightQuery->fetch_assoc()) {
+                                $originalWeight = (float)$weightRow['total_weight_sum'];
+                                
+                                // Update the gsm_roll_entry record with calculated weight
+                                if ($originalWeight > 0) {
+                                    $conn->query("
+                                        UPDATE gsm_roll_entry 
+                                        SET total_weight = {$originalWeight}
+                                        WHERE reference = '{$conn->real_escape_string($referenceNumber)}' 
+                                        AND roll_no = " . (int)$rollNo . "
+                                    ");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Calculate used amount from roll_qc_reports
+            $referenceEscaped = $conn->real_escape_string($referenceNumber);
+            
+            if ($rollNo === null || $rollNo === '') {
+                $usedQueryStr = "
+                    SELECT COALESCE(SUM(product_amount), 0) as used_amount
+                    FROM roll_qc_reports 
+                    WHERE reference_number = '{$referenceEscaped}'
+                    AND (roll_no IS NULL OR roll_no = '')
+                ";
+            } else {
+                $rollNoEscaped = $conn->real_escape_string($rollNo);
+                $usedQueryStr = "
+                    SELECT COALESCE(SUM(product_amount), 0) as used_amount
+                    FROM roll_qc_reports 
+                    WHERE reference_number = '{$referenceEscaped}'
+                    AND roll_no = '{$rollNoEscaped}'
+                ";
+            }
+            
+            $usedResult = $conn->query($usedQueryStr);
+            $usedAmount = 0;
+            if ($usedResult && $usedRow = $usedResult->fetch_assoc()) {
+                $usedAmount = (float)$usedRow['used_amount'];
+            }
+            
+            // Calculate available amount
+            $availableAmount = $originalWeight - $usedAmount;
+            
+            // Only include if there's remaining amount (or if original weight is 0, show it anyway)
+            if ($availableAmount > 0.01 || $originalWeight <= 0) {
+                $row['original_weight'] = $originalWeight;
+                $row['used_amount'] = $usedAmount;
+                $row['available_amount'] = max(0, $availableAmount);
+                $references[] = $row;
+            }
         }
     }
 }
+
+
+// Only show amounts that have passed through GSM and Roll Entry (gsm_roll_entry table)
+// This ensures we only show the exact amount that was actually processed through the system
 
 $conn->close();
 ?>

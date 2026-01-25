@@ -33,7 +33,6 @@ if (!$colCheck || $colCheck->num_rows == 0) {
 
 $dateFrom = $_GET['date_from'] ?? '';
 $dateTo = $_GET['date_to'] ?? '';
-$lineNo = $_GET['line_no'] ?? '';
 $shift = $_GET['shift'] ?? '';
 
 // Performance: Set default date range (last 30 days) if no filters provided
@@ -70,11 +69,6 @@ if ($dateTo) {
     $params[] = $dateTo . ' 23:59:59';
     $types .= 's';
 }
-if ($lineNo) {
-    $query .= " AND s.line_no = ?";
-    $params[] = $lineNo;
-    $types .= 's';
-}
 if ($shift) {
     $query .= " AND s.shift = ?";
     $params[] = $shift;
@@ -102,7 +96,6 @@ $lineList = [];
 $hourlyQuery = "SELECT 
     DATE(s.date_time) as production_date,
     HOUR(s.date_time) as production_hour,
-    s.line_no,
     COUNT(*) as entry_count,
     SUM(s.sewing_qty) as total_qty,
     CASE 
@@ -118,12 +111,9 @@ if ($dateFrom) {
 if ($dateTo) {
     $hourlyQuery .= " AND s.date_time <= '$dateTo 23:59:59'";
 }
-if ($lineNo) {
-    $hourlyQuery .= " AND s.line_no = '$lineNo'";
-}
 
-$hourlyQuery .= " GROUP BY production_date, production_hour, s.line_no, calculated_shift
-ORDER BY production_date DESC, production_hour DESC, s.line_no";
+$hourlyQuery .= " GROUP BY production_date, production_hour, calculated_shift
+ORDER BY production_date DESC, production_hour DESC";
 
 $hourlyResult = $conn->query($hourlyQuery);
 $hourlyData = $hourlyResult ? $hourlyResult->fetch_all(MYSQLI_ASSOC) : [];
@@ -336,18 +326,6 @@ $hourlyData = $hourlyResult ? $hourlyResult->fetch_all(MYSQLI_ASSOC) : [];
                     <input type="date" name="date_to" value="<?php echo htmlspecialchars($dateTo); ?>">
                 </div>
                 <div class="filter-group">
-                    <label><i class="fas fa-industry"></i> Line No</label>
-                    <select name="line_no">
-                        <option value="">All Lines</option>
-                        <?php foreach ($lineList as $line): ?>
-                            <option value="<?php echo htmlspecialchars($line['line_no']); ?>" 
-                                <?php echo $lineNo == $line['line_no'] ? 'selected' : ''; ?>>
-                                <?php echo htmlspecialchars($line['line_no']); ?>
-                            </option>
-                        <?php endforeach; ?>
-                    </select>
-                </div>
-                <div class="filter-group">
                     <label><i class="fas fa-clock"></i> Shift</label>
                     <select name="shift">
                         <option value="">All Shifts</option>
@@ -383,7 +361,6 @@ $hourlyData = $hourlyResult ? $hourlyResult->fetch_all(MYSQLI_ASSOC) : [];
                 <th>Swing ID</th>
                 <th>Date & Time</th>
                 <th>Shift</th>
-                <th>Line No</th>
                 <th>Project</th>
                 <th>Sewing Qty</th>
                 <th>NCP Pieces</th>
@@ -408,7 +385,6 @@ $hourlyData = $hourlyResult ? $hourlyResult->fetch_all(MYSQLI_ASSOC) : [];
                         }
                         echo htmlspecialchars($shiftValue);
                     ?></td>
-                    <td><?php echo htmlspecialchars($entry['line_no']); ?></td>
                     <td><?php echo htmlspecialchars($entry['project_name'] ?? 'N/A'); ?></td>
                     <td><?php echo number_format($entry['sewing_qty']); ?></td>
                     <td><?php echo number_format($entry['ncp_piece']); ?></td>
@@ -431,7 +407,6 @@ $hourlyData = $hourlyResult ? $hourlyResult->fetch_all(MYSQLI_ASSOC) : [];
                 <th>Date</th>
                 <th>Hour</th>
                 <th>Shift</th>
-                <th>Line No</th>
                 <th>Entry Count</th>
                 <th>Total Sewing Qty</th>
                 <th>Avg per Entry</th>
@@ -443,7 +418,6 @@ $hourlyData = $hourlyResult ? $hourlyResult->fetch_all(MYSQLI_ASSOC) : [];
                     <td><?php echo date('M d, Y', strtotime($row['production_date'])); ?></td>
                     <td><?php echo str_pad($row['production_hour'], 2, '0', STR_PAD_LEFT) . ':00'; ?></td>
                     <td><span class="badge badge-<?php echo strtolower($row['calculated_shift']); ?>"><?php echo $row['calculated_shift']; ?></span></td>
-                    <td><strong>Line <?php echo htmlspecialchars($row['line_no']); ?></strong></td>
                     <td><?php echo number_format($row['entry_count']); ?></td>
                     <td><strong><?php echo number_format($row['total_qty'] ?? 0); ?></strong></td>
                     <td><?php echo $row['total_qty'] ? number_format($row['total_qty'] / $row['entry_count'], 0) : '0'; ?></td>

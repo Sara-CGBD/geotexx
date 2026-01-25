@@ -28,20 +28,57 @@ try {
     $conn->query("ALTER TABLE length_calibrations ADD COLUMN IF NOT EXISTS roll_no VARCHAR(50) NULL");
 
     // Get roll_no and line_no from reference
-    $refStmt = $conn->prepare("SELECT roll_no, line_no FROM fiber_to_roll_entry WHERE reference_number = ? LIMIT 1");
-    $refStmt->bind_param('s', $refNumber);
-    $refStmt->execute();
-    $refResult = $refStmt->get_result();
+    // First check gsm_roll_entry (primary source - references that passed through GSM and Roll Entry)
+    // Then fall back to fiber_to_roll_entry for backward compatibility
+    $rollNo = null;
+    $lineNo = null;
     
-    if (!$refResult || $refResult->num_rows == 0) {
-        header("Location: ../forms/roll_qc_report.php?error=" . urlencode('Reference number not found'));
-        exit();
+    // Check if gsm_roll_entry table exists
+    $tableCheck = $conn->query("SHOW TABLES LIKE 'gsm_roll_entry'");
+    $gsmTableExists = ($tableCheck && $tableCheck->num_rows > 0);
+    
+    // Check gsm_roll_entry table first (if it exists)
+    if ($gsmTableExists) {
+        $refStmt = $conn->prepare("SELECT roll_no, line_number FROM gsm_roll_entry WHERE reference = ? LIMIT 1");
+        if ($refStmt) {
+            $refStmt->bind_param('s', $refNumber);
+            $refStmt->execute();
+            $refResult = $refStmt->get_result();
+            
+            if ($refResult && $refResult->num_rows > 0) {
+                $refData = $refResult->fetch_assoc();
+                $rollNo = $refData['roll_no'];
+                $lineNo = $refData['line_number'] ?? $refData['line_no'] ?? null;
+                $refStmt->close();
+            } else {
+                $refStmt->close();
+            }
+        }
     }
     
-    $refData = $refResult->fetch_assoc();
-    $rollNo = $refData['roll_no'];
-    $lineNo = $refData['line_no'];
-    $refStmt->close();
+    // If not found in gsm_roll_entry, fallback to fiber_to_roll_entry (for backward compatibility)
+    if ($rollNo === null) {
+        $refStmt = $conn->prepare("SELECT roll_no, line_no FROM fiber_to_roll_entry WHERE reference_number = ? LIMIT 1");
+        if ($refStmt) {
+            $refStmt->bind_param('s', $refNumber);
+            $refStmt->execute();
+            $refResult = $refStmt->get_result();
+            
+            if ($refResult && $refResult->num_rows > 0) {
+                $refData = $refResult->fetch_assoc();
+                $rollNo = $refData['roll_no'];
+                $lineNo = $refData['line_no'];
+                $refStmt->close();
+            } else {
+                $refStmt->close();
+                header("Location: ../forms/roll_qc_report.php?error=" . urlencode('Reference number not found'));
+                exit();
+            }
+        } else {
+            header("Location: ../forms/roll_qc_report.php?error=" . urlencode('Reference number not found'));
+            exit();
+        }
+    }
     
     // Convert numeric line_no to "Line X" format for querying
     $lineNumber = is_numeric($lineNo) ? "Line " . $lineNo : $lineNo;

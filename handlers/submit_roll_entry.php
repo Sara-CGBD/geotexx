@@ -41,23 +41,61 @@ try {
     $conn = SecurityConfig::getConnection();
 
     // VALIDATION: Check if BOTH Daily GSM Check AND Length Calibration tests are APPROVED for this reference
+    // AND Roll QC Report is APPROVED
     // Extract base reference (without roll suffix if present)
     $baseReference = preg_replace('/-\d+$/', '', $referenceNumber);
     
-    // Get roll_no from fiber_to_roll_entry
-    $rollNoQuery = $conn->prepare("SELECT roll_no FROM fiber_to_roll_entry WHERE reference_number = ? LIMIT 1");
-    $rollNoQuery->bind_param('s', $baseReference);
-    $rollNoQuery->execute();
-    $rollNoResult = $rollNoQuery->get_result();
+    // Get roll_no from gsm_roll_entry first (primary source - references from Roll QC Reports)
+    // Then fall back to fiber_to_roll_entry for backward compatibility
+    $rollNo = null;
+    $lineNo = null;
     
-    if ($rollNoResult->num_rows === 0) {
-        header('Location: ../forms/roll_entry.php?error=' . urlencode('Reference number not found in fiber to roll entries'));
-        exit;
+    // Check if gsm_roll_entry table exists
+    $tableCheck = $conn->query("SHOW TABLES LIKE 'gsm_roll_entry'");
+    $gsmTableExists = ($tableCheck && $tableCheck->num_rows > 0);
+    
+    // Check gsm_roll_entry table first (if it exists)
+    if ($gsmTableExists) {
+        $rollNoQuery = $conn->prepare("SELECT roll_no, line_number FROM gsm_roll_entry WHERE reference = ? LIMIT 1");
+        if ($rollNoQuery) {
+            $rollNoQuery->bind_param('s', $baseReference);
+            $rollNoQuery->execute();
+            $rollNoResult = $rollNoQuery->get_result();
+            
+            if ($rollNoResult->num_rows > 0) {
+                $rollNoData = $rollNoResult->fetch_assoc();
+                $rollNo = $rollNoData['roll_no'];
+                $lineNo = $rollNoData['line_number'] ?? $rollNoData['line_no'] ?? null;
+                $rollNoQuery->close();
+            } else {
+                $rollNoQuery->close();
+            }
+        }
     }
     
-    $rollNoData = $rollNoResult->fetch_assoc();
-    $rollNo = $rollNoData['roll_no'];
-    $rollNoQuery->close();
+    // If not found in gsm_roll_entry, fallback to fiber_to_roll_entry (for backward compatibility)
+    if ($rollNo === null) {
+        $rollNoQuery = $conn->prepare("SELECT roll_no, line_no FROM fiber_to_roll_entry WHERE reference_number = ? LIMIT 1");
+        if ($rollNoQuery) {
+            $rollNoQuery->bind_param('s', $baseReference);
+            $rollNoQuery->execute();
+            $rollNoResult = $rollNoQuery->get_result();
+            
+            if ($rollNoResult->num_rows > 0) {
+                $rollNoData = $rollNoResult->fetch_assoc();
+                $rollNo = $rollNoData['roll_no'];
+                $lineNo = $rollNoData['line_no'];
+                $rollNoQuery->close();
+            } else {
+                $rollNoQuery->close();
+                header('Location: ../forms/roll_entry.php?error=' . urlencode('Reference number not found'));
+                exit;
+            }
+        } else {
+            header('Location: ../forms/roll_entry.php?error=' . urlencode('Reference number not found'));
+            exit;
+        }
+    }
     
     // Check Daily GSM Check status
     $gsmCheck = $conn->prepare("SELECT status FROM daily_gsm_checks WHERE roll_no = ? AND status = 'approved' LIMIT 1");
@@ -75,13 +113,47 @@ try {
     $calibrationApproved = ($calibrationResult->num_rows > 0);
     $calibrationCheck->close();
     
-    // If either test is not approved, reject submission
-    if (!$gsmApproved || !$calibrationApproved) {
-        $missingTests = [];
-        if (!$gsmApproved) $missingTests[] = 'Daily GSM Check';
-        if (!$calibrationApproved) $missingTests[] = 'Length Calibration';
+    // Check Roll QC Report approval status
+    $rqcApproved = false;
+    $hasRqcApproved = false;
+    $hasRqcOverallStatus = false;
+    
+    // Check if approval columns exist
+    $colCheck = $conn->query("SHOW COLUMNS FROM roll_qc_reports LIKE 'approved'");
+    $hasRqcApproved = ($colCheck && $colCheck->num_rows > 0);
+    $colCheck = $conn->query("SHOW COLUMNS FROM roll_qc_reports LIKE 'overall_status'");
+    $hasRqcOverallStatus = ($colCheck && $colCheck->num_rows > 0);
+    
+    if ($hasRqcApproved || $hasRqcOverallStatus) {
+        if ($hasRqcApproved && $hasRqcOverallStatus) {
+            $rqcCheck = $conn->prepare("SELECT approved, overall_status FROM roll_qc_reports WHERE reference_number = ? AND (roll_no = ? OR (roll_no IS NULL AND ? IS NULL)) AND (approved = 1 OR overall_status IN ('approved', 'Done')) LIMIT 1");
+            $rqcCheck->bind_param('sss', $baseReference, $rollNo, $rollNo);
+        } elseif ($hasRqcApproved) {
+            $rqcCheck = $conn->prepare("SELECT approved FROM roll_qc_reports WHERE reference_number = ? AND (roll_no = ? OR (roll_no IS NULL AND ? IS NULL)) AND approved = 1 LIMIT 1");
+            $rqcCheck->bind_param('sss', $baseReference, $rollNo, $rollNo);
+        } else {
+            $rqcCheck = $conn->prepare("SELECT overall_status FROM roll_qc_reports WHERE reference_number = ? AND (roll_no = ? OR (roll_no IS NULL AND ? IS NULL)) AND overall_status IN ('approved', 'Done') LIMIT 1");
+            $rqcCheck->bind_param('sss', $baseReference, $rollNo, $rollNo);
+        }
         
-        $errorMsg = 'Cannot proceed to Roll Entry. Missing approved tests: ' . implode(' and ', $missingTests) . ' for reference ' . htmlspecialchars($baseReference);
+        if ($rqcCheck) {
+            $rqcCheck->execute();
+            $rqcResult = $rqcCheck->get_result();
+            $rqcApproved = ($rqcResult->num_rows > 0);
+            $rqcCheck->close();
+        }
+    }
+    
+    // If any required test is not approved, reject submission
+    $missingTests = [];
+    if (!$gsmApproved) $missingTests[] = 'Daily GSM Check';
+    if (!$calibrationApproved) $missingTests[] = 'Length Calibration';
+    if (($hasRqcApproved || $hasRqcOverallStatus) && !$rqcApproved) {
+        $missingTests[] = 'Roll QC Report';
+    }
+    
+    if (!empty($missingTests)) {
+        $errorMsg = 'Cannot proceed to Roll Entry. Missing approved tests: ' . implode(', ', $missingTests) . ' for reference ' . htmlspecialchars($baseReference);
         header('Location: ../forms/roll_entry.php?error=' . urlencode($errorMsg));
         exit;
     }

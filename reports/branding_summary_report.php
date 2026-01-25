@@ -73,6 +73,7 @@ $entries = $result->fetch_all(MYSQLI_ASSOC);
 $stmt->close();
 
 $totalPrinted = array_sum(array_column($entries, 'print_qty'));
+$totalNCP = array_sum(array_column($entries, 'ncp_piece'));
 
 // Performance: Defer filter options - load asynchronously after page render
 $projects = [];
@@ -83,6 +84,7 @@ $hourlyQuery = "SELECT
     HOUR(b.date_time) as production_hour,
     COUNT(*) as entry_count,
     SUM(b.print_qty) as total_qty,
+    SUM(b.ncp_piece) as total_ncp,
     CASE 
         WHEN HOUR(b.date_time) >= 8 AND HOUR(b.date_time) < 20 THEN 'Day'
         ELSE 'Night'
@@ -297,6 +299,10 @@ $hourlyData = $hourlyResult ? $hourlyResult->fetch_all(MYSQLI_ASSOC) : [];
             <div class="stat-value"><?php echo number_format($totalPrinted); ?></div>
             <div class="stat-label">Total Printed Qty</div>
         </div>
+        <div class="stat-card orange">
+            <div class="stat-value"><?php echo number_format($totalNCP); ?></div>
+            <div class="stat-label">Total NCP Pieces</div>
+        </div>
         <div class="stat-card green">
             <div class="stat-value"><?php echo number_format(count($entries)); ?></div>
             <div class="stat-label">Total Entries</div>
@@ -377,6 +383,7 @@ $hourlyData = $hourlyResult ? $hourlyResult->fetch_all(MYSQLI_ASSOC) : [];
                 <th>Print Machine</th>
                 <th>Bag Size</th>
                 <th>Print Qty</th>
+                <th>NCP Piece</th>
                 <th>Shift Incharge</th>
                 <th>Reporter</th>
             </tr>
@@ -395,6 +402,7 @@ $hourlyData = $hourlyResult ? $hourlyResult->fetch_all(MYSQLI_ASSOC) : [];
                     <td><?php echo htmlspecialchars($entry['print_machine'] ?? 'N/A'); ?></td>
                     <td><?php echo htmlspecialchars($entry['bag_size'] ?? 'N/A'); ?></td>
                     <td><?php echo number_format($entry['print_qty'] ?? 0); ?></td>
+                    <td><?php echo number_format($entry['ncp_piece'] ?? 0); ?></td>
                     <td><?php echo htmlspecialchars($entry['shift_incharge'] ?? 'N/A'); ?></td>
                     <td><?php echo htmlspecialchars($entry['reporter_name'] ?? 'Unknown'); ?></td>
                 </tr>
@@ -417,6 +425,7 @@ $hourlyData = $hourlyResult ? $hourlyResult->fetch_all(MYSQLI_ASSOC) : [];
                 <th>Shift</th>
                 <th>Entry Count</th>
                 <th>Total Printed Qty</th>
+                <th>Total NCP Piece</th>
                 <th>Avg per Entry</th>
             </tr>
         </thead>
@@ -428,6 +437,7 @@ $hourlyData = $hourlyResult ? $hourlyResult->fetch_all(MYSQLI_ASSOC) : [];
                     <td><span class="badge badge-<?php echo strtolower($row['calculated_shift']); ?>"><?php echo $row['calculated_shift']; ?></span></td>
                     <td><?php echo number_format($row['entry_count']); ?></td>
                     <td><strong><?php echo number_format($row['total_qty'] ?? 0); ?></strong></td>
+                    <td><strong><?php echo number_format($row['total_ncp'] ?? 0); ?></strong></td>
                     <td><?php echo $row['total_qty'] ? number_format($row['total_qty'] / $row['entry_count'], 0) : '0'; ?></td>
                 </tr>
             <?php endforeach; ?>

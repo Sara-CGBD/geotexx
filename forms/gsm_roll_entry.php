@@ -307,6 +307,15 @@ $manufacturerCodes = [
         <div id="manufacturerList"></div>
       </div>
 
+      <!-- Total Weight Display -->
+      <div id="totalWeightDisplay" class="manufacturer-percentages" style="display:none; background:#e8f5e9; border:1px solid #4caf50; margin-top:15px;">
+        <h4 style="margin:0 0 10px 0; color:#2c3e50; font-size:16px; font-weight:600;">Total Weight from Selected Fiber Input Entries:</h4>
+        <div style="font-size:18px; font-weight:bold; color:#2e7d32; padding:8px 0;">
+          <span id="totalWeightValue">0.00</span> kg
+        </div>
+        <small style="color:#666; font-size:12px; display:block; margin-top:5px;">Sum of all selected fiber input entry weights</small>
+      </div>
+
       <!-- GSM -->
       <div class="form-group" style="margin-top: 30px;">
         <label>GSM:</label>
@@ -453,6 +462,7 @@ $manufacturerCodes = [
         manufacturerPercentages = {};
         updateSelectedReferencesList();
         updateManufacturerPercentages();
+        updateTotalWeightDisplay();
         generateReference();
         updateSummary();
       }
@@ -492,6 +502,7 @@ $manufacturerCodes = [
     // Update UI
     updateSelectedReferencesList();
     updateManufacturerPercentages();
+    updateTotalWeightDisplay();
     setTimeout(() => {
       generateReference();
       updateSummary();
@@ -506,6 +517,7 @@ $manufacturerCodes = [
     selectedFiberEntries = selectedFiberEntries.filter(e => e.entry_id !== entryId);
     updateSelectedReferencesList();
     updateManufacturerPercentages();
+    updateTotalWeightDisplay();
     setTimeout(() => {
       generateReference();
       updateSummary();
@@ -528,8 +540,9 @@ $manufacturerCodes = [
     selectedFiberEntries.forEach(entry => {
       const item = document.createElement('div');
       item.className = 'reference-item';
+      const weightDisplay = entry.weight > 0 ? ` <strong style="color:#2e7d32;">(${parseFloat(entry.weight).toFixed(2)} kg)</strong>` : '';
       item.innerHTML = `
-        <span>${entry.entry_id}${entry.batch_info ? ' - ' + entry.batch_info : ''}${entry.manufacturer ? ' (' + entry.manufacturer + ' ' + entry.percentage + '%)' : ''}</span>
+        <span>${entry.entry_id}${entry.batch_info ? ' - ' + entry.batch_info : ''}${entry.manufacturer ? ' (' + entry.manufacturer + ' ' + entry.percentage + '%)' : ''}${weightDisplay}</span>
         <button type="button" onclick="removeFiberInputEntry('${entry.entry_id}')">Remove</button>
       `;
       itemsDiv.appendChild(item);
@@ -539,7 +552,7 @@ $manufacturerCodes = [
     document.getElementById('fiber_input_entries').value = JSON.stringify(selectedFiberEntries);
   }
 
-  // Update manufacturer percentages display
+    // Update manufacturer percentages display
   function updateManufacturerPercentages() {
     const container = document.getElementById('manufacturerPercentages');
     const listDiv = document.getElementById('manufacturerList');
@@ -574,6 +587,29 @@ $manufacturerCodes = [
       item.innerHTML = `<strong>${manufacturer}:</strong> <span>${percentage.toFixed(2)}%</span>`;
       listDiv.appendChild(item);
     });
+    
+    // Update total weight display
+    updateTotalWeightDisplay();
+  }
+
+  // Update total weight display
+  function updateTotalWeightDisplay() {
+    const container = document.getElementById('totalWeightDisplay');
+    const valueElement = document.getElementById('totalWeightValue');
+    
+    // Calculate total weight from all selected entries
+    let totalWeight = 0;
+    selectedFiberEntries.forEach(entry => {
+      totalWeight += parseFloat(entry.weight || 0);
+    });
+    
+    if (selectedFiberEntries.length === 0) {
+      container.style.display = 'none';
+      return;
+    }
+    
+    container.style.display = 'block';
+    valueElement.textContent = totalWeight.toFixed(2);
   }
 
   // Generate reference number
@@ -696,6 +732,7 @@ $manufacturerCodes = [
     filterFiberInputEntries(); // Reset filter
     updateSelectedReferencesList();
     updateManufacturerPercentages();
+    updateTotalWeightDisplay();
     updateTimeAndShift();
     updateSummary();
   }

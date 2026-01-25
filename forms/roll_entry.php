@@ -244,6 +244,95 @@ if ($refRes) {
     while ($r = $refRes->fetch_assoc()) $referenceNumbers[] = $r;
 }
 
+// Also fetch references from gsm_roll_entry that have approved Roll QC Reports
+// These are references that passed through GSM and Roll Entry and have been QC approved
+$tableCheck = $conn->query("SHOW TABLES LIKE 'gsm_roll_entry'");
+$gsmTableExists = ($tableCheck && $tableCheck->num_rows > 0);
+
+if ($gsmTableExists && $hasRqcRef) {
+    // Build WHERE clause for approved Roll QC Reports
+    $gsmRqcWhereClause = '';
+    if ($hasRqcApproved && $hasRqcOverallStatus) {
+        $gsmRqcWhereClause = "AND (rqc.approved = 1 OR rqc.overall_status IN ('approved', 'Done'))";
+    } elseif ($hasRqcApproved) {
+        $gsmRqcWhereClause = "AND rqc.approved = 1";
+    } elseif ($hasRqcOverallStatus) {
+        $gsmRqcWhereClause = "AND rqc.overall_status IN ('approved', 'Done')";
+    }
+    
+    // Only fetch if there's a way to check for approved Roll QC Reports
+    if (!empty($gsmRqcWhereClause)) {
+        $gsmRefRes = $conn->query("
+            SELECT 
+                g.id,
+                g.reference as reference_number,
+                NULL as material_type,
+                g.roll_no,
+                g.line_number as line_no,
+                COALESCE(g.total_weight, 0) as original_weight,
+                COALESCE((
+                    SELECT SUM(re2.total_weight)
+                    FROM roll_entry re2
+                    WHERE g.reference COLLATE {$collation} = re2.reference_number COLLATE {$collation}
+                       OR re2.reference_number COLLATE {$collation} LIKE CONCAT(g.reference COLLATE {$collation}, '-%')
+                ), 0) as used_in_roll_entry,
+                COALESCE((
+                    SELECT rqc.product_amount
+                    FROM roll_qc_reports rqc
+                    WHERE rqc.reference_number COLLATE {$collation} = g.reference COLLATE {$collation}
+                      AND (rqc.roll_no = g.roll_no OR (rqc.roll_no IS NULL AND g.roll_no IS NULL))
+                      {$gsmRqcWhereClause}
+                    ORDER BY rqc.created_at DESC
+                    LIMIT 1
+                ), 0) as qc_approved_amount,
+                (COALESCE((
+                    SELECT rqc.product_amount
+                    FROM roll_qc_reports rqc
+                    WHERE rqc.reference_number COLLATE {$collation} = g.reference COLLATE {$collation}
+                      AND (rqc.roll_no = g.roll_no OR (rqc.roll_no IS NULL AND g.roll_no IS NULL))
+                      {$gsmRqcWhereClause}
+                    ORDER BY rqc.created_at DESC
+                    LIMIT 1
+                ), 0) - 
+                 COALESCE((
+                    SELECT SUM(re2.total_weight)
+                    FROM roll_entry re2
+                    WHERE g.reference COLLATE {$collation} = re2.reference_number COLLATE {$collation}
+                       OR re2.reference_number COLLATE {$collation} LIKE CONCAT(g.reference COLLATE {$collation}, '-%')
+                ), 0)) as available_weight
+            FROM gsm_roll_entry g
+            WHERE g.reference IS NOT NULL
+            AND g.reference != ''
+            AND g.roll_no IS NOT NULL
+            AND EXISTS (
+                SELECT 1 FROM roll_qc_reports rqc 
+                WHERE rqc.reference_number COLLATE {$collation} = g.reference COLLATE {$collation}
+                AND (rqc.roll_no = g.roll_no OR (rqc.roll_no IS NULL AND g.roll_no IS NULL))
+                {$gsmRqcWhereClause}
+            )
+            HAVING available_weight > 0.01
+            ORDER BY g.created_at DESC
+        ");
+        
+        if ($gsmRefRes) {
+            while ($r = $gsmRefRes->fetch_assoc()) {
+                // Check if this reference is already in the list (from fiber_to_roll_entry)
+                $exists = false;
+                foreach ($referenceNumbers as $existing) {
+                    if ($existing['reference_number'] === $r['reference_number']) {
+                        $exists = true;
+                        break;
+                    }
+                }
+                // Only add if it doesn't already exist
+                if (!$exists) {
+                    $referenceNumbers[] = $r;
+                }
+            }
+        }
+    }
+}
+
 // Material type options include "PP Stable Fiber" and "PSF Fiber"
 
 // Generate next Entry ID

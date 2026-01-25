@@ -103,24 +103,34 @@ if ($hasBrandingTable && $hasBrandingCncBatch) {
     }
 }
 
-// Build query to get distinct CNC cutting batches from cnc_entries
+// Fetch each CNC entry individually - NO grouping, NO merging
+// Each row in cnc_entries is a separate entry with its own batch number, date, bag_size, and cutting_roll_quantity
 $isDeletedFilter = $hasIsDeleted ? "AND (ce.is_deleted = 0 OR ce.is_deleted IS NULL)" : "";
 
 // Use date_time if available, otherwise created_at
-$dateCol = $hasDateTime ? "MAX(ce.date_time)" : ($hasCreatedAt ? "MAX(ce.created_at)" : "NULL");
-$orderCol = $hasDateTime ? "MAX(ce.date_time)" : ($hasCreatedAt ? "MAX(ce.created_at)" : "MAX(ce.cnc_cutting_batch)");
+$dateColumn = $hasDateTime ? 'date_time' : ($hasCreatedAt ? 'created_at' : 'cnc_cutting_batch');
 
+// Fetch each entry individually - NO GROUP BY, NO SUM - each row is separate
+// Include remaining_qty and used_qty to show actual available quantity
 $query = "
     SELECT 
+        ce.id,
         ce.cnc_cutting_batch,
-        {$dateCol} as batch_date,
-        SUM(COALESCE(ce.cutting_roll_quantity, 0)) as total_cutting_quantity
+        DATE(ce.{$dateColumn}) as batch_date,
+        ce.{$dateColumn} as entry_date_time,
+        ce.bag_size,
+        ce.cutting_roll_quantity,
+        COALESCE(ce.used_qty, 0) as used_qty,
+        COALESCE(ce.remaining_qty, GREATEST(0, ce.cutting_roll_quantity - COALESCE(ce.used_qty, 0))) as remaining_qty
     FROM cnc_entries ce
     WHERE ce.cnc_cutting_batch IS NOT NULL
       AND ce.cnc_cutting_batch != ''
+      AND ce.bag_size IS NOT NULL
+      AND ce.bag_size != ''
+      AND ce.cutting_roll_quantity IS NOT NULL
+      AND ce.cutting_roll_quantity > 0
       {$isDeletedFilter}
-    GROUP BY ce.cnc_cutting_batch
-    ORDER BY {$orderCol} DESC
+    ORDER BY ce.{$dateColumn} DESC, ce.id DESC
     LIMIT 200
 ";
 
@@ -129,6 +139,17 @@ $batches = [];
 
 if ($result) {
     while ($row = $result->fetch_assoc()) {
+        // Get exact values from this specific row - NO merging, NO grouping
+        $batch = trim($row['cnc_cutting_batch'] ?? '');
+        $bagSize = trim($row['bag_size'] ?? '');
+        $total_cutting_qty = (int)($row['cutting_roll_quantity'] ?? 0);
+        $entryId = (int)($row['id'] ?? 0);
+        
+        // Skip if essential data is missing
+        if (empty($batch) || empty($bagSize) || $total_cutting_qty <= 0) {
+            continue;
+        }
+        
         // Format the date for display
         $batchDate = '';
         if (!empty($row['batch_date'])) {
@@ -136,15 +157,46 @@ if ($result) {
             $batchDate = $dateObj->format('Y-m-d'); // Format as YYYY-MM-DD
         }
         
-        // Get bag_size and total_printed from branding_entries if available
-        $bagSize = isset($bagSizeMap[$row['cnc_cutting_batch']]) ? $bagSizeMap[$row['cnc_cutting_batch']] : null;
-        $totalPrinted = isset($totalPrintedMap[$row['cnc_cutting_batch']]) ? $totalPrintedMap[$row['cnc_cutting_batch']] : 0;
+        // Get total_printed from branding_entries if available (for this specific batch)
+        $totalPrinted = isset($totalPrintedMap[$batch]) ? $totalPrintedMap[$batch] : 0;
         
+        // Get used_qty and remaining_qty from database (stored in cnc_entries)
+        $used_qty = (int)($row['used_qty'] ?? 0);
+        $remaining_qty = (int)($row['remaining_qty'] ?? 0);
+        
+        // If remaining_qty is 0 or negative but should have a value, recalculate
+        if ($remaining_qty <= 0 && $total_cutting_qty > $used_qty) {
+            $remaining_qty = max(0, $total_cutting_qty - $used_qty);
+            
+            // Update the database with calculated remaining_qty for future use
+            if ($entryId > 0) {
+                $update_remaining = $conn->prepare("UPDATE cnc_entries SET remaining_qty = ? WHERE id = ?");
+                if ($update_remaining) {
+                    $update_remaining->bind_param("ii", $remaining_qty, $entryId);
+                    $update_remaining->execute();
+                    $update_remaining->close();
+                }
+            }
+        }
+        
+        // CRITICAL: Skip batches that have no remaining quantity (maxed out)
+        // Only show batches where remaining_qty > 0 (has available quantity)
+        if ($remaining_qty <= 0) {
+            continue; // Skip this batch - it's maxed out
+        }
+        
+        // Add this entry directly to batches array - NO intermediate storage, NO merging
+        // Each entry is completely separate, even if batch number is the same
         $batches[] = [
-            'cnc_cutting_batch' => $row['cnc_cutting_batch'],
-            'batch_date' => $batchDate,
-            'total_cutting_quantity' => (int)($row['total_cutting_quantity'] ?? 0),
-            'bag_size' => $bagSize,
+            'id' => $entryId, // Include ID to make each entry unique
+            'cnc_cutting_batch' => $batch,  // Exact cnc_cutting_batch from this specific row
+            'batch' => $batch, // Alias for backward compatibility
+            'batch_date' => $batchDate, // Date from this specific row
+            'total_cutting_quantity' => $total_cutting_qty, // Exact cutting_roll_quantity from THIS row only
+            'total_cutting_qty' => $total_cutting_qty, // Alias
+            'remaining_qty' => $remaining_qty, // Actual remaining quantity (for max display)
+            'used_qty' => $used_qty, // Used quantity (for reference)
+            'bag_size' => $bagSize, // Exact bag_size from THIS row only
             'total_printed' => $totalPrinted
         ];
     }

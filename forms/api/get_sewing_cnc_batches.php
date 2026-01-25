@@ -2,248 +2,394 @@
 // get_sewing_cnc_batches.php
 // Returns distinct CNC cutting batches from sewing_machine_entry for branding entry dropdown
 
-session_start();
-require_once '../../config/security_config.php';
+// Enable error reporting to see what's wrong
+ini_set('display_errors', 0);
+ini_set('log_errors', 1);
+error_reporting(E_ALL);
 
-// Security check
-if (!isset($_SESSION['user_id']) || !isset($_SESSION['username'])) {
-    http_response_code(401);
-    echo json_encode(['success' => false, 'error' => 'Unauthorized']);
+// Set JSON header first
+header('Content-Type: application/json');
+
+// Simple error handler
+function sendError($message, $details = []) {
+    echo json_encode([
+        'success' => false,
+        'error' => $message,
+        'batches' => [],
+        'debug_info' => $details
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit;
 }
 
-// Database connection
-$conn = SecurityConfig::getConnection();
-if (!$conn) {
-    http_response_code(500);
-    echo json_encode(['success' => false, 'error' => 'Database connection failed']);
-    exit;
+try {
+    // Start session
+    if (session_status() === PHP_SESSION_NONE) {
+        session_start();
+    }
+    
+    // Include config
+    if (!file_exists('../../config/security_config.php')) {
+        sendError('Configuration file not found', ['path' => '../../config/security_config.php']);
+    }
+    
+    require_once '../../config/security_config.php';
+    
+    // Security check
+    if (!isset($_SESSION['user_id']) || !isset($_SESSION['username'])) {
+        http_response_code(401);
+        sendError('Unauthorized - Please login');
+    }
+
+    // Get database connection
+    $conn = SecurityConfig::getConnection();
+    
+    if (!$conn) {
+        sendError('Database connection failed', ['error' => 'Connection returned null']);
+    }
+    
+    if ($conn->connect_error) {
+        sendError('Database connection error', ['error' => $conn->connect_error]);
+    }
+
+} catch (Exception $e) {
+    sendError('Initialization error', [
+        'message' => $e->getMessage(),
+        'file' => $e->getFile(),
+        'line' => $e->getLine()
+    ]);
+} catch (Error $e) {
+    sendError('Fatal initialization error', [
+        'message' => $e->getMessage(),
+        'file' => $e->getFile(),
+        'line' => $e->getLine()
+    ]);
 }
 
 // Check which sewing table exists
-$sewingTableCheck = $conn->query("SHOW TABLES LIKE 'sewing_machine_entry'");
-$sewingTable = ($sewingTableCheck && $sewingTableCheck->num_rows > 0) ? 'sewing_machine_entry' : 'swing_machine_entry';
+$sewingTable = null;
+try {
+    $result = $conn->query("SHOW TABLES LIKE 'sewing_machine_entry'");
+    if ($result && $result->num_rows > 0) {
+        $sewingTable = 'sewing_machine_entry';
+    } else {
+        $result = $conn->query("SHOW TABLES LIKE 'swing_machine_entry'");
+        if ($result && $result->num_rows > 0) {
+            $sewingTable = 'swing_machine_entry';
+        }
+    }
+    
+    if (!$sewingTable) {
+        sendError('Sewing table not found', [
+            'checked_tables' => ['sewing_machine_entry', 'swing_machine_entry']
+        ]);
+    }
+} catch (Exception $e) {
+    sendError('Error checking tables', ['message' => $e->getMessage()]);
+}
 
-// Check the actual column name for cnc_cutting_batch in sewing table
+// Get all columns from sewing table
+$allColumns = [];
 $cncBatchColumn = null;
-$colCheck = $conn->query("SHOW COLUMNS FROM $sewingTable");
-if ($colCheck) {
-    while ($col = $colCheck->fetch_assoc()) {
+try {
+    $result = $conn->query("SHOW COLUMNS FROM `$sewingTable`");
+    if (!$result) {
+        sendError('Cannot read table structure', [
+            'table' => $sewingTable,
+            'error' => $conn->error
+        ]);
+    }
+    
+    while ($col = $result->fetch_assoc()) {
         $fieldName = $col['Field'];
-        // Check for exact match or variations
-        if ($fieldName === 'cnc_cutting_batch' || 
-            strpos($fieldName, 'cnc_cutting') !== false) {
+        $allColumns[] = $fieldName;
+        
+        // Look for CNC batch column (case insensitive)
+        $lowerField = strtolower($fieldName);
+        if ($lowerField === 'cnc_cutting_batch' || 
+            $lowerField === 'cnc_batch' ||
+            $lowerField === 'cutting_batch' ||
+            (strpos($lowerField, 'cnc') !== false && strpos($lowerField, 'batch') !== false)) {
             $cncBatchColumn = $fieldName;
-            break;
         }
     }
-}
-
-if (!$cncBatchColumn) {
-    // Column doesn't exist, return empty
-    header('Content-Type: application/json');
-    echo json_encode([
-        'success' => true,
-        'batches' => [],
-        'debug' => 'Column cnc_cutting_batch not found in ' . $sewingTable
+    
+    if (!$cncBatchColumn) {
+        sendError('CNC batch column not found', [
+            'table' => $sewingTable,
+            'available_columns' => $allColumns,
+            'looking_for' => 'cnc_cutting_batch or similar'
+        ]);
+    }
+} catch (Exception $e) {
+    sendError('Error reading columns', [
+        'table' => $sewingTable,
+        'message' => $e->getMessage()
     ]);
-    $conn->close();
-    exit;
 }
 
-// Get used quantities per batch from branding entries
-$used_quantities = [];
-$brandingTableCheck = $conn->query("SHOW TABLES LIKE 'branding_entries'");
-if ($brandingTableCheck && $brandingTableCheck->num_rows > 0) {
-    $colCheck = $conn->query("SHOW COLUMNS FROM branding_entries LIKE 'cnc_cutting_batch'");
-    if ($colCheck && $colCheck->num_rows > 0) {
-        // Check if is_deleted column exists
-        $isDeletedCheck = $conn->query("SHOW COLUMNS FROM branding_entries LIKE 'is_deleted'");
-        $hasIsDeleted = ($isDeletedCheck && $isDeletedCheck->num_rows > 0);
-        
-        // Check if print_qty column exists
-        $printQtyCheck = $conn->query("SHOW COLUMNS FROM branding_entries LIKE 'print_qty'");
-        $hasPrintQty = ($printQtyCheck && $printQtyCheck->num_rows > 0);
-        
-        if ($hasPrintQty) {
-            $used_query = "SELECT 
-                           cnc_cutting_batch,
-                           SUM(COALESCE(print_qty, 0)) as used_qty
-                           FROM branding_entries 
-                           WHERE cnc_cutting_batch IS NOT NULL 
-                           AND cnc_cutting_batch != ''";
-            
-            // Only add is_deleted condition if the column exists
-            if ($hasIsDeleted) {
-                $used_query .= " AND (is_deleted = 0 OR is_deleted IS NULL)";
-            }
-            
-            $used_query .= " GROUP BY cnc_cutting_batch";
-            
-            $used_result = $conn->query($used_query);
-            if ($used_result) {
-                while ($row = $used_result->fetch_assoc()) {
-                    $used_quantities[$row['cnc_cutting_batch']] = (int)$row['used_qty'];
+// Check which columns exist (case-insensitive)
+$hasColumns = [
+    'bag_size' => false,
+    'is_deleted' => false,
+    'sewing_qty' => false,
+    'ncp_piece' => false,
+    'date_time' => false,
+    'created_at' => false,
+    'reference_number' => false
+];
+
+foreach ($allColumns as $col) {
+    $lowerCol = strtolower($col);
+    if ($lowerCol === 'bag_size') $hasColumns['bag_size'] = true;
+    if ($lowerCol === 'is_deleted') $hasColumns['is_deleted'] = true;
+    if ($lowerCol === 'sewing_qty') $hasColumns['sewing_qty'] = true;
+    if ($lowerCol === 'ncp_piece') $hasColumns['ncp_piece'] = true;
+    if ($lowerCol === 'date_time') $hasColumns['date_time'] = true;
+    if ($lowerCol === 'created_at') $hasColumns['created_at'] = true;
+    if ($lowerCol === 'reference_number') $hasColumns['reference_number'] = true;
+}
+
+$dateColumn = $hasColumns['date_time'] ? 'date_time' : 'created_at';
+if (!$hasColumns['date_time'] && !$hasColumns['created_at']) {
+    sendError('No date column found', [
+        'table' => $sewingTable,
+        'available_columns' => $allColumns
+    ]);
+}
+
+// Check if branding_entries table exists and check for is_deleted column
+$brandingTableExists = false;
+$brandingHasIsDeleted = false;
+try {
+    $result = $conn->query("SHOW TABLES LIKE 'branding_entries'");
+    $brandingTableExists = ($result && $result->num_rows > 0);
+    
+    // Check if branding_entries has is_deleted column
+    if ($brandingTableExists) {
+        $brandingCols = $conn->query("SHOW COLUMNS FROM branding_entries");
+        if ($brandingCols) {
+            while ($col = $brandingCols->fetch_assoc()) {
+                if (strtolower($col['Field']) === 'is_deleted') {
+                    $brandingHasIsDeleted = true;
+                    break;
                 }
             }
         }
     }
+} catch (Exception $e) {
+    // Continue without branding table
+    error_log("Error checking branding_entries table: " . $e->getMessage());
 }
 
-// Check if reference_number column exists in sewing table
-$hasReferenceColumn = false;
-$refColCheck = $conn->query("SHOW COLUMNS FROM $sewingTable");
-if ($refColCheck) {
-    while ($col = $refColCheck->fetch_assoc()) {
-        if ($col['Field'] === 'reference_number' || strpos($col['Field'], 'reference') !== false) {
-            $hasReferenceColumn = true;
-            break;
-        }
-    }
-}
-
-// First, get exact cutting quantity from cnc_entries for each batch
-// Also get bag_size from cnc_entries
-$cncBatchesData = [];
-$cncTableCheck = $conn->query("SHOW TABLES LIKE 'cnc_entries'");
-if ($cncTableCheck && $cncTableCheck->num_rows > 0) {
-    $cncHasDeleted = $conn->query("SHOW COLUMNS FROM cnc_entries LIKE 'is_deleted'")->num_rows > 0;
-    $cncDeletedFilter = $cncHasDeleted ? "AND (ce.is_deleted = 0 OR ce.is_deleted IS NULL)" : "";
-    
-    $cncQuery = "SELECT 
-        ce.cnc_cutting_batch,
-        SUM(COALESCE(ce.cutting_roll_quantity, 0)) as total_cutting_quantity,
-        MAX(ce.bag_size) as bag_size
-    FROM cnc_entries ce
-    WHERE ce.cnc_cutting_batch IS NOT NULL 
-    AND ce.cnc_cutting_batch != ''
-    {$cncDeletedFilter}
-    GROUP BY ce.cnc_cutting_batch";
-    
-    $cncResult = $conn->query($cncQuery);
-    if ($cncResult) {
-        while ($cncRow = $cncResult->fetch_assoc()) {
-            $cncBatchesData[$cncRow['cnc_cutting_batch']] = [
-                'total_cutting_quantity' => (int)$cncRow['total_cutting_quantity'],
-                'bag_size' => $cncRow['bag_size']
-            ];
-        }
-    }
-}
-
-// Fetch distinct CNC cutting batches from sewing machine entries
-// Exclude batches that have already been used in branding entries
+// Build and execute query
 $batches = [];
-$query = "SELECT 
-    $cncBatchColumn as cnc_cutting_batch,
-    COUNT(*) as entry_count,
-    MIN(date_time) as first_entry_date,
-    MAX(date_time) as last_entry_date,
-    SUM(sewing_qty) as total_sewing_qty,
-    SUM(COALESCE(ncp_piece, 0)) as total_ncp";
-
-// Add reference numbers if column exists
-if ($hasReferenceColumn) {
-    $query .= ",
-    GROUP_CONCAT(DISTINCT CASE 
-        WHEN reference_number IS NOT NULL 
-        AND reference_number != '' 
-        AND reference_number != 'NULL' 
-        THEN reference_number 
-        ELSE NULL 
-    END ORDER BY reference_number SEPARATOR ', ') as references_raw";
-}
-
-$query .= " FROM $sewingTable
-WHERE $cncBatchColumn IS NOT NULL 
-AND $cncBatchColumn != ''
-GROUP BY $cncBatchColumn 
-ORDER BY last_entry_date DESC, cnc_cutting_batch DESC
-LIMIT 200";
-
-$result = $conn->query($query);
-
-if ($result) {
+try {
+    // Build WHERE clause
+    $whereConditions = [
+        "`$cncBatchColumn` IS NOT NULL",
+        "`$cncBatchColumn` != ''"
+    ];
+    
+    if ($hasColumns['is_deleted']) {
+        $whereConditions[] = "(is_deleted = 0 OR is_deleted IS NULL)";
+    }
+    
+    if ($hasColumns['bag_size']) {
+        $whereConditions[] = "bag_size IS NOT NULL";
+        $whereConditions[] = "bag_size != ''";
+    }
+    
+    $whereClause = implode(' AND ', $whereConditions);
+    
+    // Build SELECT clause
+    $selectParts = [
+        "`$cncBatchColumn` as cnc_cutting_batch"
+    ];
+    
+    if ($hasColumns['bag_size']) {
+        $selectParts[] = "bag_size";
+    } else {
+        $selectParts[] = "'' as bag_size";
+    }
+    
+    $selectParts[] = "DATE(MIN(`$dateColumn`)) as batch_date";
+    $selectParts[] = "MIN(`$dateColumn`) as first_entry_date";
+    $selectParts[] = "COUNT(*) as entry_count";
+    
+    if ($hasColumns['sewing_qty']) {
+        $selectParts[] = "SUM(COALESCE(sewing_qty, 0)) as total_sewing_qty";
+    } else {
+        $selectParts[] = "COUNT(*) as total_sewing_qty";
+    }
+    
+    if ($hasColumns['ncp_piece']) {
+        $selectParts[] = "SUM(COALESCE(ncp_piece, 0)) as total_ncp";
+    } else {
+        $selectParts[] = "0 as total_ncp";
+    }
+    
+    $selectClause = implode(', ', $selectParts);
+    
+    // Build GROUP BY clause
+    $groupBy = $hasColumns['bag_size'] ? 
+        "GROUP BY `$cncBatchColumn`, bag_size" : 
+        "GROUP BY `$cncBatchColumn`";
+    
+    // Final query
+    $query = "SELECT $selectClause
+              FROM `$sewingTable`
+              WHERE $whereClause
+              $groupBy
+              ORDER BY MIN(`$dateColumn`) DESC
+              LIMIT 200";
+    
+    error_log("Executing query: " . $query);
+    
+    $result = $conn->query($query);
+    
+    if (!$result) {
+        sendError('Query execution failed', [
+            'sql_error' => $conn->error,
+            'query' => $query
+        ]);
+    }
+    
+    // Fetch results
     while ($row = $result->fetch_assoc()) {
-        $batch = $row['cnc_cutting_batch'];
+        $batch = trim($row['cnc_cutting_batch'] ?? '');
+        $bagSize = trim($row['bag_size'] ?? '');
+        $totalSewingQty = (int)($row['total_sewing_qty'] ?? 0);
+        $totalNcp = (int)($row['total_ncp'] ?? 0);
         
-        // Get exact cutting quantity from cnc_entries (not from sewing)
-        $total_cutting_qty = isset($cncBatchesData[$batch]['total_cutting_quantity']) 
-            ? $cncBatchesData[$batch]['total_cutting_quantity'] 
-            : (int)$row['total_sewing_qty']; // Fallback to sewing_qty if cnc data not available
+        if (empty($batch) || $totalSewingQty <= 0) {
+            continue;
+        }
         
-        // Get bag_size from cnc_entries
-        $bag_size = isset($cncBatchesData[$batch]['bag_size']) 
-            ? $cncBatchesData[$batch]['bag_size'] 
-            : null;
+        // Calculate available quantity for branding: sewing_qty - ncp_piece
+        // This represents the net quantity available from sewing after removing NCP pieces
+        $availableForBranding = max(0, $totalSewingQty - $totalNcp);
         
-        // Calculate used quantity for this batch (from branding entries)
-        $used_qty = isset($used_quantities[$batch]) ? $used_quantities[$batch] : 0;
-        
-        // Calculate remaining quantity (based on cutting quantity, not sewing quantity)
-        $remaining_qty = $total_cutting_qty - $used_qty;
-        
-        // Only include batches with remaining quantity > 0
-        if ($remaining_qty > 0) {
-            // Process reference numbers
-            $references = [];
-            if ($hasReferenceColumn && !empty($row['references_raw'])) {
-                $refs_raw = $row['references_raw'];
-                // Split by comma and clean up
-                $all_refs = explode(',', $refs_raw);
-                foreach ($all_refs as $ref) {
-                    $ref = trim($ref);
-                    // Only add non-empty references that are not already in the array
-                    if (!empty($ref) && $ref !== 'NULL' && strtoupper($ref) !== 'NULL' && !in_array($ref, $references)) {
-                        $references[] = $ref;
-                    }
+        // Calculate branding usage if table exists
+        $brandingUsed = 0;
+        if ($brandingTableExists) {
+            try {
+                // Build WHERE clause for branding query
+                $brandingWhere = "cnc_cutting_batch = ?";
+                $brandingParams = [$batch];
+                $brandingTypes = "s";
+                
+                if ($hasColumns['bag_size'] && !empty($bagSize)) {
+                    $brandingWhere .= " AND bag_size = ?";
+                    $brandingParams[] = $bagSize;
+                    $brandingTypes .= "s";
                 }
+                
+                // Only add is_deleted filter if column exists in branding_entries
+                if ($brandingHasIsDeleted) {
+                    $brandingWhere .= " AND (is_deleted = 0 OR is_deleted IS NULL)";
+                }
+                
+                $brandingQuery = "SELECT SUM(COALESCE(print_qty, 0) + COALESCE(ncp_piece, 0)) as total 
+                                  FROM branding_entries 
+                                  WHERE $brandingWhere";
+                
+                $stmt = $conn->prepare($brandingQuery);
+                
+                if ($stmt) {
+                    // Bind parameters dynamically
+                    if (count($brandingParams) > 1) {
+                        $stmt->bind_param($brandingTypes, ...$brandingParams);
+                    } else {
+                        $stmt->bind_param($brandingTypes, $brandingParams[0]);
+                    }
+                    
+                    $stmt->execute();
+                    $brandingResult = $stmt->get_result();
+                    if ($brandingRow = $brandingResult->fetch_assoc()) {
+                        $brandingUsed = (int)($brandingRow['total'] ?? 0);
+                    }
+                    $stmt->close();
+                }
+            } catch (Exception $e) {
+                // Continue without branding calculation
+                error_log("Error calculating branding for batch $batch: " . $e->getMessage());
             }
-            
-            // If no references found but we have entries, try to get distinct references directly
-            if (empty($references) && $hasReferenceColumn) {
-                $ref_query = "SELECT DISTINCT reference_number 
-                             FROM $sewingTable 
-                             WHERE $cncBatchColumn = ? 
-                             AND reference_number IS NOT NULL 
-                             AND reference_number != '' 
-                             AND reference_number != 'NULL'";
-                $ref_stmt = $conn->prepare($ref_query);
-                if ($ref_stmt) {
-                    $ref_stmt->bind_param("s", $batch);
-                    $ref_stmt->execute();
-                    $ref_result = $ref_stmt->get_result();
-                    while ($ref_row = $ref_result->fetch_assoc()) {
-                        $ref_val = trim($ref_row['reference_number']);
-                        if (!empty($ref_val) && !in_array($ref_val, $references)) {
-                            $references[] = $ref_val;
+        }
+        
+        // Remaining quantity = (sewing_qty - ncp_piece) - branding_used
+        $remainingQty = max(0, $availableForBranding - $brandingUsed);
+        
+        // Log calculation for debugging
+        error_log("Batch: $batch | BagSize: $bagSize | SewingQty: $totalSewingQty | Ncp: $totalNcp | AvailableForBranding: $availableForBranding | BrandingUsed: $brandingUsed | Remaining: $remainingQty");
+        
+        // Skip batches with zero remaining quantity
+        if ($remainingQty <= 0) {
+            continue;
+        }
+        
+        // Get reference numbers
+        $references = [];
+        if ($hasColumns['reference_number']) {
+            try {
+                if ($hasColumns['bag_size'] && !empty($bagSize)) {
+                    $refStmt = $conn->prepare("SELECT DISTINCT reference_number 
+                                               FROM `$sewingTable`
+                                               WHERE `$cncBatchColumn` = ? 
+                                               AND bag_size = ?
+                                               AND reference_number IS NOT NULL 
+                                               AND reference_number != '' 
+                                               LIMIT 5");
+                    $refStmt->bind_param("ss", $batch, $bagSize);
+                } else {
+                    $refStmt = $conn->prepare("SELECT DISTINCT reference_number 
+                                               FROM `$sewingTable`
+                                               WHERE `$cncBatchColumn` = ?
+                                               AND reference_number IS NOT NULL 
+                                               AND reference_number != '' 
+                                               LIMIT 5");
+                    $refStmt->bind_param("s", $batch);
+                }
+                
+                if ($refStmt) {
+                    $refStmt->execute();
+                    $refResult = $refStmt->get_result();
+                    while ($refRow = $refResult->fetch_assoc()) {
+                        $ref = trim($refRow['reference_number'] ?? '');
+                        if (!empty($ref)) {
+                            $references[] = $ref;
                         }
                     }
-                    $ref_stmt->close();
+                    $refStmt->close();
                 }
+            } catch (Exception $e) {
+                error_log("Error fetching references: " . $e->getMessage());
             }
-            
-            $batches[] = [
-                'batch' => $batch,
-                'entry_count' => (int)$row['entry_count'],
-                'first_entry_date' => $row['first_entry_date'],
-                'last_entry_date' => $row['last_entry_date'],
-                'total_sewing_qty' => (int)$row['total_sewing_qty'],
-                'total_cutting_qty' => $total_cutting_qty, // Exact cutting quantity from cnc_entries
-                'remaining_qty' => $remaining_qty,
-                'used_qty' => $used_qty,
-                'total_ncp' => (int)$row['total_ncp'],
-                'bag_size' => $bag_size, // Bag size from cnc_entries
-                'references' => $references
-            ];
         }
+        
+        $batches[] = [
+            'batch' => $batch,
+            'cnc_cutting_batch' => $batch,
+            'bag_size' => $bagSize,
+            'batch_date' => $row['batch_date'] ?? '',
+            'first_entry_date' => $row['first_entry_date'] ?? '',
+            'entry_count' => (int)($row['entry_count'] ?? 0),
+            'total_sewing_qty' => $totalSewingQty,
+            'total_ncp' => $totalNcp,
+            'available_for_branding' => $availableForBranding,
+            'total_branding_used' => $brandingUsed,
+            'remaining_qty' => $remainingQty,
+            'references' => $references
+        ];
     }
-} else {
-    // Query failed, log error
-    error_log("Query failed: " . $conn->error);
+    
+} catch (Exception $e) {
+    sendError('Error processing batches', [
+        'message' => $e->getMessage(),
+        'line' => $e->getLine()
+    ]);
 }
 
-header('Content-Type: application/json');
+// Return success response
 echo json_encode([
     'success' => true,
     'batches' => $batches,
@@ -251,9 +397,12 @@ echo json_encode([
         'table' => $sewingTable,
         'column' => $cncBatchColumn,
         'batch_count' => count($batches),
-        'used_batches_count' => count($used_quantities)
+        'has_columns' => $hasColumns,
+        'branding_table_exists' => $brandingTableExists,
+        'branding_has_is_deleted' => $brandingHasIsDeleted
     ]
-]);
+], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 
 $conn->close();
+exit;
 ?>

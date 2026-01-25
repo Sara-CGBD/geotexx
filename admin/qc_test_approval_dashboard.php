@@ -1534,9 +1534,16 @@ $total_routing_items = count($grouped_bulk_routing) + count($grouped_individual_
             <tr style="border-bottom:1px solid #28a745; background:#fff;">
               <td style="padding:10px; font-weight:600; color:#0f172a;">
                 <i class="fas fa-layer-group" style="color:#667eea; margin-right:5px;"></i>
-                Roll Reference: <?php echo htmlspecialchars($bulk_group['from_reference']); ?> 
-                <span style="color:#6c757d;">to</span> 
-                <?php echo htmlspecialchars($bulk_group['to_reference']); ?>
+                Roll Reference: <?php 
+                  $from_ref = htmlspecialchars($bulk_group['from_reference'] ?? '');
+                  $to_ref = htmlspecialchars($bulk_group['to_reference'] ?? '');
+                  // If from and to are the same, show only one reference
+                  if ($from_ref === $to_ref && !empty($from_ref)) {
+                      echo $from_ref;
+                  } else {
+                      echo $from_ref . ' <span style="color:#6c757d;">to</span> ' . $to_ref;
+                  }
+                ?>
               </td>
               <td style="padding:10px;">
                 <?php if ($routing_display): ?>

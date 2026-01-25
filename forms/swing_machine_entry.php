@@ -300,24 +300,6 @@ $sewing_id = "SEW-" . date('Ymd') . "-" . str_pad($next_sewing_number, 3, '0', S
        <input type="hidden" id="project_id" name="project_id" value="<?php echo isset($projects[0]['id']) ? (int)$projects[0]['id'] : ''; ?>">
     </div>  
 
-    <!-- Line Number (10 buttons: 1-10) -->
-    <div class="form-group">
-      <label>Line Number:</label>
-      <div class="btn-group" id="lineNumberGroup">
-        <button type="button" class="btn" data-value="1" onclick="selectBtn(this, 'lineNumberGroup')">1</button>
-        <button type="button" class="btn" data-value="2" onclick="selectBtn(this, 'lineNumberGroup')">2</button>
-        <button type="button" class="btn" data-value="3" onclick="selectBtn(this, 'lineNumberGroup')">3</button>
-        <button type="button" class="btn" data-value="4" onclick="selectBtn(this, 'lineNumberGroup')">4</button>
-        <button type="button" class="btn" data-value="5" onclick="selectBtn(this, 'lineNumberGroup')">5</button>
-        <button type="button" class="btn" data-value="6" onclick="selectBtn(this, 'lineNumberGroup')">6</button>
-        <button type="button" class="btn" data-value="7" onclick="selectBtn(this, 'lineNumberGroup')">7</button>
-        <button type="button" class="btn" data-value="8" onclick="selectBtn(this, 'lineNumberGroup')">8</button>
-        <button type="button" class="btn" data-value="9" onclick="selectBtn(this, 'lineNumberGroup')">9</button>
-        <button type="button" class="btn" data-value="10" onclick="selectBtn(this, 'lineNumberGroup')">10</button>
-      </div>
-      <input type="hidden" id="line_no" name="line_no" value="">
-    </div>
-
     <!-- Operator/Helper removed -->
 
     <!-- Sewing quantity -->
@@ -388,6 +370,17 @@ function updateTimeAndShift() {
 }
 setInterval(updateTimeAndShift,1000); updateTimeAndShift();
 
+// Helper function to extract batch number from unique value format: "batch|date|bagSize|id"
+function getBatchNumberFromValue(value) {
+  if (!value) return '';
+  // Check if it's the new unique format (contains |)
+  if (value.includes('|')) {
+    return value.split('|')[0]; // Return first part (batch number)
+  }
+  // Otherwise, it's the old format (just batch number)
+  return value;
+}
+
 // Load CNC cutting batches from API
 function loadCNCCuttingBatches() {
   const batchSelect = document.getElementById('cnc_cutting_batch');
@@ -437,23 +430,63 @@ function loadCNCCuttingBatches() {
         return;
       }
       
-      batches.forEach(batch => {
+      batches.forEach((batch, index) => {
         const option = document.createElement('option');
-        option.value = batch.cnc_cutting_batch;
         
-        // Build display text with batch number and date
-        let displayText = batch.cnc_cutting_batch;
+        // Get batch number with fallback (use cnc_cutting_batch if batch is not available)
+        const batchNumber = batch.batch || batch.cnc_cutting_batch || '';
+        const bagSize = batch.bag_size || '';
+        const batchDate = batch.batch_date || '';
+        const entryId = batch.id || index; // Use entry ID to make each option unique
+        
+        // Create unique value to prevent browser from deduplicating options with same batch number
+        // Format: "batchNumber|date|bagSize|id" to ensure uniqueness
+        const uniqueValue = `${batchNumber}|${batchDate}|${bagSize}|${entryId}`;
+        
+        // Use unique value to prevent browser from deduplicating options
+        option.value = uniqueValue;
+        
+        // Store batch number separately for database submission
+        option.setAttribute('data-batch-number', batchNumber); // Actual batch number for database
+        option.setAttribute('data-entry-id', entryId); // Entry ID for uniqueness
+        
+        // Build display text with batch number, date, and bag size
+        // Format: "CW-01 (2026-01-25) - 1000mmX700mm"
+        let displayText = batchNumber || 'Unknown Batch';
         
         // Add date if available
-        if (batch.batch_date) {
-          displayText += ` (${batch.batch_date})`;
+        if (batchDate) {
+          displayText += ` (${batchDate})`;
+        }
+        
+        // Add bag size if available (this is the exact bag_size from cnc_entries)
+        if (bagSize) {
+          displayText += ` - ${bagSize}`;
         }
         
         option.textContent = displayText;
-        // Store cutting quantity as data attribute for validation
-        option.setAttribute('data-cutting-quantity', batch.total_cutting_quantity || 0);
-        option.setAttribute('data-first-entry', batch.first_entry_date);
-        option.setAttribute('data-last-entry', batch.last_entry_date);
+        
+        // Store cutting quantity as data attribute for validation (this is the REMAINING quantity after deductions)
+        // Use remaining_qty from API (total_cutting_qty - used_qty), which reflects actual available quantity
+        const cuttingQty = batch.remaining_qty !== undefined ? batch.remaining_qty : (batch.total_cutting_qty || batch.total_cutting_quantity || 0);
+        option.setAttribute('data-cutting-quantity', cuttingQty);
+        
+        // Debug: Log all entries to verify no merging and remaining quantities
+        console.log(`Batch Entry ${index + 1}/${batches.length}:`, {
+            id: batch.id,
+            batch: batch.batch,
+            batch_date: batch.batch_date,
+            bag_size: batch.bag_size,
+            total_cutting_qty: batch.total_cutting_qty || batch.total_cutting_quantity,
+            used_qty: batch.used_qty !== undefined ? batch.used_qty : 'N/A',
+            remaining_qty: batch.remaining_qty !== undefined ? batch.remaining_qty : 'N/A',
+            cuttingQty_used: cuttingQty, // The value that will be used for max display
+            uniqueValue: uniqueValue
+        });
+        option.setAttribute('data-batch-date', batch.batch_date || '');
+        option.setAttribute('data-bag-size', batch.bag_size || '');
+        option.setAttribute('data-first-entry', batch.first_entry_date || '');
+        option.setAttribute('data-last-entry', batch.last_entry_date || '');
         if (batch.references && batch.references.length > 0) {
           option.setAttribute('data-references', batch.references.join(','));
         }
@@ -477,9 +510,6 @@ function selectBtn(btn, groupId){
   if(groupId==="projectGroup"){
     document.getElementById("project_id").value = btn.dataset.value;
   }
-  if(groupId==="lineNumberGroup"){
-    document.getElementById("line_no").value = btn.dataset.value;
-  }
   updateSummary();
 }
 
@@ -489,13 +519,11 @@ function updateSummary() {
   const sewingId = document.getElementById("sewing_id").value;
   
   // Get selected values
-  const cncBatch = document.getElementById("cnc_cutting_batch").value;
+  const cncBatchValue = document.getElementById("cnc_cutting_batch").value;
+  const cncBatch = getBatchNumberFromValue(cncBatchValue); // Extract batch number from unique value
   
   const selectedProject = document.querySelector('#projectGroup .btn.selected');
   const projectName = selectedProject ? selectedProject.textContent.trim() : '';
-  
-  const selectedLineNumber = document.querySelector('#lineNumberGroup .btn.selected');
-  const lineNo = selectedLineNumber ? selectedLineNumber.textContent.trim() : '';
   
   const sewingQty = document.getElementById("sewing_qty").value;
   const ncpPiece = document.getElementById("ncp_piece").value;
@@ -505,7 +533,6 @@ function updateSummary() {
     let summary = `${dateTime} | Shift: ${shift} | Sewing ID: ${sewingId}`;
     if (cncBatch) summary += ` | CNC Batch: ${cncBatch}`;
     if (projectName) summary += ` | Project: ${projectName}`;
-    if (lineNo) summary += ` | Line: ${lineNo}`;
     if (sewingQty) summary += ` | Sewing Qty: ${sewingQty}`;
     if (ncpPiece) summary += ` | NCP: ${ncpPiece}`;
     
@@ -545,20 +572,32 @@ function validateForm(){
   if(!document.getElementById("line_no").value.trim()){
     alert("Please enter line number."); return false;
   }
-  if(!document.getElementById("cnc_cutting_batch").value){
+  
+  const batchSelect = document.getElementById("cnc_cutting_batch");
+  if(!batchSelect.value){
     alert("Please select a CNC cutting batch."); return false;
   }
+  
+  // Extract batch number from unique value before submission
+  const selectedOption = batchSelect.options[batchSelect.selectedIndex];
+  const actualBatchNumber = getBatchNumberFromValue(batchSelect.value);
+  
+  // Update the select value to just the batch number for database submission
+  // Create a temporary option with just the batch number
+  const tempValue = batchSelect.value;
+  batchSelect.value = actualBatchNumber; // Set to just batch number for submission
+  
   if(!document.getElementById("sewing_qty").value.trim()){
     alert("Please enter sewing quantity."); return false;
   }
   
   // Validate sewing quantity doesn't exceed cutting quantity
-  const batchSelect = document.getElementById("cnc_cutting_batch");
-  const selectedOption = batchSelect.options[batchSelect.selectedIndex];
   const cuttingQuantity = parseInt(selectedOption.getAttribute('data-cutting-quantity')) || 0;
   const sewingQty = parseInt(document.getElementById("sewing_qty").value) || 0;
   
   if (cuttingQuantity > 0 && sewingQty > cuttingQuantity) {
+    // Restore original value before returning
+    batchSelect.value = tempValue;
     showQuantityExceedPopup(sewingQty, cuttingQuantity);
     document.getElementById("sewing_qty").focus();
     return false;
@@ -567,6 +606,8 @@ function validateForm(){
   if(!document.getElementById("ncp_piece").value.trim()){
     alert("Please enter NCP piece."); return false;
   }
+  
+  // Keep the batch number value for submission (already set above)
   return true;
 }
 
@@ -656,7 +697,6 @@ document.addEventListener('DOMContentLoaded', function() {
   loadCNCCuttingBatches();
   
   document.getElementById('project_id').addEventListener('change', updateSummary);
-  document.getElementById('line_no').addEventListener('input', updateSummary);
   document.getElementById('sewing_qty').addEventListener('input', updateSummary);
   document.getElementById('ncp_piece').addEventListener('input', updateSummary);
   document.getElementById('cnc_cutting_batch').addEventListener('change', function() {

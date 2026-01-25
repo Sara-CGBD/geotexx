@@ -581,12 +581,12 @@ if ($hasRollTransfer) {
       <label>Product Type: <span style="color:red;">*</span></label>
       <div class="btn-group" id="productTypeGroup" style="display:flex; gap:10px; flex-wrap:wrap;">
         <?php if ($canAccessRoll): ?>
-        <button type="button" class="btn product-type-btn" onclick="selectProductType('roll')" style="background:#e0e0e0;color:#333; border:2px solid #ccc;">
+        <button type="button" class="btn product-type-btn" id="rollProductTypeBtn" onclick="selectProductType('roll')" style="background:#e0e0e0;color:#333; border:2px solid #ccc; cursor:pointer;">
           <i class="fas fa-scroll"></i> Roll
         </button>
         <?php endif; ?>
         <?php if ($canAccessBag): ?>
-        <button type="button" class="btn product-type-btn" onclick="selectProductType('bag')" style="background:#e0e0e0;color:#333; border:2px solid #ccc;">
+        <button type="button" class="btn product-type-btn" id="bagProductTypeBtn" onclick="selectProductType('bag')" style="background:#e0e0e0;color:#333; border:2px solid #ccc; cursor:pointer;">
           <i class="fas fa-shopping-bag"></i> Bag
         </button>
         <?php endif; ?>
@@ -1222,6 +1222,77 @@ document.addEventListener('DOMContentLoaded', function() {
     rollEntryTypeGroup.remove(); // Remove it completely from DOM
   }
   
+  // Auto-select product type if user can only access one type
+  <?php if (!$canAccessRoll && $canAccessBag): ?>
+    // User can only access Bag - auto-select it
+    function autoSelectBagType() {
+      // Try to find the bag button by ID first (most reliable)
+      const bagButton = document.getElementById('bagProductTypeBtn');
+      
+      if (bagButton) {
+        // Ensure button is visible and enabled
+        bagButton.style.display = '';
+        bagButton.disabled = false;
+        bagButton.style.pointerEvents = 'auto';
+        bagButton.style.cursor = 'pointer';
+        
+        // Wait a moment for the page to fully render, then select
+        setTimeout(function() {
+          if (typeof selectProductType === 'function') {
+            console.log('Auto-selecting Bag product type');
+            selectProductType('bag');
+          } else {
+            // Function not ready yet, try clicking the button
+            console.log('selectProductType not ready, clicking button directly');
+            bagButton.click();
+          }
+        }, 100);
+      } else {
+        // Fallback: search for button
+        setTimeout(function() {
+          const buttons = document.querySelectorAll('.product-type-btn');
+          buttons.forEach(btn => {
+            const onclick = btn.getAttribute('onclick') || '';
+            const text = btn.textContent.toLowerCase().trim();
+            if (onclick.includes("'bag'") || onclick.includes('"bag"') || (text.includes('bag') && !text.includes('roll'))) {
+              btn.style.display = '';
+              btn.disabled = false;
+              if (typeof selectProductType === 'function') {
+                selectProductType('bag');
+              } else {
+                btn.click();
+              }
+            }
+          });
+        }, 200);
+      }
+    }
+    
+    // Try multiple times to ensure it works
+    autoSelectBagType();
+    setTimeout(autoSelectBagType, 300);
+    setTimeout(autoSelectBagType, 600);
+    
+  <?php elseif ($canAccessRoll && !$canAccessBag): ?>
+    // User can only access Roll - auto-select it
+    function autoSelectRollType() {
+      const rollButton = document.getElementById('rollProductTypeBtn');
+      if (rollButton) {
+        rollButton.style.display = '';
+        rollButton.disabled = false;
+        setTimeout(function() {
+          if (typeof selectProductType === 'function') {
+            selectProductType('roll');
+          } else {
+            rollButton.click();
+          }
+        }, 100);
+      }
+    }
+    autoSelectRollType();
+    setTimeout(autoSelectRollType, 300);
+  <?php endif; ?>
+  
   // Also hide any buttons with roll-entry-type-btn class
   const entryTypeButtons = document.querySelectorAll('.roll-entry-type-btn');
   entryTypeButtons.forEach(btn => {
@@ -1268,6 +1339,8 @@ const bagSizeToRecommendedKg = {
 };
 
 function selectProductType(type) {
+  console.log('selectProductType called with type:', type);
+  
   // Remove selected styling from all product type buttons
   const allBtns = document.querySelectorAll('.product-type-btn');
   allBtns.forEach(btn => {
@@ -1277,14 +1350,46 @@ function selectProductType(type) {
     btn.classList.remove('selected');
   });
   
-  // Add selected styling to clicked button (blue)
-  event.target.style.background = '#2196F3';
-  event.target.style.color = '#fff';
-  event.target.style.border = '2px solid #1976D2';
-  event.target.classList.add('selected');
+  // Find the target button by ID first, then by onclick attribute
+  let targetButton = null;
+  if (type === 'bag') {
+    targetButton = document.getElementById('bagProductTypeBtn');
+  } else if (type === 'roll') {
+    targetButton = document.getElementById('rollProductTypeBtn');
+  }
+  
+  // Fallback: search by onclick attribute
+  if (!targetButton) {
+    targetButton = document.querySelector('.product-type-btn[onclick*="' + type + '"]');
+  }
+  
+  // Add selected styling to the button for this type (blue)
+  if (targetButton) {
+    targetButton.style.background = '#2196F3';
+    targetButton.style.color = '#fff';
+    targetButton.style.border = '2px solid #1976D2';
+    targetButton.classList.add('selected');
+    console.log('Styled button for type:', type);
+  } else {
+    console.warn('Could not find button for type:', type);
+  }
+  
+  // If called from event, also style the event target
+  if (typeof event !== 'undefined' && event && event.target) {
+    event.target.style.background = '#2196F3';
+    event.target.style.color = '#fff';
+    event.target.style.border = '2px solid #1976D2';
+    event.target.classList.add('selected');
+  }
   
   // Set hidden input
-  document.getElementById('product_type').value = type;
+  const productTypeInput = document.getElementById('product_type');
+  if (productTypeInput) {
+    productTypeInput.value = type;
+    console.log('Set product_type input to:', type);
+  } else {
+    console.error('product_type input not found!');
+  }
   
   // Show/hide trip number selection and fields
   const tripNumberGroup = document.getElementById('tripNumberGroup');
@@ -1354,7 +1459,14 @@ function selectProductType(type) {
     if(tripNumberGroup) tripNumberGroup.style.display = 'none';
     if(productFieldsContainer) productFieldsContainer.style.display = 'block';
     
-    // Show CNC batch dropdown for bags
+    // Show reference dropdown for bags (to get CNC batch from branding entries)
+    if (bagReferenceGroup) bagReferenceGroup.style.display = 'block';
+    
+    // Show CNC batch display field (will be populated from reference selection)
+    const cncBatchDisplayGroup = document.getElementById('cncBatchDisplayGroup');
+    if (cncBatchDisplayGroup) cncBatchDisplayGroup.style.display = 'block';
+    
+    // Show CNC batch dropdown for bags (alternative method - can be used instead of reference)
     const bagCncBatchGroup = document.getElementById('bagCncBatchGroup');
     if (bagCncBatchGroup) bagCncBatchGroup.style.display = 'block';
     
@@ -1371,7 +1483,8 @@ function selectProductType(type) {
     if(qualityCheckedFormGroup) qualityCheckedFormGroup.style.display = 'block';
     if(passedQtyFormGroup) passedQtyFormGroup.style.display = 'block';
     if(rejectedQtyFormGroup) rejectedQtyFormGroup.style.display = 'block';
-    if(cncBatchDisplayGroup) cncBatchDisplayGroup.style.display = 'none'; // Hide display group, using dropdown instead
+    // Show CNC batch display group - it will be populated when reference is selected
+    if(cncBatchDisplayGroup) cncBatchDisplayGroup.style.display = 'block';
     
     // Hide roll-specific fields
     const rollSizeFormGroup = document.getElementById('rollSizeFormGroup');
@@ -1379,9 +1492,55 @@ function selectProductType(type) {
     if(rollSizeFormGroup) rollSizeFormGroup.style.display = 'none';
     
     loadBagReferences();
+    loadBagReferencesFromBranding(); // Load references from branding entries
   }
   
   updateSummary();
+}
+
+function loadBagReferencesFromBranding() {
+  // Populate reference dropdown with references from branding entries
+  const bagReferenceSelect = document.getElementById('bag_reference_number');
+  if (!bagReferenceSelect) return;
+  
+  // Get references from branding entries (already loaded in PHP)
+  const brandingReferences = Object.keys(refToBatchMap);
+  
+  bagReferenceSelect.innerHTML = '<option value="">-- Select Reference Number from Branding Entries --</option>';
+  
+  if (brandingReferences.length > 0) {
+    brandingReferences.forEach(ref => {
+      const option = document.createElement('option');
+      option.value = ref;
+      
+      // Display reference with CNC batch if available
+      let displayText = ref;
+      if (refToBatchMap[ref]) {
+        displayText += ' (CNC: ' + refToBatchMap[ref] + ')';
+      }
+      option.textContent = displayText;
+      
+      // Store CNC batch as data attribute
+      if (refToBatchMap[ref]) {
+        option.setAttribute('data-cnc-batch', refToBatchMap[ref]);
+      }
+      bagReferenceSelect.appendChild(option);
+    });
+    
+    // Update hint
+    const referenceHint = document.getElementById('reference_hint');
+    if (referenceHint) {
+      referenceHint.textContent = 'Select a reference number from branding entries. CNC cutting batch will be auto-filled.';
+      referenceHint.style.color = '#6c757d';
+    }
+  } else {
+    bagReferenceSelect.innerHTML = '<option value="">-- No References from Branding Entries --</option>';
+    const referenceHint = document.getElementById('reference_hint');
+    if (referenceHint) {
+      referenceHint.textContent = 'No references found in branding entries. Please create branding entries first.';
+      referenceHint.style.color = '#e74c3c';
+    }
+  }
 }
 
 function loadBagReferences() {
@@ -1498,8 +1657,12 @@ function loadBagReferences() {
   }
   
   if(bagCncBatchGroup) bagCncBatchGroup.style.display = 'block';
-  if(cncBatchDisplayGroup) cncBatchDisplayGroup.style.display = 'none'; // Hide display, using dropdown
+  // Show CNC batch display group - it will be populated when reference is selected from branding entries
+  if(cncBatchDisplayGroup) cncBatchDisplayGroup.style.display = 'block';
   if(bagSizeFormGroup) bagSizeFormGroup.style.display = 'block';
+  
+  // Populate reference dropdown with references from branding entries
+  loadBagReferencesFromBranding();
   if(qualityCheckedFormGroup) qualityCheckedFormGroup.style.display = 'block';
   if(passedQtyFormGroup) passedQtyFormGroup.style.display = 'block';
   if(rejectedQtyFormGroup) rejectedQtyFormGroup.style.display = 'block';
@@ -1700,14 +1863,31 @@ function updateCNCBatchFromReference() {
     
   }
   
-  // Only update CNC batch if product type is bag and using reference dropdown (for rolls)
-  // For bags, CNC batch is selected directly from dropdown, not from reference
-  if (productType === 'bag' && selectedRef && refToBatchMap[selectedRef]) {
-    // This is for backward compatibility if reference dropdown is still used
-    cncBatchInput.value = refToBatchMap[selectedRef];
+  // Update CNC batch from branding entry when reference is selected (for bags)
+  if (productType === 'bag' && selectedRef) {
+    // Get CNC batch from branding entries for this reference
+    if (refToBatchMap[selectedRef]) {
+      cncBatchInput.value = refToBatchMap[selectedRef];
+      // Show the CNC batch display group
+      const cncBatchDisplayGroup = document.getElementById('cncBatchDisplayGroup');
+      if (cncBatchDisplayGroup) {
+        cncBatchDisplayGroup.style.display = 'block';
+      }
+    } else {
+      // No CNC batch found for this reference - clear and hide
+      cncBatchInput.value = '';
+      const cncBatchDisplayGroup = document.getElementById('cncBatchDisplayGroup');
+      if (cncBatchDisplayGroup) {
+        cncBatchDisplayGroup.style.display = 'none';
+      }
+    }
   } else if (productType !== 'bag') {
-    // For rolls, clear CNC batch
+    // For rolls, clear CNC batch and hide display
     cncBatchInput.value = '';
+    const cncBatchDisplayGroup = document.getElementById('cncBatchDisplayGroup');
+    if (cncBatchDisplayGroup) {
+      cncBatchDisplayGroup.style.display = 'none';
+    }
   }
   
   // Filter bag sizes based on reference number (for bags)

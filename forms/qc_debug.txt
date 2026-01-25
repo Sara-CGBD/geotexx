@@ -1120,3 +1120,19 @@ fiber_reference_no:
 user_reference: 3.2L126JAN13-R03-GT0.9.H0.1
 Saved individual_roll_reference: 3.2L126JAN13-R03-GT0.9.H0.1
 Saved bulk reference: 4.0L126JAN06-R04-GT0.9.H0.1 to 3.2L126JAN13-R03-GT0.9.H0.1 (2 references)
+=== QC Test Order Debug ===
+Test: Thickness (Under 2kPa Pressure) - ASTM D5199
+Test Standard ID: 1
+product_reference: 
+fiber_reference_no: 
+user_reference: 3.0L126JAN22- R03- GT0.9H0.1- Texofib.24%-1
+Saved individual_roll_reference: 3.0L126JAN22- R03- GT0.9H0.1- Texofib.24%-1
+Saved bulk reference: 3.0L126JAN22- R03- GT0.9H0.1- Texofib.24% to 3.0L126JAN22- R03- GT0.9H0.1- Texofib.24% (1 references)
+=== QC Test Order Debug ===
+Test: Mass Per Unit Area (GSM) - ASTM D5261
+Test Standard ID: 2
+product_reference: 
+fiber_reference_no: 
+user_reference: 3.0L126JAN22- R03- GT0.9H0.1- Texofib.24%-1
+Saved individual_roll_reference: 3.0L126JAN22- R03- GT0.9H0.1- Texofib.24%-1
+Saved bulk reference: 3.0L126JAN22- R03- GT0.9H0.1- Texofib.24% to 3.0L126JAN22- R03- GT0.9H0.1- Texofib.24% (1 references)

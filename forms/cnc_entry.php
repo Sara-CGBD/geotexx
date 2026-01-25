@@ -380,7 +380,7 @@ if ($table_check && $table_check->num_rows > 0) {
     </div>
   </div>
 
-  <form id="cncForm" method="post" action="../handlers/submit_cnc_entry.php" onsubmit="return validateForm();">
+  <form id="cncForm" method="post" action="../handlers/submit_cnc_entry.php" onsubmit="return validateForm();" onkeydown="if(event.key === 'Enter' && event.target && event.target.hasAttribute('data-ref-index')) { event.preventDefault(); return false; }">
 
     <!-- Entry ID (renamed from CNC ID) -->
     <div class="form-group">
@@ -393,9 +393,9 @@ if ($table_check && $table_check->num_rows > 0) {
     <div class="form-group">
       <label>CNC Machine ID:</label>
       <div class="btn-group" id="cncMachineGroup">
-        <button type="button" class="btn" data-value="CNC-01" onclick="selectCNCMachine(this,'cncMachineGroup')">CNC-01</button>
-        <button type="button" class="btn" data-value="CNC-02" onclick="selectCNCMachine(this,'cncMachineGroup')">CNC-02</button>
-        <button type="button" class="btn" data-value="custom" onclick="selectCNCMachine(this,'cncMachineGroup')">Custom</button>
+        <button type="button" class="btn cnc-machine-btn" data-value="CNC-01" onclick="selectCNCMachine(this,'cncMachineGroup'); return false;">CNC-01</button>
+        <button type="button" class="btn cnc-machine-btn" data-value="CNC-02" onclick="selectCNCMachine(this,'cncMachineGroup'); return false;">CNC-02</button>
+        <button type="button" class="btn cnc-machine-btn" data-value="custom" onclick="selectCNCMachine(this,'cncMachineGroup'); return false;">Custom</button>
       </div>
       <input type="text" id="cnc_machine_custom" placeholder="Enter CNC Machine ID manually" style="margin-top: 8px; display: none;">
       <input type="hidden" id="cnc_machine_id" name="cnc_machine_id">
@@ -427,7 +427,8 @@ if ($table_check && $table_check->num_rows > 0) {
       <small id="ref_loading" style="display: block; color: #7f8c8d; font-size: 0.75em; margin-top: 2px;">Please select a CNC Machine ID first to load references.</small>
       <small id="roll_count_info" style="display: block; color: #e74c3c; font-size: 0.75em; margin-top: 5px; font-weight:600;"></small>
       <small style="display: block; color: #7f8c8d; font-size: 0.75em; margin-top: 5px;">Limit: CNC-01/CNC-02: Max 4 rolls total | Custom: Max 100 rolls total (includes bundles and single references)</small>
-      <input type="hidden" id="reference_number" name="reference_number" value="" required>
+      <input type="hidden" id="reference_number" name="reference_number" value="" required style="max-length: none;">
+      <input type="hidden" id="reference_quantities" name="reference_quantities" value="">
     </div>
 
 
@@ -461,47 +462,48 @@ if ($table_check && $table_check->num_rows > 0) {
   <input type="hidden" id="project_id" name="project_id">
 </div>
 
-    <!-- Cutting Roll Quantity -->
+    <!-- Cutting Roll Quantity (Auto-calculated from individual roll quantities) -->
     <div class="form-group">
-      <label>Cutting Roll Quantity:</label>
-      <input type="number" step="1" id="cutting_roll_quantity" name="cutting_roll_quantity" required min="1" placeholder="Enter number of rolls">
-      <small id="roll_quantity_help" style="display: block; color: #7f8c8d; font-size: 0.75em; margin-top: 5px;">Enter the number of rolls to be cut</small>
+      <label>Total Cutting Roll Quantity (Auto-calculated):</label>
+      <input type="number" step="1" id="cutting_roll_quantity" name="cutting_roll_quantity" required min="0" readonly class="readonly" placeholder="Will be calculated from roll quantities below" style="background:#e8f5e9; font-weight:bold; cursor:not-allowed;">
+      <small id="roll_quantity_help" style="display: block; color: #7f8c8d; font-size: 0.75em; margin-top: 5px;">This field is automatically calculated from the cutting quantities entered for each roll below (1 roll = max 36 pieces)</small>
+      <small id="max_cutting_quantity_info" style="display: block; color: #27ae60; font-weight: 600; margin-top: 5px; font-size: 0.75em;"></small>
+      <small id="cutting_quantity_warning" style="display: block; color: #e74c3c; font-weight: 600; margin-top: 5px; font-size: 0.75em;"></small>
     </div>
 
     <!-- Bag Size with button system and custom input -->
     <div class="form-group">
       <label>Bag Size:</label>
       <div style="margin-bottom: 10px; max-height: 500px; overflow-y: auto; border: 1px solid #ddd; padding: 10px; border-radius: 5px;">
-        <div class="btn-group" style="display: flex; flex-wrap: wrap; gap: 5px; width: 100%;">
-          <button type="button" class="btn-bag-size" onclick="selectBagSize('2000mmX1500mm')">2000mmX1500mm</button>
-          <button type="button" class="btn-bag-size" onclick="selectBagSize('1200mmX950mm')">1200mmX950mm</button>
-          <button type="button" class="btn-bag-size" onclick="selectBagSize('1250mmX1000mm')">1250mmX1000mm</button>
-          <button type="button" class="btn-bag-size" onclick="selectBagSize('1225mmX1000mm')">1225mmX1000mm</button>
-          <button type="button" class="btn-bag-size" onclick="selectBagSize('1300mmX1050mm')">1300mmX1050mm</button>
-          <button type="button" class="btn-bag-size" onclick="selectBagSize('1600mmX850mm')">1600mmX850mm</button>
-          <button type="button" class="btn-bag-size" onclick="selectBagSize('1100mmX850mm')">1100mmX850mm</button>
-          <button type="button" class="btn-bag-size" onclick="selectBagSize('1200mmX600mm')">1200mmX600mm</button>
-          <button type="button" class="btn-bag-size" onclick="selectBagSize('1100mmX800mm')">1100mmX800mm</button>
-          <button type="button" class="btn-bag-size" onclick="selectBagSize('1125mmX900mm')">1125mmX900mm</button>
-          <button type="button" class="btn-bag-size" onclick="selectBagSize('1150mmX800mm')">1150mmX800mm</button>
-          <button type="button" class="btn-bag-size" onclick="selectBagSize('1150mmX850mm')">1150mmX850mm</button>
-          <button type="button" class="btn-bag-size" onclick="selectBagSize('1150mmX900mm')">1150mmX900mm</button>
-          <button type="button" class="btn-bag-size" onclick="selectBagSize('1700mmX1250mm')">1700mmX1250mm</button>
-          <button type="button" class="btn-bag-size" onclick="selectBagSize('1050mmX800mm')">1050mmX800mm</button>
-          <button type="button" class="btn-bag-size" onclick="selectBagSize('1075mmX850mm')">1075mmX850mm</button>
-          <button type="button" class="btn-bag-size" onclick="selectBagSize('1030mmX700mm')">1030mmX700mm</button>
-          <button type="button" class="btn-bag-size" onclick="selectBagSize('1000mmX800mm')">1000mmX800mm</button>
-          <button type="button" class="btn-bag-size" onclick="selectBagSize('950mmX750mm')">950mmX750mm</button>
-          <button type="button" class="btn-bag-size" onclick="selectBagSize('950mmX500mm')">950mmX500mm</button>
-          <button type="button" class="btn-bag-size" onclick="selectBagSize('830mmX600mm')">830mmX600mm</button>
-          <button type="button" class="btn-bag-size" onclick="selectBagSize('300mmX299mm')">300mmX299mm</button>
-          <button type="button" class="btn-bag-size" onclick="selectBagSize('500mmX499mm')">500mmX499mm</button>
-          <button type="button" class="btn-bag-size" onclick="selectBagSize('700mmX700mm')">700mmX700mm</button>
-          
-          <button type="button" class="btn-bag-size" onclick="selectBagSize('850mmX700mm')">850mmX700mm</button>
-          <button type="button" class="btn-bag-size" onclick="selectBagSize('1030mmX750mm')">1030mmX750mm</button>
-          <button type="button" class="btn-bag-size" onclick="selectBagSize('1000mmX700mm')">1000mmX700mm</button>
-          <button type="button" class="btn-bag-size custom-bag-size-btn" onclick="selectBagSize('custom')" style="background: #6c757d; color: white;">Custom (Enter manually)</button>
+        <div class="btn-group" id="bagSizeGroup" style="display: flex; flex-wrap: wrap; gap: 5px; width: 100%;">
+          <button type="button" class="btn-bag-size" data-bag-size="2000mmX1500mm" onclick="selectBagSize('2000mmX1500mm'); return false;">2000mmX1500mm</button>
+          <button type="button" class="btn-bag-size" data-bag-size="1200mmX950mm" onclick="selectBagSize('1200mmX950mm'); return false;">1200mmX950mm</button>
+          <button type="button" class="btn-bag-size" data-bag-size="1250mmX1000mm" onclick="selectBagSize('1250mmX1000mm'); return false;">1250mmX1000mm</button>
+          <button type="button" class="btn-bag-size" data-bag-size="1225mmX1000mm" onclick="selectBagSize('1225mmX1000mm'); return false;">1225mmX1000mm</button>
+          <button type="button" class="btn-bag-size" data-bag-size="1300mmX1050mm" onclick="selectBagSize('1300mmX1050mm'); return false;">1300mmX1050mm</button>
+          <button type="button" class="btn-bag-size" data-bag-size="1600mmX850mm" onclick="selectBagSize('1600mmX850mm'); return false;">1600mmX850mm</button>
+          <button type="button" class="btn-bag-size" data-bag-size="1100mmX850mm" onclick="selectBagSize('1100mmX850mm'); return false;">1100mmX850mm</button>
+          <button type="button" class="btn-bag-size" data-bag-size="1200mmX600mm" onclick="selectBagSize('1200mmX600mm'); return false;">1200mmX600mm</button>
+          <button type="button" class="btn-bag-size" data-bag-size="1100mmX800mm" onclick="selectBagSize('1100mmX800mm'); return false;">1100mmX800mm</button>
+          <button type="button" class="btn-bag-size" data-bag-size="1125mmX900mm" onclick="selectBagSize('1125mmX900mm'); return false;">1125mmX900mm</button>
+          <button type="button" class="btn-bag-size" data-bag-size="1150mmX800mm" onclick="selectBagSize('1150mmX800mm'); return false;">1150mmX800mm</button>
+          <button type="button" class="btn-bag-size" data-bag-size="1150mmX850mm" onclick="selectBagSize('1150mmX850mm'); return false;">1150mmX850mm</button>
+          <button type="button" class="btn-bag-size" data-bag-size="1150mmX900mm" onclick="selectBagSize('1150mmX900mm'); return false;">1150mmX900mm</button>
+          <button type="button" class="btn-bag-size" data-bag-size="1700mmX1250mm" onclick="selectBagSize('1700mmX1250mm'); return false;">1700mmX1250mm</button>
+          <button type="button" class="btn-bag-size" data-bag-size="1050mmX800mm" onclick="selectBagSize('1050mmX800mm'); return false;">1050mmX800mm</button>
+          <button type="button" class="btn-bag-size" data-bag-size="1075mmX850mm" onclick="selectBagSize('1075mmX850mm'); return false;">1075mmX850mm</button>
+          <button type="button" class="btn-bag-size" data-bag-size="1030mmX700mm" onclick="selectBagSize('1030mmX700mm'); return false;">1030mmX700mm</button>
+          <button type="button" class="btn-bag-size" data-bag-size="1000mmX800mm" onclick="selectBagSize('1000mmX800mm'); return false;">1000mmX800mm</button>
+          <button type="button" class="btn-bag-size" data-bag-size="950mmX750mm" onclick="selectBagSize('950mmX750mm'); return false;">950mmX750mm</button>
+          <button type="button" class="btn-bag-size" data-bag-size="950mmX500mm" onclick="selectBagSize('950mmX500mm'); return false;">950mmX500mm</button>
+          <button type="button" class="btn-bag-size" data-bag-size="830mmX600mm" onclick="selectBagSize('830mmX600mm'); return false;">830mmX600mm</button>
+          <button type="button" class="btn-bag-size" data-bag-size="300mmX299mm" onclick="selectBagSize('300mmX299mm'); return false;">300mmX299mm</button>
+          <button type="button" class="btn-bag-size" data-bag-size="500mmX499mm" onclick="selectBagSize('500mmX499mm'); return false;">500mmX499mm</button>
+          <button type="button" class="btn-bag-size" data-bag-size="700mmX700mm" onclick="selectBagSize('700mmX700mm'); return false;">700mmX700mm</button>
+          <button type="button" class="btn-bag-size" data-bag-size="850mmX700mm" onclick="selectBagSize('850mmX700mm'); return false;">850mmX700mm</button>
+          <button type="button" class="btn-bag-size" data-bag-size="1030mmX750mm" onclick="selectBagSize('1030mmX750mm'); return false;">1030mmX750mm</button>
+          <button type="button" class="btn-bag-size" data-bag-size="1000mmX700mm" onclick="selectBagSize('1000mmX700mm'); return false;">1000mmX700mm</button>
+          <button type="button" class="btn-bag-size custom-bag-size-btn" data-bag-size="custom" onclick="selectBagSize('custom'); return false;" style="background: #6c757d; color: white;">Custom (Enter manually)</button>
         </div>
       </div>
       <input type="text" id="bag_size_custom" placeholder="Enter custom bag size" style="margin-top: 8px; display: none; width: 100%; padding: 8px;">
@@ -536,79 +538,84 @@ if ($table_check && $table_check->num_rows > 0) {
 </div>
 
 <script>
-function updateTimeAndShift() {
-  const now = new Date();
-  const utc = now.getTime() + (now.getTimezoneOffset()*60000);
-  const dhaka = new Date(utc + (6*3600000));
-  document.getElementById("dateTimeDisplay").innerHTML =
-    "Date & Time: " + dhaka.toDateString() + " " + dhaka.toLocaleTimeString();
-
-  const yyyy = dhaka.getFullYear();
-  const mm = String(dhaka.getMonth()+1).padStart(2,'0');
-  const dd = String(dhaka.getDate()).padStart(2,'0');
-  const hh = String(dhaka.getHours()).padStart(2,'0');
-  const min = String(dhaka.getMinutes()).padStart(2,'0');
-  const ss = String(dhaka.getSeconds()).padStart(2,'0');
-  document.getElementById("dateTime").value = `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss}`;
-
-  const h = dhaka.getHours();
-  const shift = (h >= 8 && h <= 19) ? "Day" : "Night";
-  document.getElementById("shiftBanner").innerText = "Shift: " + shift;
-  document.getElementById("shift").value = shift;
-}
-setInterval(updateTimeAndShift,1000); updateTimeAndShift();
-
-function selectBtn(btn, groupId){
-  document.querySelectorAll(`#${groupId} .btn`).forEach(b=>b.classList.remove('selected'));
-  btn.classList.add('selected');
-  if(groupId==="projectGroup"){
-    document.getElementById("project_id").value = btn.dataset.id;
-  }
-  updateSummary();
-}
+// ============================================================================
+// CRITICAL: These functions MUST be defined FIRST before any HTML tries to use them
+// ============================================================================
 
 // Store pending machine change
-let pendingMachineChange = null;
+var pendingMachineChange = null;
 
+// CNC Machine selection function - MUST be at top for onclick handlers
 function selectCNCMachine(btn, groupId){
-  const customInput = document.getElementById('cnc_machine_custom');
-  const hiddenInput = document.getElementById('cnc_machine_id');
-  
-  // Get current machine selection before change
-  const currentlySelectedBtn = document.querySelector(`#${groupId} .btn.selected`);
-  const currentMachineValue = hiddenInput ? hiddenInput.value : '';
-  const currentCustomValue = customInput ? customInput.value.trim() : '';
-  
-  // Determine if currently on Custom machine
-  const isCurrentlyCustom = (currentlySelectedBtn && currentlySelectedBtn.dataset.value === 'custom') || 
-                            (currentCustomValue !== '' && (currentMachineValue === '' || currentMachineValue === currentCustomValue));
-  
-  const newMachineValue = btn.dataset.value;
-  
-  // Check if switching from Custom to CNC-01/CNC-02
-  // NOTE: This warning will NOT show when switching TO Custom (Custom allows 100 rolls)
-  // It only shows when switching FROM Custom TO CNC-01/CNC-02
-  if (isCurrentlyCustom && (newMachineValue === 'CNC-01' || newMachineValue === 'CNC-02')) {
-    const currentRollCount = getCurrentTotalRollCount();
+  try {
+    console.log('selectCNCMachine called with:', btn, groupId);
     
-    // If current roll count exceeds the limit for CNC-01/CNC-02 (4 rolls)
-    if (currentRollCount > 4) {
-      // Store the pending change
-      pendingMachineChange = {
-        btn: btn,
-        groupId: groupId
-      };
-      
-      // Show warning popup (only for CNC-01/CNC-02, not for Custom)
-      showWarningPopup(`Warning: You can't add more than 4 rolls in ${newMachineValue}`);
-      return; // Don't apply change yet
+    if (!btn || !groupId) {
+      console.error('selectCNCMachine: Invalid parameters');
+      return;
     }
+    
+    const customInput = document.getElementById('cnc_machine_custom');
+    const hiddenInput = document.getElementById('cnc_machine_id');
+    
+    // Get current machine selection before change
+    const currentlySelectedBtn = document.querySelector(`#${groupId} .btn.selected`);
+    const currentMachineValue = hiddenInput ? hiddenInput.value : '';
+    const currentCustomValue = customInput ? customInput.value.trim() : '';
+    
+    // Determine if currently on Custom machine
+    const isCurrentlyCustom = (currentlySelectedBtn && currentlySelectedBtn.dataset.value === 'custom') || 
+                              (currentCustomValue !== '' && (currentMachineValue === '' || currentMachineValue === currentCustomValue));
+    
+    // Get value from data-value attribute or dataset
+    const newMachineValue = btn.getAttribute('data-value') || btn.dataset.value;
+    console.log('New machine value:', newMachineValue);
+    
+    // Check if switching from Custom to CNC-01/CNC-02
+    // NOTE: This warning will NOT show when switching TO Custom (Custom allows 100 rolls)
+    // It only shows when switching FROM Custom TO CNC-01/CNC-02
+    if (isCurrentlyCustom && (newMachineValue === 'CNC-01' || newMachineValue === 'CNC-02')) {
+      // Safely get current roll count
+      let currentRollCount = 0;
+      if (typeof getCurrentTotalRollCount === 'function') {
+        try {
+          currentRollCount = getCurrentTotalRollCount();
+        } catch (e) {
+          console.error('Error getting current roll count:', e);
+        }
+      }
+      
+      // If current roll count exceeds the limit for CNC-01/CNC-02 (4 rolls)
+      if (currentRollCount > 4) {
+        // Store the pending change
+        pendingMachineChange = {
+          btn: btn,
+          groupId: groupId
+        };
+        
+        // Show warning popup (only for CNC-01/CNC-02, not for Custom)
+        if (typeof showWarningPopup === 'function') {
+          showWarningPopup(`Warning: You can't add more than 4 rolls in ${newMachineValue}`);
+        } else {
+          alert(`Warning: You can't add more than 4 rolls in ${newMachineValue}`);
+        }
+        return; // Don't apply change yet
+      }
+    }
+    
+    // Apply the selection change directly if no warning needed
+    // This includes switching TO Custom (which allows 100 rolls, so no warning needed)
+    applyMachineSelection(btn, groupId);
+  } catch (error) {
+    console.error('Error in selectCNCMachine:', error);
+    alert('An error occurred while selecting CNC Machine: ' + error.message);
   }
-  
-  // Apply the selection change directly if no warning needed
-  // This includes switching TO Custom (which allows 100 rolls, so no warning needed)
-  applyMachineSelection(btn, groupId);
 }
+// Also attach to window for global access
+window.selectCNCMachine = selectCNCMachine;
+
+// Global variable to store auto/manual mode preference
+window.autoQuantityMode = null; // null = not set, true = auto (36 per roll), false = manual
 
 function applyMachineSelection(btn, groupId) {
   const customInput = document.getElementById('cnc_machine_custom');
@@ -636,6 +643,84 @@ function applyMachineSelection(btn, groupId) {
     }
   }
   
+  // Show dialog to ask about auto/manual quantity mode
+  // Only show if mode is not already set (first time selecting machine)
+  if (window.autoQuantityMode === null) {
+    showQuantityModeDialog();
+  } else {
+    // Mode already set, proceed with normal flow
+    finalizeMachineSelection();
+  }
+}
+
+function showQuantityModeDialog() {
+  // Create dialog HTML
+  const dialogHTML = `
+    <div id="quantityModeDialog" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 10000; display: flex; align-items: center; justify-content: center;">
+      <div style="background: white; border-radius: 12px; padding: 30px; max-width: 500px; width: 90%; box-shadow: 0 10px 40px rgba(0,0,0,0.2);">
+        <h3 style="margin: 0 0 20px 0; color: #333; font-size: 22px; font-weight: 600;">Quantity Input Mode</h3>
+        <p style="margin: 0 0 25px 0; color: #666; font-size: 15px; line-height: 1.6;">
+          Do you want to have each roll as 36 quantities automatically?<br><br>
+          <strong>Yes:</strong> All references will automatically use 36 pieces per roll. No manual input needed.<br>
+          <strong>No:</strong> You can manually enter the cutting quantity for each roll.
+        </p>
+        <div style="display: flex; gap: 12px; justify-content: flex-end;">
+          <button id="quantityModeNo" style="padding: 12px 28px; background: #6c757d; color: white; border: none; border-radius: 6px; font-size: 15px; font-weight: 600; cursor: pointer; transition: background 0.2s;">
+            No (Manual)
+          </button>
+          <button id="quantityModeYes" style="padding: 12px 28px; background: #28a745; color: white; border: none; border-radius: 6px; font-size: 15px; font-weight: 600; cursor: pointer; transition: background 0.2s;">
+            Yes (Auto)
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+  
+  // Remove existing dialog if any
+  const existingDialog = document.getElementById('quantityModeDialog');
+  if (existingDialog) {
+    existingDialog.remove();
+  }
+  
+  // Add dialog to page
+  document.body.insertAdjacentHTML('beforeend', dialogHTML);
+  
+  // Add event listeners
+  document.getElementById('quantityModeYes').addEventListener('click', function() {
+    window.autoQuantityMode = true;
+    closeQuantityModeDialog();
+    finalizeMachineSelection();
+  });
+  
+  document.getElementById('quantityModeNo').addEventListener('click', function() {
+    window.autoQuantityMode = false;
+    closeQuantityModeDialog();
+    finalizeMachineSelection();
+  });
+  
+  // Add hover effects
+  document.getElementById('quantityModeYes').addEventListener('mouseenter', function() {
+    this.style.background = '#218838';
+  });
+  document.getElementById('quantityModeYes').addEventListener('mouseleave', function() {
+    this.style.background = '#28a745';
+  });
+  document.getElementById('quantityModeNo').addEventListener('mouseenter', function() {
+    this.style.background = '#5a6268';
+  });
+  document.getElementById('quantityModeNo').addEventListener('mouseleave', function() {
+    this.style.background = '#6c757d';
+  });
+}
+
+function closeQuantityModeDialog() {
+  const dialog = document.getElementById('quantityModeDialog');
+  if (dialog) {
+    dialog.remove();
+  }
+}
+
+function finalizeMachineSelection() {
   // Enable reference search and Add button when machine is selected
   enableReferenceFields();
   
@@ -647,14 +732,72 @@ function applyMachineSelection(btn, groupId) {
     filterCNCReferences();
   }
   
+  // Update max cutting quantity when machine is selected (in case references are already selected)
+  if (typeof updateMaxCuttingQuantity === 'function') {
+    updateMaxCuttingQuantity();
+  }
+  
+  // Refresh selected references display to show/hide inputs based on mode
+  if (typeof updateSelectedCNCReferences === 'function') {
+    updateSelectedCNCReferences();
+  }
+  
   updateSummary();
 }
 
-function showWarningPopup(message) {
+// Bag Size selection function - required for bag size button onclick handlers
+function selectBagSize(value) {
+  try {
+    const customInput = document.getElementById('bag_size_custom');
+    const hiddenInput = document.getElementById('bag_size');
+    const gsmSection = document.getElementById('gsmSection');
+    const thicknessSection = document.getElementById('thicknessSection');
+    if (!hiddenInput) return;
+
+    document.querySelectorAll('#bagSizeGroup .btn-bag-size').forEach(function(b) {
+      b.classList.remove('selected');
+      if ((b.getAttribute('data-bag-size') || b.dataset.bagSize) === value) {
+        b.classList.add('selected');
+      }
+    });
+
+    if (value === 'custom') {
+      if (customInput) {
+        customInput.style.display = 'block';
+        customInput.required = true;
+        customInput.value = '';
+      }
+      hiddenInput.value = '';
+      if (gsmSection) gsmSection.style.display = 'none';
+      if (thicknessSection) thicknessSection.style.display = 'none';
+    } else {
+      if (customInput) {
+        customInput.style.display = 'none';
+        customInput.required = false;
+        customInput.value = '';
+      }
+      hiddenInput.value = value;
+      if (typeof fetchBagOptions === 'function') {
+        fetchBagOptions(value);
+      }
+    }
+    if (typeof updateSummary === 'function') updateSummary();
+  } catch (e) {
+    console.error('selectBagSize error:', e);
+    alert('An error occurred while selecting bag size: ' + (e.message || 'Unknown error'));
+  }
+}
+window.selectBagSize = selectBagSize;
+
+function showWarningPopup(message, useHtml = false) {
   const popup = document.getElementById('warningPopup');
   const messageEl = document.getElementById('warningMessage');
   if (popup && messageEl) {
+    if (useHtml) {
+      messageEl.innerHTML = message;
+    } else {
     messageEl.textContent = message;
+    }
     popup.classList.add('show');
   }
 }
@@ -693,37 +836,7 @@ function generateCuttingBatch() {
   updateSummary();
 }
 
-function selectBagSize(size) {
-  const customInput = document.getElementById('bag_size_custom');
-  const hiddenInput = document.getElementById('bag_size');
-  
-  if (size === 'custom') {
-    customInput.style.display = 'block';
-    customInput.required = true;
-    hiddenInput.value = '';
-    customInput.focus();
-    // Hide GSM/thickness sections for custom
-    document.getElementById('gsmSection').style.display = 'none';
-    document.getElementById('thicknessSection').style.display = 'none';
-  } else {
-    customInput.style.display = 'none';
-    customInput.required = false;
-    customInput.value = '';
-    hiddenInput.value = size;
-    
-    // Highlight selected button
-    document.querySelectorAll('.btn-bag-size').forEach(btn => {
-      btn.classList.remove('selected');
-      if (btn.textContent.trim() === size) {
-        btn.classList.add('selected');
-      }
-    });
-    
-    // Fetch GSM and thickness options for this bag size
-    fetchBagOptions(size);
-  }
-  updateSummary();
-}
+// Duplicate removed - function is already defined at the top of the script
 
 function fetchBagOptions(bagSize) {
   fetch(`api/fetch_bag_options.php?bag_size=${encodeURIComponent(bagSize)}`)
@@ -866,6 +979,31 @@ document.addEventListener('DOMContentLoaded', function() {
   refNumber.addEventListener('change', updateSummary);
 });
 
+// Select button function for project selection
+function selectBtn(btn, groupId) {
+  // Remove selected class from all buttons in the group
+  document.querySelectorAll(`#${groupId} .btn`).forEach(b => b.classList.remove('selected'));
+  // Add selected class to clicked button
+  btn.classList.add('selected');
+  
+  // Handle project selection
+  if (groupId === 'projectGroup') {
+    const projectId = btn.getAttribute('data-id');
+    const projectIdInput = document.getElementById('project_id');
+    if (projectIdInput) {
+      projectIdInput.value = projectId;
+    }
+  }
+  
+  // Update summary
+  if (typeof updateSummary === 'function') {
+    updateSummary();
+  }
+}
+
+// Make function globally available
+window.selectBtn = selectBtn;
+
 function updateSummary() {
   const dateTime = document.getElementById("dateTime").value;
   const shift = document.getElementById("shift").value;
@@ -913,20 +1051,38 @@ function clearForm(){
   
   // Clear selected references
   window.selectedCNCReferences = [];
+  window.autoQuantityMode = null; // Reset auto/manual mode
   updateSelectedCNCReferences();
   updateRollCountInfo();
+  updateMaxCuttingQuantity(); // Reset max cutting quantity
   document.getElementById("reference_search").value = "";
+  
+  // Reset cutting quantity
+  const cuttingQtyInput = document.getElementById('cutting_roll_quantity');
+  if (cuttingQtyInput) {
+    cuttingQtyInput.value = '';
+    cuttingQtyInput.readOnly = false;
+    cuttingQtyInput.style.background = '';
+    cuttingQtyInput.style.cursor = '';
+  }
   
   // Clear button selections
   document.querySelectorAll('#projectGroup .btn').forEach(b=>b.classList.remove('selected'));
   document.querySelectorAll('#cncMachineGroup .btn').forEach(b=>b.classList.remove('selected'));
+  document.querySelectorAll('#bagSizeGroup .btn-bag-size').forEach(b=>b.classList.remove('selected'));
   document.getElementById("project_id").value="";
   document.getElementById("cnc_machine_id").value="";
   document.getElementById("bag_size").value="";
   // Regenerate cutting batch on form clear (uses the same number from server)
   generateCuttingBatch();
   document.getElementById("bag_size_custom").style.display = 'none';
+  document.getElementById("bag_size_custom").value = '';
   document.getElementById("cnc_machine_custom").style.display = 'none';
+  document.getElementById("cnc_machine_custom").value = '';
+  const gs = document.getElementById('gsmSection');
+  const ts = document.getElementById('thicknessSection');
+  if (gs) gs.style.display = 'none';
+  if (ts) ts.style.display = 'none';
   
   // Clear summary
   document.getElementById("summaryBox").innerText = "";
@@ -972,8 +1128,52 @@ function validateForm(){
     alert("Please select a project."); return false;
   }
   const quantityInput = document.getElementById("cutting_roll_quantity");
-  if(!quantityInput.value.trim()){
-    alert("Please enter Cutting Roll Quantity."); return false;
+  // Recalculate total before validation
+  if (typeof calculateTotalCuttingQuantity === 'function') {
+    calculateTotalCuttingQuantity();
+  }
+  if(!quantityInput.value || parseInt(quantityInput.value) <= 0){
+    alert("Please enter cutting quantities for at least one roll. The total will be calculated automatically."); return false;
+  }
+  
+  // Validate cutting quantity doesn't exceed maximum (rolls * 36)
+  // Reuse currentRollCount from above (line 976)
+  if (currentRollCount > 0) {
+    const maxCuttingQuantity = currentRollCount * 36;
+    const enteredQuantity = parseInt(quantityInput.value) || 0;
+    
+    // Check individual roll quantities don't exceed 36 pieces per roll
+    if (window.selectedCNCReferences && window.selectedCNCReferences.length > 0) {
+      let hasInvalidQuantity = false;
+      let invalidRollInfo = '';
+      
+      window.selectedCNCReferences.forEach((ref, refIndex) => {
+        if (ref.quantities && Array.isArray(ref.quantities)) {
+          ref.quantities.forEach((qty, rollIndex) => {
+            const quantity = parseInt(qty) || 0;
+            if (quantity > 36) {
+              hasInvalidQuantity = true;
+              invalidRollInfo += `${ref.display || ref.reference} - Roll ${rollIndex + 1}: ${quantity} pieces (max 36)\n`;
+            }
+          });
+        }
+      });
+      
+      if (hasInvalidQuantity) {
+        alert(`Some roll quantities exceed the maximum of 36 pieces per roll:\n\n${invalidRollInfo}\nPlease adjust the quantities.`);
+        return false;
+      }
+    }
+    
+    if (enteredQuantity > maxCuttingQuantity) {
+      alert(`Total cutting quantity (${enteredQuantity} pieces) cannot exceed ${maxCuttingQuantity} pieces (${currentRollCount} roll(s) × 36 pieces per roll).`);
+      return false;
+    }
+    
+    if (enteredQuantity < 1) {
+      alert("Please enter cutting quantities for at least one roll. The total must be at least 1 piece.");
+      return false;
+    }
   }
   
   // Note: Roll limit validation is for reference selection, not cutting quantity
@@ -987,21 +1187,174 @@ function validateForm(){
 
 // Add event listeners for form fields to update summary (additional to the ones in handleBagSizeChange)
 document.addEventListener('DOMContentLoaded', function() {
-  document.getElementById('cutting_roll_quantity').addEventListener('input', updateSummary);
-  document.getElementById('cnc_machine_custom').addEventListener('input', updateSummary);
+  console.log('DOMContentLoaded: Setting up event listeners...');
+  
+  // Use event delegation for CNC Machine ID buttons (more reliable)
+  const cncMachineGroup = document.getElementById('cncMachineGroup');
+  if (cncMachineGroup) {
+    console.log('CNC Machine Group found, setting up delegation...');
+    cncMachineGroup.addEventListener('click', function(e) {
+      const clickedBtn = e.target.closest('.cnc-machine-btn');
+      if (clickedBtn) {
+        console.log('CNC Machine button clicked via delegation!', clickedBtn);
+        e.preventDefault();
+        e.stopPropagation();
+        
+        if (typeof selectCNCMachine === 'function') {
+          console.log('Calling selectCNCMachine...');
+          selectCNCMachine(clickedBtn, 'cncMachineGroup');
+        } else {
+          console.error('selectCNCMachine function is not defined!');
+          alert('Error: CNC Machine selection function not loaded. Please refresh the page.');
+        }
+      }
+    });
+  } else {
+    console.error('CNC Machine Group container not found!');
+  }
+  
+  // Use event delegation for Bag Size buttons (more reliable)
+  const bagSizeGroup = document.getElementById('bagSizeGroup');
+  if (bagSizeGroup) {
+    console.log('Bag Size Group found, setting up delegation...');
+    bagSizeGroup.addEventListener('click', function(e) {
+      const clickedBtn = e.target.closest('.btn-bag-size');
+      if (clickedBtn) {
+        console.log('Bag Size button clicked via delegation!', clickedBtn);
+        e.preventDefault();
+        e.stopPropagation();
+        
+        const bagSize = clickedBtn.getAttribute('data-bag-size');
+        console.log('Bag size value:', bagSize);
+        
+        if (bagSize) {
+          if (typeof selectBagSize === 'function') {
+            console.log('Calling selectBagSize...');
+            selectBagSize(bagSize);
+          } else {
+            console.error('selectBagSize function is not defined!');
+            alert('Error: Bag Size selection function not loaded. Please refresh the page.');
+          }
+        } else {
+          console.error('Bag size attribute not found on button:', clickedBtn);
+        }
+      }
+    });
+  } else {
+    console.error('Bag Size Group container not found!');
+  }
+  
+  // Also try direct attachment as fallback
+  const cncMachineButtons = document.querySelectorAll('.cnc-machine-btn');
+  console.log('Found CNC Machine buttons (direct):', cncMachineButtons.length);
+  cncMachineButtons.forEach(function(btn) {
+    btn.addEventListener('click', function(e) {
+      console.log('CNC Machine button clicked (direct)!', this);
+      e.preventDefault();
+      e.stopPropagation();
+      if (typeof selectCNCMachine === 'function') {
+        selectCNCMachine(this, 'cncMachineGroup');
+      }
+    });
+  });
+  
+  const bagSizeButtons = document.querySelectorAll('.btn-bag-size');
+  console.log('Found Bag Size buttons (direct):', bagSizeButtons.length);
+  bagSizeButtons.forEach(function(btn) {
+    btn.addEventListener('click', function(e) {
+      console.log('Bag Size button clicked (direct)!', this);
+      e.preventDefault();
+      e.stopPropagation();
+      const bagSize = this.getAttribute('data-bag-size');
+      if (bagSize && typeof selectBagSize === 'function') {
+        selectBagSize(bagSize);
+      }
+    });
+  });
+  
+  // Verify functions are available
+  console.log('selectCNCMachine function available:', typeof selectCNCMachine === 'function');
+  console.log('selectBagSize function available:', typeof selectBagSize === 'function');
+  
+  if (typeof selectCNCMachine !== 'function') {
+    console.error('selectCNCMachine function is not defined!');
+  }
+  if (typeof selectBagSize !== 'function') {
+    console.error('selectBagSize function is not defined!');
+  }
+  
+  const cuttingQuantityInput = document.getElementById('cutting_roll_quantity');
+  if (cuttingQuantityInput) {
+    cuttingQuantityInput.addEventListener('input', function() {
+      // Don't validate immediately when adding reference - wait for max quantities to be fetched
+      // This prevents popup from showing with wrong max value (1)
+      // Validation will happen when user actually enters a value
+      if (typeof updateSummary === 'function') {
+        updateSummary();
+      }
+    });
+  }
+  
+  const cncMachineCustom = document.getElementById('cnc_machine_custom');
+  if (cncMachineCustom) {
+    cncMachineCustom.addEventListener('input', function() {
+      if (typeof updateSummary === 'function') {
+        updateSummary();
+      }
+    });
+  }
   
   // Initialize reference fields (disabled by default)
-  enableReferenceFields();
-  checkCustomMachineInput();
+  if (typeof enableReferenceFields === 'function') {
+    enableReferenceFields();
+  }
+  if (typeof checkCustomMachineInput === 'function') {
+    checkCustomMachineInput();
+  }
   
   // Load form data asynchronously after page renders for instant page load
-  loadFormData();
+  if (typeof loadFormData === 'function') {
+    loadFormData();
+  }
   
   // Generate cutting batch on page load (CW-XX format)
-  generateCuttingBatch();
+  if (typeof generateCuttingBatch === 'function') {
+    generateCuttingBatch();
+  }
   
   // Update summary on page load
-  updateSummary();
+  if (typeof updateSummary === 'function') {
+    updateSummary();
+  }
+  
+  // Initialize max cutting quantity
+  if (typeof updateMaxCuttingQuantity === 'function') {
+    updateMaxCuttingQuantity();
+  }
+  
+  // Initialize date/time and shift display
+  if (typeof updateTimeAndShift === 'function') {
+    updateTimeAndShift();
+    setInterval(updateTimeAndShift, 1000);
+  }
+  
+  // Prevent form submission when Enter is pressed in quantity input fields
+  document.addEventListener('keydown', function(e) {
+    // Check if the target is a quantity input field
+    if (e.target && e.target.hasAttribute('data-ref-index') && e.target.hasAttribute('data-roll-index')) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        e.stopPropagation();
+        // Trigger the update function
+        const refIndex = parseInt(e.target.getAttribute('data-ref-index'));
+        const rollIndex = parseInt(e.target.getAttribute('data-roll-index'));
+        if (!isNaN(refIndex) && !isNaN(rollIndex)) {
+          updateRollQuantity(refIndex, rollIndex, e.target.value);
+        }
+        return false;
+      }
+    }
+  });
 });
 
 // Load form dropdowns asynchronously to avoid blocking page render
@@ -1040,6 +1393,10 @@ let cncReferencesData = [];
 if (typeof window.selectedCNCReferences === 'undefined') {
   window.selectedCNCReferences = [];
 }
+
+// Default cutting quantity per roll (configurable)
+// This is the default value that will be pre-filled when a reference is selected
+const DEFAULT_CUTTING_QUANTITY_PER_ROLL = 36;
 
 // Function to enable/disable reference fields based on machine selection
 function enableReferenceFields() {
@@ -1699,16 +2056,62 @@ function selectCNCReferenceFromDropdown(ref) {
     }
   }
   
+  // Parse remaining quantity from display text or use from ref object
+  // Format: "REF (Remaining: 12 pc)" or ref.remaining_quantity
+  let remainingQtyPerRoll = DEFAULT_CUTTING_QUANTITY_PER_ROLL; // Default to 36
+  
+  // For bundles, ALWAYS use 36 per roll (bundles show TOTAL remaining, but each roll can have 36)
+  // For individual rolls, use the actual remaining (may be less than 36)
+  if (rollCount > 1) {
+    // Bundle: always 36 per roll
+    remainingQtyPerRoll = DEFAULT_CUTTING_QUANTITY_PER_ROLL;
+  } else {
+    // Single roll: use actual remaining from API or display
+    if (ref.remaining_quantity !== undefined && ref.remaining_quantity !== null) {
+      remainingQtyPerRoll = Math.min(ref.remaining_quantity, DEFAULT_CUTTING_QUANTITY_PER_ROLL);
+    } else if (ref.display) {
+      // Parse from display text: "REF (Remaining: 12 pc)"
+      const remainingMatch = ref.display.match(/\(Remaining:\s*(\d+)\s*pc\)/i);
+      if (remainingMatch && remainingMatch[1]) {
+        const parsedRemaining = parseInt(remainingMatch[1]);
+        if (!isNaN(parsedRemaining)) {
+          remainingQtyPerRoll = Math.min(parsedRemaining, DEFAULT_CUTTING_QUANTITY_PER_ROLL);
+        }
+      }
+    }
+  }
+  
+  // Determine if it's a bundle: check flag OR rollCount > 1 OR display text patterns
+  let isBundleFlag = ref.is_bundle || false;
+  if (rollCount > 1) {
+    isBundleFlag = true; // Multiple rolls = bundle
+  }
+  if (!isBundleFlag && ref.display) {
+    // Check for bundle patterns in display text
+    if (ref.display.includes(' to ') || ref.display.includes('[Bag]') || ref.display.match(/-(\d+)\s+to\s+/)) {
+      isBundleFlag = true;
+    }
+  }
+  
   // Add to selected references
   const refObj = {
     reference: ref.reference || '',
     display: ref.display || ref.reference || '',
     rollCount: rollCount,
-    isBundle: ref.is_bundle || false,
-    bundleRefs: ref.bundle_refs || []
+    isBundle: isBundleFlag, // Use the determined bundle flag
+    bundleRefs: ref.bundle_refs || [],
+    // For bundles, quantities array stores per-roll values (always 36 per roll for bundles)
+    // For individual refs, quantities array stores per-roll values (actual remaining)
+    // Initialize with correct per-roll value
+    quantities: new Array(rollCount).fill(remainingQtyPerRoll),
+    // Initialize max quantities: bundles = 36 per roll, individual = actual remaining
+    maxQuantities: new Array(rollCount).fill(remainingQtyPerRoll)
   };
   
   window.selectedCNCReferences.push(refObj);
+  
+  // Fetch max cutting quantities from backend
+  fetchMaxCuttingQuantities(refObj);
   
   // Clear search
   const searchInput = document.getElementById('reference_search');
@@ -1723,6 +2126,13 @@ function selectCNCReferenceFromDropdown(ref) {
   // Update display
   updateSelectedCNCReferences();
   updateRollCountInfo();
+  
+  // Calculate total immediately (will be updated again after fetchMaxCuttingQuantities completes)
+  calculateTotalCuttingQuantity();
+  
+  // Don't call updateMaxCuttingQuantity immediately - wait for backend fetch to complete
+  // This prevents popup from showing with wrong max value (1) when adding reference
+  // The fetchMaxCuttingQuantities function will call updateMaxCuttingQuantity after it completes
   
   // Generate cutting batch when first reference is added (ONE batch per entry)
   // This batch number will be used for all references in this entry
@@ -1865,6 +2275,11 @@ function updateSelectedCNCReferences() {
   if (!window.selectedCNCReferences || window.selectedCNCReferences.length === 0) {
     container.innerHTML = '<small style="color:#999;">No references selected</small>';
     hiddenInput.value = '';
+    // Reset cutting quantity when no references
+    const cuttingQtyInput = document.getElementById('cutting_roll_quantity');
+    if (cuttingQtyInput) {
+      cuttingQtyInput.value = '';
+    }
     return;
   }
   
@@ -1875,9 +2290,55 @@ function updateSelectedCNCReferences() {
     if (!ref || !ref.reference) return;
     
     refList.push(ref.reference);
-    const isBundle = ref.isBundle || false;
+    // Determine if it's a bundle: check isBundle flag OR if rollCount > 1
+    // Also check display text for "to" pattern (bundle indicator)
+    let isBundle = ref.isBundle || false;
     const displayText = ref.display || ref.reference;
     const rollCount = ref.rollCount || 1;
+    
+    // If rollCount > 1, it's definitely a bundle (even if flag not set)
+    if (rollCount > 1) {
+      isBundle = true;
+    }
+    // Also check display text for bundle patterns
+    if (!isBundle && displayText) {
+      if (displayText.includes(' to ') || displayText.includes('[Bag]') || displayText.match(/-(\d+)\s+to\s+/)) {
+        isBundle = true;
+      }
+    }
+    
+    // Initialize quantities array if not exists
+    // For bundles and individual refs, initialize per-roll quantities
+    if (!ref.quantities || !Array.isArray(ref.quantities)) {
+      ref.quantities = new Array(rollCount).fill(DEFAULT_CUTTING_QUANTITY_PER_ROLL);
+    } else if (ref.quantities.length !== rollCount) {
+      // Adjust array size if roll count changed
+      const oldLength = ref.quantities.length;
+      const currentValues = ref.quantities.slice(0, rollCount);
+      ref.quantities = currentValues;
+      if (ref.quantities.length < rollCount) {
+        // For new rolls, use default value
+        ref.quantities.push(...new Array(rollCount - oldLength).fill(DEFAULT_CUTTING_QUANTITY_PER_ROLL));
+      }
+    } else {
+      // If all quantities are 0 (newly added reference), set to default
+      const allZero = ref.quantities.every(qty => qty === 0 || qty === null || qty === undefined);
+      if (allZero) {
+        ref.quantities = new Array(rollCount).fill(DEFAULT_CUTTING_QUANTITY_PER_ROLL);
+      }
+    }
+    
+    // Initialize maxQuantities array if not exists
+    if (!ref.maxQuantities || !Array.isArray(ref.maxQuantities)) {
+      ref.maxQuantities = new Array(rollCount).fill(36); // Default to 36, will be updated from backend
+    } else if (ref.maxQuantities.length !== rollCount) {
+      // Adjust array size if roll count changed
+      const oldLength = ref.maxQuantities.length;
+      ref.maxQuantities = ref.maxQuantities.slice(0, rollCount);
+      if (ref.maxQuantities.length < rollCount) {
+        ref.maxQuantities.push(...new Array(rollCount - oldLength).fill(36));
+      }
+    }
     
     // Don't show delete button for bundle references
     const deleteButton = isBundle 
@@ -1887,12 +2348,165 @@ function updateSelectedCNCReferences() {
     // Use different background color for bundle references
     const bgColor = isBundle ? '#e8f5e9' : '#e3f2fd';
     
+    // Build quantity inputs - check if auto mode is enabled
+    let quantityInputsHtml = '<div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-left:auto;">';
+    quantityInputsHtml += '<small style="color:#666; font-weight:600; white-space:nowrap;">Cutting Qty (pc):</small>';
+    
+    // If auto mode is enabled, show auto-calculated values (no inputs)
+    // HYBRID MODE: Use actual remaining if < 36 (previously used), otherwise 36 (new/unused)
+    if (window.autoQuantityMode === true) {
+      // Auto mode: Calculate using actual remaining quantities from backend
+      let autoTotal = 0;
+      const quantitiesArray = [];
+      
+      if (isBundle) {
+        // Bundle: Check each roll's actual remaining
+        for (let rollIndex = 0; rollIndex < rollCount; rollIndex++) {
+          let rollQty = 36; // Default for new/unused rolls
+          
+          // Get actual remaining from maxQuantities (fetched from backend)
+          if (ref.maxQuantities && Array.isArray(ref.maxQuantities) && ref.maxQuantities[rollIndex] !== undefined) {
+            const actualRemaining = parseInt(ref.maxQuantities[rollIndex]) || 0;
+            // If actual remaining is > 0 and < 36, use that (previously used roll)
+            // If actual remaining is >= 36, use 36 (full capacity)
+            if (actualRemaining > 0 && actualRemaining < 36) {
+              rollQty = actualRemaining; // Use actual remaining for previously used rolls
+            } else if (actualRemaining >= 36) {
+              rollQty = 36; // Full capacity available
+            }
+          }
+          
+          quantitiesArray.push(rollQty);
+          autoTotal += rollQty;
+        }
+        ref.quantities = quantitiesArray;
+      } else {
+        // Single roll: Use actual remaining if < 36, otherwise 36
+        let rollQty = 36; // Default for new/unused rolls
+        
+        // Get actual remaining from maxQuantities (fetched from backend)
+        if (ref.maxQuantities && Array.isArray(ref.maxQuantities) && ref.maxQuantities[0] !== undefined) {
+          const actualRemaining = parseInt(ref.maxQuantities[0]) || 0;
+          // If actual remaining is > 0 and < 36, use that (previously used roll)
+          // If actual remaining is >= 36, use 36 (full capacity)
+          if (actualRemaining > 0 && actualRemaining < 36) {
+            rollQty = actualRemaining; // Use actual remaining for previously used rolls
+          } else if (actualRemaining >= 36) {
+            rollQty = 36; // Full capacity available
+          }
+        }
+        
+        quantitiesArray.push(rollQty);
+        ref.quantities = quantitiesArray;
+        autoTotal = rollQty;
+      }
+      
+      // Build display text showing breakdown
+      let displayText = '';
+      if (isBundle && quantitiesArray.length > 1) {
+        const breakdown = quantitiesArray.map((qty, idx) => `R${idx + 1}:${qty}`).join(', ');
+        displayText = `${autoTotal} pc (${breakdown})`;
+      } else {
+        displayText = `${autoTotal} pc ${quantitiesArray[0] < 36 ? '(actual remaining)' : '(36 per roll)'}`;
+      }
+      
+      quantityInputsHtml += `
+        <div style="display:flex; flex-direction:column; gap:2px; min-width:120px;">
+          <label style="font-size:11px; color:#666; white-space:nowrap;">Auto: ${autoTotal} pc</label>
+          <div style="padding:6px; border:1px solid #28a745; border-radius:4px; background:#d4edda; color:#155724; font-size:13px; font-weight:600; text-align:center; min-width:100px;">
+            ${displayText}
+          </div>
+          <small style="font-size:9px; color:#28a745;">✓ Auto-calculated (hybrid mode)</small>
+        </div>
+      `;
+    } else if (isBundle) {
+      // For bundles: Single input with max = 36 * rollCount
+      const maxForBundle = 36 * rollCount;
+      // For bundles, use the sum of all quantities as the bundle total
+      let bundleTotal = 0;
+      if (ref.quantities && Array.isArray(ref.quantities)) {
+        bundleTotal = ref.quantities.reduce((sum, qty) => sum + (parseInt(qty) || 0), 0);
+      }
+      // If bundle total is 0, use default (36 * rollCount) and initialize quantities
+      if (bundleTotal === 0) {
+        bundleTotal = DEFAULT_CUTTING_QUANTITY_PER_ROLL * rollCount;
+        // Initialize quantities array with default per roll for bundle
+        if (!ref.quantities || !Array.isArray(ref.quantities)) {
+          ref.quantities = new Array(rollCount).fill(DEFAULT_CUTTING_QUANTITY_PER_ROLL);
+        } else {
+          // If quantities exist but sum is 0, set to default
+          ref.quantities = new Array(rollCount).fill(DEFAULT_CUTTING_QUANTITY_PER_ROLL);
+        }
+      }
+      
+      quantityInputsHtml += `
+        <div style="display:flex; flex-direction:column; gap:2px; min-width:120px;">
+          <label style="font-size:11px; color:#666; white-space:nowrap;">Total (${rollCount} rolls)</label>
+          <input type="number" 
+                 step="1" 
+                 min="0" 
+                 max="${maxForBundle}" 
+                 value="${bundleTotal}" 
+                 data-ref-index="${index}" 
+                 data-is-bundle="true"
+                 data-roll-count="${rollCount}"
+                 data-max-quantity="${maxForBundle}"
+                 oninput="checkBundleQuantityInput(${index}, this)"
+                 onchange="updateBundleQuantity(${index}, this.value)"
+                 onblur="updateBundleQuantity(${index}, this.value)"
+                 onkeydown="if(event.key === 'Enter') { event.preventDefault(); updateBundleQuantity(${index}, this.value); return false; }"
+                 placeholder="0"
+                 style="padding:6px; border:1px solid #ccc; border-radius:4px; width:100%; font-size:13px; min-width:100px;">
+          <small style="font-size:9px; color:#999;">Max: ${maxForBundle} pc (36 × ${rollCount} rolls)</small>
+        </div>
+      `;
+    } else {
+      // For individual references: Show per-roll inputs
+      for (let rollIndex = 0; rollIndex < rollCount; rollIndex++) {
+        // Use backend-calculated max (actual remaining quantity)
+        const maxPerRoll = (ref.maxQuantities && ref.maxQuantities[rollIndex] !== undefined) 
+          ? ref.maxQuantities[rollIndex] 
+          : 36;
+        
+        // Use default value if quantity is 0 or not set, but don't exceed max
+        let quantityValue = ref.quantities[rollIndex];
+        if (!quantityValue || quantityValue === 0 || quantityValue > maxPerRoll) {
+          // Set to actual remaining (maxPerRoll), not hardcoded 36
+          quantityValue = Math.min(maxPerRoll, DEFAULT_CUTTING_QUANTITY_PER_ROLL);
+          ref.quantities[rollIndex] = quantityValue;
+        }
+        quantityInputsHtml += `
+          <div style="display:flex; flex-direction:column; gap:2px; min-width:100px;">
+            <label style="font-size:11px; color:#666; white-space:nowrap;">Roll ${rollIndex + 1}</label>
+            <input type="number" 
+                   step="1" 
+                   min="0" 
+                   max="${maxPerRoll}" 
+                   value="${quantityValue}" 
+                   data-ref-index="${index}" 
+                   data-roll-index="${rollIndex}"
+                   data-max-quantity="${maxPerRoll}"
+                   oninput="checkQuantityInput(${index}, ${rollIndex}, this)"
+                   onchange="updateRollQuantity(${index}, ${rollIndex}, this.value)"
+                   onblur="updateRollQuantity(${index}, ${rollIndex}, this.value)"
+                   onkeydown="if(event.key === 'Enter') { event.preventDefault(); updateRollQuantity(${index}, ${rollIndex}, this.value); return false; }"
+                   placeholder="0"
+                   style="padding:6px; border:1px solid #ccc; border-radius:4px; width:100%; font-size:13px; min-width:80px;">
+            <small style="font-size:9px; color:#999;">Max: ${maxPerRoll} pc</small>
+          </div>
+        `;
+      }
+    }
+    
+    quantityInputsHtml += '</div>';
+    
     html += `<div style="background:${bgColor}; padding:10px; border-radius:8px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
       <div style="flex:1; min-width:200px;">
         <strong>${escapeHtml(displayText)}</strong>
         ${isBundle ? '<span style="background:#4caf50; color:#fff; padding:2px 6px; border-radius:3px; font-size:10px; margin-left:5px;">BUNDLE</span>' : ''}
         <br><small style="color:#666;">Rolls: ${rollCount}</small>
       </div>
+      ${quantityInputsHtml}
       ${deleteButton}
     </div>`;
   });
@@ -1901,9 +2515,611 @@ function updateSelectedCNCReferences() {
   container.innerHTML = html;
   
   // Store references as comma-separated list (for backward compatibility)
+  // Support up to 100 references - ensure no truncation
   const refListStr = refList.join(',');
+  if (hiddenInput) {
   hiddenInput.value = refListStr;
+    // Debug: Log to console to verify all references are included
+    console.log('Storing references:', refList.length, 'references');
+    console.log('Reference string length:', refListStr.length);
+    console.log('References:', refList);
+  }
+  
+  // Calculate and update total
+  calculateTotalCuttingQuantity();
 }
+
+// Fetch max cutting quantities from backend for a reference
+function fetchMaxCuttingQuantities(refObj) {
+  const reference = refObj.reference;
+  if (!reference) return;
+  
+  fetch(`api/get_max_cutting_quantity.php?reference=${encodeURIComponent(reference)}`)
+    .then(response => response.json())
+    .then(data => {
+      if (data.success && data.max_quantities && Array.isArray(data.max_quantities)) {
+        // Find the reference object in selectedCNCReferences
+        const refIndex = window.selectedCNCReferences.findIndex(r => r.reference === reference);
+        if (refIndex >= 0) {
+          const ref = window.selectedCNCReferences[refIndex];
+          
+          // Update max quantities for each roll AND default quantities
+          data.max_quantities.forEach((maxQty, index) => {
+            if (index < ref.maxQuantities.length) {
+              let actualMax = maxQty.max_quantity || 36;
+              
+              // CRITICAL: For bundles, ALWAYS use 36 per roll (each roll in bundle can have 36)
+              if (ref.isBundle && ref.rollCount > 1) {
+                actualMax = 36; // Bundles always have 36 per roll
+              } else if (actualMax <= 1) {
+                // For individual rolls, if max is 0 or 1, check if it's truly used
+                // If remaining_quantity from display shows more, use that
+                const displayMatch = ref.display.match(/\(Remaining:\s*(\d+)\s*pc\)/i);
+                if (displayMatch && displayMatch[1]) {
+                  const displayRemaining = parseInt(displayMatch[1]);
+                  if (displayRemaining > actualMax) {
+                    actualMax = Math.min(displayRemaining, 36);
+                  }
+                }
+                // If still 0 or 1, use default 36 (assume calculation error)
+                if (actualMax <= 1) {
+                  actualMax = 36;
+                }
+              }
+              
+              // Update max quantity
+              ref.maxQuantities[index] = actualMax;
+              // Also update default quantity to match actual remaining (but don't exceed max)
+              if (!ref.quantities[index] || ref.quantities[index] > actualMax) {
+                ref.quantities[index] = Math.min(actualMax, DEFAULT_CUTTING_QUANTITY_PER_ROLL);
+              }
+              
+              // Update the input field's max attribute and data attribute
+              const inputField = document.querySelector(`input[data-ref-index="${refIndex}"][data-roll-index="${index}"]`);
+              if (inputField) {
+                inputField.setAttribute('max', actualMax);
+                inputField.setAttribute('data-max-quantity', actualMax);
+                // Update the small text showing max
+                const maxText = inputField.parentElement.querySelector('small');
+                if (maxText) {
+                  maxText.textContent = `Max: ${actualMax} pc`;
+                }
+              }
+            }
+          });
+          
+          // Update the display to show new max values
+          updateSelectedCNCReferences();
+          
+          // Recalculate total cutting quantity with updated maxQuantities
+          calculateTotalCuttingQuantity();
+          
+          // Also update max cutting quantity to reflect new values
+          // Use setTimeout to ensure DOM is updated first
+          setTimeout(() => {
+            if (typeof updateMaxCuttingQuantity === 'function') {
+              updateMaxCuttingQuantity();
+            }
+          }, 100);
+        }
+      }
+    })
+    .catch(error => {
+      console.error('Error fetching max cutting quantities:', error);
+      // Keep default max of 36 if fetch fails
+    });
+}
+
+// Check quantity input in real-time and show popup if exceeds max
+function checkQuantityInput(refIndex, rollIndex, inputElement) {
+  if (!window.selectedCNCReferences || refIndex < 0 || refIndex >= window.selectedCNCReferences.length) {
+    return;
+  }
+  
+  const ref = window.selectedCNCReferences[refIndex];
+  if (!ref) return;
+  
+  // Ensure maxQuantities array exists
+  if (!ref.maxQuantities || !Array.isArray(ref.maxQuantities)) {
+    ref.maxQuantities = new Array(ref.rollCount || 1).fill(36);
+  }
+  
+  // Get current value from input
+  let quantityNum = parseInt(inputElement.value);
+  if (isNaN(quantityNum) || quantityNum < 0) {
+    return; // Don't show popup for invalid/empty values
+  }
+  
+  // Get backend-calculated max quantity for this roll
+  // Use the actual remaining quantity from maxQuantities (which should be updated from backend)
+  let maxPerRoll = ref.maxQuantities[rollIndex];
+  
+  // If maxQuantities[rollIndex] is undefined, null, or still 36, try to get from input's data attribute
+  if (!maxPerRoll || maxPerRoll === 36) {
+    const inputMax = inputElement.getAttribute('data-max-quantity');
+    if (inputMax) {
+      maxPerRoll = parseInt(inputMax);
+    }
+  }
+  
+  // Final fallback to 36 if still not set
+  if (!maxPerRoll || isNaN(maxPerRoll)) {
+    maxPerRoll = 36;
+  }
+  
+  // Show popup immediately if value exceeds max (but don't clamp yet - let user finish typing)
+  if (quantityNum > maxPerRoll) {
+    const refDisplay = ref.display || ref.reference;
+    const message = `${refDisplay} - Roll ${rollIndex + 1}<br><br><strong>You entered:</strong> ${quantityNum} pieces<br><strong>Maximum allowed:</strong> ${maxPerRoll} pieces`;
+    showWarningPopup(message, true);
+    
+    // Highlight the input field to indicate error
+    inputElement.style.borderColor = '#e74c3c';
+    inputElement.style.borderWidth = '2px';
+  } else {
+    // Reset border if value is valid
+    inputElement.style.borderColor = '#ccc';
+    inputElement.style.borderWidth = '1px';
+  }
+}
+
+// Update quantity for a specific roll in a reference
+function updateRollQuantity(refIndex, rollIndex, quantity) {
+  if (!window.selectedCNCReferences || refIndex < 0 || refIndex >= window.selectedCNCReferences.length) {
+    return;
+  }
+  
+  const ref = window.selectedCNCReferences[refIndex];
+  if (!ref) return;
+  
+  // Ensure quantities array exists
+  if (!ref.quantities || !Array.isArray(ref.quantities)) {
+    ref.quantities = new Array(ref.rollCount || 1).fill(DEFAULT_CUTTING_QUANTITY_PER_ROLL);
+  }
+  
+  // Ensure maxQuantities array exists
+  if (!ref.maxQuantities || !Array.isArray(ref.maxQuantities)) {
+    ref.maxQuantities = new Array(ref.rollCount || 1).fill(36);
+  }
+  
+  // Get the input element to check current value
+  const input = document.querySelector(`input[data-ref-index="${refIndex}"][data-roll-index="${rollIndex}"]`);
+  if (!input) return;
+  
+  // Get the actual current value from the input field (more reliable than parameter)
+  let quantityNum = parseInt(input.value);
+  
+  // If quantity is empty or invalid, use 0
+  if (isNaN(quantityNum) || quantityNum < 0) {
+    quantityNum = 0;
+  }
+  
+  // Get backend-calculated max quantity for this roll
+  // First try from ref.maxQuantities, then from input's data attribute, then fallback to 36
+  let maxPerRoll = ref.maxQuantities[rollIndex];
+  
+  // If maxQuantities[rollIndex] is undefined, null, or still 36, try to get from input's data attribute
+  if (!maxPerRoll || maxPerRoll === 36) {
+    const inputMax = input.getAttribute('data-max-quantity');
+    if (inputMax) {
+      maxPerRoll = parseInt(inputMax);
+    }
+  }
+  
+  // Also check the input's max attribute
+  if (!maxPerRoll || maxPerRoll === 36 || isNaN(maxPerRoll)) {
+    const inputMaxAttr = input.getAttribute('max');
+    if (inputMaxAttr) {
+      const parsedMax = parseInt(inputMaxAttr);
+      if (!isNaN(parsedMax) && parsedMax !== 36) {
+        maxPerRoll = parsedMax;
+      }
+    }
+  }
+  
+  // Final fallback to 36 if still not set
+  if (!maxPerRoll || isNaN(maxPerRoll)) {
+    maxPerRoll = 36;
+  }
+  
+  let validQuantity = quantityNum;
+  let showPopup = false;
+  
+  // Check if quantity exceeds backend-calculated maximum
+  if (quantityNum > maxPerRoll) {
+    validQuantity = maxPerRoll;
+    showPopup = true;
+    
+    // Update input to show clamped value
+    if (input.value != validQuantity) {
+      input.value = validQuantity;
+    }
+    
+    // Reset border style after clamping
+    input.style.borderColor = '#ccc';
+    input.style.borderWidth = '1px';
+  } else {
+    // Reset border if value is valid
+    input.style.borderColor = '#ccc';
+    input.style.borderWidth = '1px';
+  }
+  
+  // Always update the quantity in the reference object (store the valid quantity)
+  ref.quantities[rollIndex] = validQuantity;
+  
+  // Recalculate total (always update, even if quantity was clamped)
+  calculateTotalCuttingQuantity();
+  updateSummary();
+  
+  // Show popup after updating (so total is already calculated)
+  if (showPopup) {
+    const refDisplay = ref.display || ref.reference;
+    const message = `${refDisplay} - Roll ${rollIndex + 1}<br><br><strong>You entered:</strong> ${quantityNum} pieces<br><strong>Maximum allowed:</strong> ${maxPerRoll} pieces`;
+    showWarningPopup(message, true);
+  }
+}
+
+// Calculate total cutting quantity from all rolls
+function calculateTotalCuttingQuantity() {
+  // If auto mode is enabled, calculate from selected references automatically
+  // HYBRID MODE: Use actual remaining if < 36 (previously used), otherwise 36 (new/unused)
+  if (window.autoQuantityMode === true) {
+    let totalQuantity = 0;
+    const referenceQuantities = {}; // Store per-reference quantities for auto mode
+    
+    if (window.selectedCNCReferences && Array.isArray(window.selectedCNCReferences)) {
+      console.log('Auto mode - Calculating total from', window.selectedCNCReferences.length, 'references');
+      
+      window.selectedCNCReferences.forEach((ref, refIndex) => {
+        const rollCount = ref.rollCount || 1;
+        let refTotal = 0;
+        
+        console.log(`Ref ${refIndex + 1}: ${ref.reference || ref.display}, isBundle: ${ref.isBundle}, rollCount: ${rollCount}`);
+        console.log(`  - ref.quantities:`, ref.quantities);
+        console.log(`  - ref.maxQuantities:`, ref.maxQuantities);
+        console.log(`  - ref.bundleRefs:`, ref.bundleRefs);
+        console.log(`  - Will calculate for ${rollCount} roll(s)`);
+        
+        // Build reference_quantities JSON for auto mode using actual remaining quantities
+        // PREFER maxQuantities (source of truth from backend), then ref.quantities, then default
+        if (ref.isBundle && rollCount > 1) {
+          // For bundles, iterate through ALL rolls based on rollCount
+          // Use rollCount as the source of truth for how many rolls to calculate
+          for (let rollIndex = 0; rollIndex < rollCount; rollIndex++) {
+            let rollQty = 36; // Default for new/unused rolls
+            const bundleRef = (ref.bundleRefs && Array.isArray(ref.bundleRefs) && ref.bundleRefs[rollIndex]) 
+                              ? ref.bundleRefs[rollIndex] 
+                              : `${ref.reference}-${rollIndex + 1}`;
+            
+            // PRIORITY 1: Get actual remaining from maxQuantities (fetched from backend - source of truth)
+            if (ref.maxQuantities && Array.isArray(ref.maxQuantities) && ref.maxQuantities[rollIndex] !== undefined) {
+              const actualRemaining = parseInt(ref.maxQuantities[rollIndex]) || 0;
+              // If actual remaining is > 0 and < 36, use that (previously used roll)
+              // If actual remaining is >= 36, use 36 (full capacity)
+              if (actualRemaining > 0 && actualRemaining < 36) {
+                rollQty = actualRemaining; // Use actual remaining for previously used rolls
+              } else if (actualRemaining >= 36) {
+                rollQty = 36; // Full capacity available
+              }
+              console.log(`    Bundle roll ${rollIndex + 1}/${rollCount} (${bundleRef}): Using maxQuantities[${rollIndex}] = ${actualRemaining}, final = ${rollQty}`);
+            }
+            // PRIORITY 2: Fall back to ref.quantities if maxQuantities not available
+            else if (ref.quantities && Array.isArray(ref.quantities) && ref.quantities[rollIndex] !== undefined) {
+              rollQty = parseInt(ref.quantities[rollIndex]) || 36;
+              console.log(`    Bundle roll ${rollIndex + 1}/${rollCount} (${bundleRef}): Using ref.quantities[${rollIndex}] = ${rollQty} (fallback)`);
+            } else {
+              console.log(`    Bundle roll ${rollIndex + 1}/${rollCount} (${bundleRef}): Using default = ${rollQty}`);
+            }
+            
+            // Store quantity for this roll (use bundleRef if available, otherwise use index-based key)
+            if (ref.bundleRefs && Array.isArray(ref.bundleRefs) && ref.bundleRefs[rollIndex]) {
+              referenceQuantities[ref.bundleRefs[rollIndex]] = rollQty;
+            } else {
+              // Fallback: use reference with index if bundleRefs not available
+              referenceQuantities[`${ref.reference}-${rollIndex + 1}`] = rollQty;
+            }
+            refTotal += rollQty;
+          }
+          console.log(`  Bundle total (${rollCount} rolls): ${refTotal}`);
+        } else {
+          // Single roll: Use actual remaining if < 36, otherwise 36
+          let rollQty = 36; // Default for new/unused rolls
+          
+          // PRIORITY 1: Get actual remaining from maxQuantities (fetched from backend - source of truth)
+          if (ref.maxQuantities && Array.isArray(ref.maxQuantities) && ref.maxQuantities[0] !== undefined) {
+            const actualRemaining = parseInt(ref.maxQuantities[0]) || 0;
+            // If actual remaining is > 0 and < 36, use that (previously used roll)
+            // If actual remaining is >= 36, use 36 (full capacity)
+            if (actualRemaining > 0 && actualRemaining < 36) {
+              rollQty = actualRemaining; // Use actual remaining for previously used rolls
+            } else if (actualRemaining >= 36) {
+              rollQty = 36; // Full capacity available
+            }
+            console.log(`  Single roll: Using maxQuantities[0] = ${actualRemaining}, final = ${rollQty}`);
+          }
+          // PRIORITY 2: Fall back to ref.quantities if maxQuantities not available
+          else if (ref.quantities && Array.isArray(ref.quantities) && ref.quantities[0] !== undefined) {
+            rollQty = parseInt(ref.quantities[0]) || 36;
+            console.log(`  Single roll: Using ref.quantities[0] = ${rollQty} (fallback)`);
+          } else {
+            console.log(`  Single roll: Using default = ${rollQty}`);
+          }
+          
+          referenceQuantities[ref.reference] = rollQty;
+          refTotal = rollQty;
+          console.log(`  Single roll total: ${refTotal}`);
+        }
+        
+        totalQuantity += refTotal;
+        console.log(`  Running total: ${totalQuantity}`);
+      });
+      
+      console.log('Auto mode - Final totalQuantity:', totalQuantity);
+    }
+    
+    // Update the total cutting quantity input
+    const cuttingQtyInput = document.getElementById('cutting_roll_quantity');
+    const refQuantitiesInput = document.getElementById('reference_quantities');
+    
+    console.log('Auto mode - Setting cutting_roll_quantity to:', totalQuantity);
+    
+    if (cuttingQtyInput) {
+      cuttingQtyInput.value = totalQuantity;
+      cuttingQtyInput.readOnly = true; // Make it read-only in auto mode
+      cuttingQtyInput.style.background = '#e8f5e9';
+      cuttingQtyInput.style.cursor = 'not-allowed';
+      
+      // Verify it was set correctly
+      console.log('Auto mode - cutting_roll_quantity value after setting:', cuttingQtyInput.value);
+      
+      // Force update by triggering input event
+      cuttingQtyInput.dispatchEvent(new Event('input', { bubbles: true }));
+    } else {
+      console.error('Auto mode - cutting_roll_quantity input not found!');
+    }
+    
+    // CRITICAL: Populate reference_quantities in auto mode
+    if (refQuantitiesInput) {
+      try {
+        const jsonString = JSON.stringify(referenceQuantities);
+        refQuantitiesInput.value = jsonString;
+        
+        // Debug: Log to verify all references are included
+        const refCount = Object.keys(referenceQuantities).length;
+        console.log('Auto mode - Storing reference_quantities:', refCount, 'references with quantities');
+        console.log('Auto mode - JSON string length:', jsonString.length);
+        console.log('Auto mode - Reference quantities object:', referenceQuantities);
+        console.log('Auto mode - JSON string:', jsonString);
+        
+        // Verify it's valid JSON
+        const testParse = JSON.parse(jsonString);
+        if (Object.keys(testParse).length !== refCount) {
+          console.error('WARNING: JSON parse lost some references in auto mode!');
+        }
+      } catch (e) {
+        console.error('Error stringifying reference quantities in auto mode:', e);
+        console.error('Reference quantities object:', referenceQuantities);
+        refQuantitiesInput.value = '';
+      }
+    }
+    
+    // Update the display text
+    const totalDisplay = document.getElementById('total_cutting_quantity_display');
+    if (totalDisplay) {
+      totalDisplay.textContent = `${totalQuantity} pieces (Auto-calculated: 36 per roll)`;
+    }
+    
+    return;
+  }
+  
+  // Manual mode: Calculate from user inputs
+  if (!window.selectedCNCReferences || window.selectedCNCReferences.length === 0) {
+    const cuttingQtyInput = document.getElementById('cutting_roll_quantity');
+    const refQuantitiesInput = document.getElementById('reference_quantities');
+    if (cuttingQtyInput) {
+      cuttingQtyInput.value = '';
+    }
+    if (refQuantitiesInput) {
+      refQuantitiesInput.value = '';
+    }
+    return;
+  }
+  
+  let total = 0;
+  const referenceQuantities = {}; // Store per-reference quantities
+  
+  window.selectedCNCReferences.forEach((ref) => {
+    if (ref.quantities && Array.isArray(ref.quantities)) {
+      // For bundles, the quantity is stored as a single total value
+      if (ref.isBundle && ref.bundleRefs && Array.isArray(ref.bundleRefs) && ref.bundleRefs.length > 0) {
+        // For bundles, sum all quantities to get total bundle quantity
+        const bundleTotal = ref.quantities.reduce((sum, qty) => sum + (parseInt(qty) || 0), 0);
+        total += bundleTotal;
+        
+        // Distribute bundle total evenly across all rolls in the bundle
+        // Each roll gets bundleTotal / rollCount (rounded)
+        if (bundleTotal > 0) {
+          const qtyPerRoll = Math.floor(bundleTotal / ref.bundleRefs.length);
+          const remainder = bundleTotal % ref.bundleRefs.length;
+          
+          ref.bundleRefs.forEach((bundleRef, rollIndex) => {
+            // Distribute evenly, with remainder going to first rolls
+            const rollQty = qtyPerRoll + (rollIndex < remainder ? 1 : 0);
+            if (!referenceQuantities[bundleRef]) {
+              referenceQuantities[bundleRef] = 0;
+            }
+            referenceQuantities[bundleRef] += rollQty;
+          });
+        }
+      } else {
+        // For individual references, sum all roll quantities
+        let refTotal = 0;
+        ref.quantities.forEach((qty) => {
+          const qtyNum = parseInt(qty) || 0;
+          total += qtyNum;
+          refTotal += qtyNum;
+        });
+        if (refTotal > 0) {
+          referenceQuantities[ref.reference] = refTotal;
+        }
+      }
+    }
+  });
+  
+  // Update cutting roll quantity input field (auto-calculated)
+  const cuttingQtyInput = document.getElementById('cutting_roll_quantity');
+  const refQuantitiesInput = document.getElementById('reference_quantities');
+  
+  if (cuttingQtyInput) {
+    cuttingQtyInput.value = total;
+    // Trigger validation
+    if (typeof validateCuttingQuantity === 'function') {
+      try {
+        validateCuttingQuantity();
+      } catch (e) {
+        console.error('Error in validateCuttingQuantity:', e);
+      }
+    }
+  }
+  
+  if (refQuantitiesInput) {
+    try {
+      const jsonString = JSON.stringify(referenceQuantities);
+      refQuantitiesInput.value = jsonString;
+      
+      // Debug: Log to verify all references are included
+      const refCount = Object.keys(referenceQuantities).length;
+      console.log('Manual mode - Storing reference_quantities:', refCount, 'references with quantities');
+      console.log('Manual mode - JSON string length:', jsonString.length);
+      console.log('Manual mode - Reference quantities object:', referenceQuantities);
+      console.log('Manual mode - JSON string:', jsonString);
+      
+      // Verify it's valid JSON
+      const testParse = JSON.parse(jsonString);
+      if (Object.keys(testParse).length !== refCount) {
+        console.error('WARNING: JSON parse lost some references!');
+      }
+    } catch (e) {
+      console.error('Error stringifying reference quantities:', e);
+      console.error('Reference quantities object:', referenceQuantities);
+      refQuantitiesInput.value = '';
+    }
+  }
+  
+  // Update summary
+  if (typeof updateSummary === 'function') {
+    try {
+      updateSummary();
+    } catch (e) {
+      console.error('Error in updateSummary:', e);
+    }
+  }
+}
+
+// Check bundle quantity input in real-time and show popup if exceeds max
+function checkBundleQuantityInput(refIndex, inputElement) {
+  if (!window.selectedCNCReferences || refIndex < 0 || refIndex >= window.selectedCNCReferences.length) {
+    return;
+  }
+  
+  const ref = window.selectedCNCReferences[refIndex];
+  if (!ref || !ref.isBundle) return;
+  
+  // Get current value from input
+  let quantityNum = parseInt(inputElement.value);
+  if (isNaN(quantityNum) || quantityNum < 0) {
+    return; // Don't show popup for invalid/empty values
+  }
+  
+  // Max for bundle = 36 * rollCount
+  const maxForBundle = 36 * (ref.rollCount || 1);
+  
+  // Show popup immediately if value exceeds max
+  if (quantityNum > maxForBundle) {
+    const refDisplay = ref.display || ref.reference;
+    const message = `${refDisplay}<br><br><strong>You entered:</strong> ${quantityNum} pieces<br><strong>Maximum allowed:</strong> ${maxForBundle} pieces (36 × ${ref.rollCount} rolls)`;
+    showWarningPopup(message, true);
+    
+    // Highlight the input field to indicate error
+    inputElement.style.borderColor = '#e74c3c';
+    inputElement.style.borderWidth = '2px';
+  } else {
+    // Reset border if value is valid
+    inputElement.style.borderColor = '#ccc';
+    inputElement.style.borderWidth = '1px';
+  }
+}
+
+// Update quantity for a bundle (single total input)
+function updateBundleQuantity(refIndex, quantity) {
+  if (!window.selectedCNCReferences || refIndex < 0 || refIndex >= window.selectedCNCReferences.length) {
+    return;
+  }
+  
+  const ref = window.selectedCNCReferences[refIndex];
+  if (!ref || !ref.isBundle) return;
+  
+  // Get the input element
+  const input = document.querySelector(`input[data-ref-index="${refIndex}"][data-is-bundle="true"]`);
+  if (!input) return;
+  
+  let quantityNum = parseInt(quantity);
+  if (isNaN(quantityNum) || quantityNum < 0) {
+    quantityNum = 0;
+  }
+  
+  // Max for bundle = 36 * rollCount
+  const maxForBundle = 36 * (ref.rollCount || 1);
+  let validQuantity = quantityNum;
+  let showPopup = false;
+  
+  // Check if quantity exceeds max
+  if (quantityNum > maxForBundle) {
+    validQuantity = maxForBundle;
+    showPopup = true;
+    if (input.value != validQuantity) {
+      input.value = validQuantity;
+    }
+    input.style.borderColor = '#ccc';
+    input.style.borderWidth = '1px';
+  } else {
+    input.style.borderColor = '#ccc';
+    input.style.borderWidth = '1px';
+  }
+  
+  // For bundles, distribute the total quantity evenly across all rolls
+  // Store the total in quantities array (sum of all rolls)
+  if (!ref.quantities || !Array.isArray(ref.quantities)) {
+    ref.quantities = new Array(ref.rollCount || 1).fill(0);
+  }
+  
+  // Distribute evenly: each roll gets validQuantity / rollCount
+  const qtyPerRoll = Math.floor(validQuantity / ref.rollCount);
+  const remainder = validQuantity % ref.rollCount;
+  
+  for (let i = 0; i < ref.rollCount; i++) {
+    // Distribute evenly, with remainder going to first rolls
+    ref.quantities[i] = qtyPerRoll + (i < remainder ? 1 : 0);
+  }
+  
+  // Update total and summary
+  calculateTotalCuttingQuantity();
+  updateSummary();
+  
+  // Show popup if exceeded max
+  if (showPopup) {
+    const refDisplay = ref.display || ref.reference;
+    const message = `${refDisplay}<br><br><strong>You entered:</strong> ${quantityNum} pieces<br><strong>Maximum allowed:</strong> ${maxForBundle} pieces (36 × ${ref.rollCount} rolls)`;
+    showWarningPopup(message, true);
+  }
+}
+
+// Make functions globally available
+window.checkQuantityInput = checkQuantityInput;
+window.updateRollQuantity = updateRollQuantity;
+window.checkBundleQuantityInput = checkBundleQuantityInput;
+window.updateBundleQuantity = updateBundleQuantity;
+window.calculateTotalCuttingQuantity = calculateTotalCuttingQuantity;
 
 function removeCNCReferenceByIndex(index) {
   if (!window.selectedCNCReferences || index < 0 || index >= window.selectedCNCReferences.length) {
@@ -1913,6 +3129,7 @@ function removeCNCReferenceByIndex(index) {
   window.selectedCNCReferences.splice(index, 1);
   updateSelectedCNCReferences();
   updateRollCountInfo();
+  updateMaxCuttingQuantity(); // Update max cutting quantity when rolls are removed
   
   // Keep the same batch number even if references are removed
   // ONE batch number per entry (for all 4 rolls in CNC-01/02 or all 100 rolls in Custom)
@@ -1938,15 +3155,201 @@ function updateRollCountInfo() {
   } else {
     infoElement.textContent = '';
   }
+  
+  // Update maximum cutting quantity based on selected rolls
+  updateMaxCuttingQuantity();
 }
 
-// Update selectCNCMachine to also update roll count info
-const originalSelectCNCMachine = selectCNCMachine;
-selectCNCMachine = function(btn, groupId) {
-  originalSelectCNCMachine(btn, groupId);
-  updateRollCountInfo();
-  filterCNCReferences(); // Re-filter to update available references
-};
+// Calculate and update maximum cutting quantity based on selected rolls
+// Formula: 1 roll = 36 pieces, so total_rolls * 36 = max cutting quantity
+function updateMaxCuttingQuantity() {
+  const cuttingQuantityInput = document.getElementById('cutting_roll_quantity');
+  const maxInfoElement = document.getElementById('max_cutting_quantity_info');
+  const warningElement = document.getElementById('cutting_quantity_warning');
+  
+  if (!cuttingQuantityInput) return;
+  
+  const currentRollCount = getCurrentTotalRollCount();
+  
+  if (currentRollCount > 0) {
+    // Calculate max cutting quantity from actual remaining quantities of all selected references
+    // Sum up the max quantities from each reference's rolls
+    let maxCuttingQuantity = 0;
+    if (window.selectedCNCReferences && Array.isArray(window.selectedCNCReferences)) {
+      window.selectedCNCReferences.forEach(ref => {
+        // For bundles, ALWAYS use rollCount * 36 (each roll can have 36 pieces)
+        if (ref.isBundle && ref.rollCount > 1) {
+          const bundleMax = ref.rollCount * 36;
+          maxCuttingQuantity += bundleMax;
+        } else if (ref.maxQuantities && Array.isArray(ref.maxQuantities)) {
+          // For individual rolls, sum all max quantities
+          let refMax = ref.maxQuantities.reduce((sum, maxQty) => {
+            const qty = parseInt(maxQty) || 0;
+            // CRITICAL: Ensure each roll's max is never 0 or 1 (unless truly fully used)
+            // If qty is 0 or 1, it's likely a calculation error - use 36 per roll
+            if (qty <= 1) {
+              return sum + 36; // Use default 36 per roll
+            }
+            return sum + qty;
+          }, 0);
+          
+          // Ensure single roll has at least 36 if not fully used
+          if (ref.rollCount === 1 && refMax <= 1) {
+            refMax = 36;
+          }
+          
+          maxCuttingQuantity += refMax;
+        } else {
+          // Fallback: if maxQuantities not available, use default 36 per roll
+          maxCuttingQuantity += (ref.rollCount || 1) * 36;
+        }
+      });
+    }
+    
+    // CRITICAL: Ensure maxCuttingQuantity is ALWAYS at least 36 * rollCount
+    // This prevents the popup from showing "1 pieces" or "0 pieces per roll"
+    const minimumExpected = currentRollCount * 36;
+    if (maxCuttingQuantity < minimumExpected || maxCuttingQuantity <= 1) {
+      maxCuttingQuantity = minimumExpected;
+    }
+    
+    // Set max attribute on input
+    cuttingQuantityInput.max = maxCuttingQuantity;
+    
+    // Update help text
+    if (maxInfoElement) {
+      const perRollAvg = currentRollCount > 0 ? Math.floor(maxCuttingQuantity / currentRollCount) : 36;
+      maxInfoElement.textContent = `Maximum cutting quantity: ${maxCuttingQuantity} pieces (${currentRollCount} roll(s) × ${perRollAvg} pieces per roll)`;
+      maxInfoElement.style.display = 'block';
+    }
+    
+    // Validate current value if it exceeds max
+    const currentValue = parseInt(cuttingQuantityInput.value) || 0;
+    if (currentValue > maxCuttingQuantity) {
+      cuttingQuantityInput.value = maxCuttingQuantity;
+      if (warningElement) {
+        warningElement.textContent = `⚠️ Quantity adjusted to maximum: ${maxCuttingQuantity} pieces`;
+        warningElement.style.display = 'block';
+      }
+    } else {
+      if (warningElement) {
+        warningElement.style.display = 'none';
+      }
+    }
+  } else {
+    // No rolls selected - reset to default
+    cuttingQuantityInput.max = 1;
+    if (maxInfoElement) {
+      maxInfoElement.textContent = '';
+      maxInfoElement.style.display = 'none';
+    }
+    if (warningElement) {
+      warningElement.style.display = 'none';
+    }
+  }
+}
+
+// Validate cutting quantity input
+let lastPopupValue = null; // Track last value that triggered popup to avoid repeated popups
+
+function validateCuttingQuantity() {
+  const cuttingQuantityInput = document.getElementById('cutting_roll_quantity');
+  const warningElement = document.getElementById('cutting_quantity_warning');
+  
+  if (!cuttingQuantityInput) return;
+  
+  const currentValue = parseInt(cuttingQuantityInput.value) || 0;
+  let maxValue = parseInt(cuttingQuantityInput.max) || 1;
+  const currentRollCount = getCurrentTotalRollCount();
+  
+  // CRITICAL: If maxValue is 0 or 1 and we have rolls, it's wrong - fix it
+  if (currentRollCount > 0 && (maxValue <= 1 || maxValue < currentRollCount)) {
+    maxValue = currentRollCount * 36;
+    cuttingQuantityInput.max = maxValue;
+  }
+  
+  if (currentRollCount > 0) {
+    if (currentValue > maxValue) {
+      // Show warning text
+      if (warningElement) {
+        warningElement.textContent = `⚠️ Maximum cutting quantity is ${maxValue} pieces (${currentRollCount} roll(s) × 36 pieces per roll)`;
+        warningElement.style.display = 'block';
+      }
+      cuttingQuantityInput.setCustomValidity(`Maximum cutting quantity is ${maxValue} pieces`);
+      cuttingQuantityInput.style.borderColor = '#e74c3c';
+      
+      // Show modern popup notification (only once per value to avoid spam)
+      if (currentValue !== lastPopupValue && typeof showWarningPopup === 'function') {
+        lastPopupValue = currentValue;
+        // Format message with HTML for better readability
+        // Calculate actual per-roll max (may not be 36 if remaining is less)
+        const perRollMax = currentRollCount > 0 ? Math.floor(maxValue / currentRollCount) : 36;
+        const message = `Maximum cutting quantity exceeded!<br><br><strong>You entered:</strong> ${currentValue} pieces<br><strong>Maximum allowed:</strong> ${maxValue} pieces<br><br><small>Calculation: ${currentRollCount} roll(s) × ${perRollMax} pieces per roll = ${maxValue} pieces</small>`;
+        showWarningPopup(message, true); // true = use HTML
+        
+        // Auto-close popup after 5 seconds if user doesn't close it manually
+        setTimeout(function() {
+          if (typeof closeWarningPopup === 'function') {
+            closeWarningPopup();
+          }
+        }, 5000);
+      }
+      
+      return false;
+    } else {
+      // Reset popup tracking when value is valid
+      lastPopupValue = null;
+      
+      // Close popup if it's open (user corrected the value)
+      if (typeof closeWarningPopup === 'function') {
+        const popup = document.getElementById('warningPopup');
+        if (popup && popup.classList.contains('show')) {
+          // Only close if it's a quantity-related warning (check message content)
+          const messageEl = document.getElementById('warningMessage');
+          if (messageEl && messageEl.textContent.includes('cutting quantity')) {
+            closeWarningPopup();
+          }
+        }
+      }
+      
+      if (warningElement) {
+        warningElement.style.display = 'none';
+      }
+      cuttingQuantityInput.setCustomValidity('');
+      cuttingQuantityInput.style.borderColor = '#ccc';
+      return true;
+    }
+  }
+  
+  return true;
+}
+
+// Update date/time and shift display
+function updateTimeAndShift() {
+  const now = new Date();
+  const utc = now.getTime() + (now.getTimezoneOffset()*60000);
+  const dhaka = new Date(utc + (6*3600000));
+  document.getElementById("dateTimeDisplay").innerHTML =
+    "Date & Time: " + dhaka.toDateString() + " " + dhaka.toLocaleTimeString();
+
+  const yyyy = dhaka.getFullYear();
+  const mm = String(dhaka.getMonth()+1).padStart(2,'0');
+  const dd = String(dhaka.getDate()).padStart(2,'0');
+  const hh = String(dhaka.getHours()).padStart(2,'0');
+  const min = String(dhaka.getMinutes()).padStart(2,'0');
+  const ss = String(dhaka.getSeconds()).padStart(2,'0');
+  document.getElementById("dateTime").value = `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss}`;
+
+  const h = dhaka.getHours();
+  const shift = (h >= 8 && h <= 19) ? "Day" : "Night";
+  document.getElementById("shiftBanner").innerText = "Shift: " + shift;
+  document.getElementById("shift").value = shift;
+  
+  updateSummary();
+}
+
+// Note: selectCNCMachine already calls updateRollCountInfo() and filterCNCReferences() 
+// through applyMachineSelection(), so no override is needed
 
 // Bind search behavior: case-insensitive "contains" matching is handled inside filterCNCReferences()
 document.addEventListener('DOMContentLoaded', function () {
