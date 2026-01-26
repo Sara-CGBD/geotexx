@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 session_start();
 require_once '../config/security_config.php';
 require_once '../config/project_helper.php';
@@ -51,8 +51,9 @@ if ($res && ($row = $res->fetch_assoc())) {
     $next_id = ($row['cid'] ?? 0) + 1;
 }
 
-// Only PP Stable Fiber material
-$material_name = 'PP Stable Fiber';
+// Material name options (user can select)
+$materialNames = ['PP Stable Fiber', 'PSF Fiber'];
+$defaultMaterialName = $materialNames[0];
 
 // Manufacturer Names (same as store received entry)
 $manufacturerNames = [
@@ -140,11 +141,15 @@ $projects = $defaultProject ? [$defaultProject] : [];
       <input type="hidden" name="consumption_id" value="<?php echo $next_id; ?>">
     </div>
 
-    <!-- Material Name (Fixed: PP Stable Fiber) -->
+    <!-- Material Name -->
     <div class="form-group">
-      <label>Material Name: </label>
-      <input type="text" value="<?php echo htmlspecialchars($material_name); ?>" readonly class="readonly">
-      <input type="hidden" name="material_name" id="material_name" value="<?php echo htmlspecialchars($material_name); ?>">
+      <label>Material Name: <span style="color: red;">*</span></label>
+      <div class="btn-group" id="materialGroup">
+        <?php foreach ($materialNames as $idx => $mname): ?>
+        <button type="button" class="btn <?php echo $idx === 0 ? 'selected' : ''; ?>" data-value="<?php echo htmlspecialchars($mname); ?>" onclick="selectBtn(this,'materialGroup')"><?php echo htmlspecialchars($mname); ?></button>
+        <?php endforeach; ?>
+      </div>
+      <input type="hidden" name="material_name" id="material_name" value="<?php echo htmlspecialchars($defaultMaterialName); ?>">
       <input type="hidden" name="material_id" id="material_id" value="0">
     </div>
 
@@ -274,6 +279,8 @@ function selectBtn(btn, groupId){
     document.getElementById("unit").value = btn.dataset.value;
   } else if(groupId === "projectGroup"){
     document.getElementById("project_id").value = btn.dataset.id;
+  } else if(groupId === "materialGroup"){
+    document.getElementById("material_name").value = btn.dataset.value || '';
   }
   updateSummary();
 }
@@ -310,17 +317,22 @@ function updateSummary(){
 }
 
 function clearForm(){
-  document.querySelectorAll('#typeGroup .btn, #unitGroup .btn, #projectGroup .btn').forEach(b=>b.classList.remove('selected'));
+  document.querySelectorAll('#typeGroup .btn, #unitGroup .btn, #projectGroup .btn, #materialGroup .btn').forEach(b=>b.classList.remove('selected'));
   document.getElementById("consumption_type").value="";
   document.getElementById("unit").value="";
   document.getElementById("project_id").value="";
   document.getElementById("manufacturer_name").value="";
+  var firstMaterial = document.querySelector('#materialGroup .btn');
+  if (firstMaterial) { firstMaterial.classList.add('selected'); document.getElementById("material_name").value = firstMaterial.dataset.value || ''; }
   document.getElementById('summaryBox').innerText = '';
   document.getElementById('summary').value = '';
   setTimeout(updateSummary, 100);
 }
 
 function validateForm(){
+  if(!document.getElementById("material_name").value || !document.getElementById("material_name").value.trim()){
+    alert("Please select a material name."); return false;
+  }
   if(!document.getElementById("manufacturer_name").value || !document.getElementById("manufacturer_name").value.trim()){
     alert("Please select manufacturer name."); return false;
   }

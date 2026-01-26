@@ -65,8 +65,12 @@ foreach ($materials as $mat) {
     $materialTypeOptions[] = $mat['material_name'];
 }
 
-// Ensure unique values
+// Ensure unique values and add PSF fiber if not present
 $materialTypeOptions = array_values(array_unique($materialTypeOptions));
+if (!in_array('PSF fiber', $materialTypeOptions)) {
+    $materialTypeOptions[] = 'PSF fiber';
+}
+sort($materialTypeOptions);
 
 // Handle quick bag size addition
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['quick_add_bag'])) {

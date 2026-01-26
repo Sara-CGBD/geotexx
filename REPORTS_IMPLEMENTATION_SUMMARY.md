@@ -69,7 +69,7 @@ This document summarizes all the comprehensive reports created for the GEOCIL Au
   - Comparison by scrap type with progress bars
   - Statistics: Total scrap, recycled, efficiency rate, net waste
   - Export to CSV, Print
-- **Access**: Admin, Production User, QC Inspector, Management, AGM Ops, Recycle User
+- **Access**: Admin, Production User, QC Inspector, Management, AGM Ops
 
 ---
 

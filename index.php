@@ -135,6 +135,7 @@ $menuItems = [
             ]],
             ['type' => 'group', 'text' => 'Finished Goods(FG)', 'icon' => 'fas fa-box', 'children' => [
                 ['text' => 'FG Entry', 'link' => 'forms/fg_entry.php', 'icon' => 'fas fa-plus-square'],
+                ['text' => 'FG Entry (Bag) Report', 'link' => 'reports/fg_entry_bag_report.php', 'icon' => 'fas fa-shopping-bag'],
                 ['text' => 'FG Received Entry', 'link' => 'forms/fg_received_entry.php', 'icon' => 'fas fa-inbox'],
                 ['text' => 'FG Delivery Entry', 'link' => 'forms/fg_delivery_entry.php', 'icon' => 'fas fa-truck'],
                 ['text' => 'FG Batch Report (QC Summary)', 'link' => 'reports/fg_batch_report.php', 'icon' => 'fas fa-boxes'],
@@ -224,6 +225,7 @@ $menuItems = [
             ]],
             ['type' => 'group', 'text' => 'Finished Goods(FG)', 'icon' => 'fas fa-box', 'children' => [
                 ['text' => 'FG Entry', 'link' => 'forms/fg_entry.php', 'icon' => 'fas fa-plus-square'],
+                ['text' => 'FG Entry (Bag) Report', 'link' => 'reports/fg_entry_bag_report.php', 'icon' => 'fas fa-shopping-bag'],
             ]],
         ],
 
@@ -354,22 +356,9 @@ $menuItems = [
             ]],
         ],
 
-        // ========== MANAGEMENT - View All + Analytics ==========
+        // ========== MANAGEMENT - View All + Analytics (no QC, no Raw Material Store) ==========
         'management' => [
             ['type' => 'link', 'text' => 'Management KPI Dashboard', 'link' => 'admin/management_kpi_dashboard.php', 'icon' => 'fas fa-chart-line'],
-            ['type' => 'group', 'text' => 'Quality Control(QC) - View', 'icon' => 'fas fa-clipboard-check', 'children' => [
-                ['text' => 'UV Test', 'link' => 'forms/weathering_exposure_test.php', 'icon' => 'fas fa-sun'],
-                ['text' => 'Fabric Internal Production Sample Test Summary', 'link' => 'forms/fabric_after_production_test.php', 'icon' => 'fas fa-industry'],
-                ['text' => 'Sun Test Report', 'link' => 'forms/sun_test_report.php', 'icon' => 'fas fa-sun'],
-            ]],
-            ['type' => 'group', 'text' => 'Raw Material Store', 'icon' => 'fas fa-warehouse', 'children' => [
-                ['text' => '1. Store Received Entry', 'link' => 'forms/store_received_entry.php', 'icon' => 'fas fa-truck-loading'],
-                ['text' => '2. Tenacity of Fiber Report (EN ISO 5079)', 'link' => 'forms/tenacity_fiber_report.php', 'icon' => 'fas fa-flask'],
-                ['text' => '3. Fiber Test Report', 'link' => 'forms/fiber_test_report.php', 'icon' => 'fas fa-dna'],
-                ['text' => '4. Sewing Thread Report', 'link' => 'forms/sewing_thread_report.php', 'icon' => 'fas fa-scroll'],
-                ['text' => '5. Test Approval Dashboard', 'link' => 'admin/raw_material_test_approval_dashboard.php', 'icon' => 'fas fa-clipboard-check'],
-                ['text' => '6. Approved Material Inventory', 'link' => 'reports/approved_material_inventory.php', 'icon' => 'fas fa-check-square'],
-            ]],
             ['type' => 'group', 'text' => 'Reports & Analytics', 'icon' => 'fas fa-chart-area', 'children' => [
                 ['text' => 'Roll Production Summary', 'link' => 'reports/roll_production_summary.php', 'icon' => 'fas fa-chart-bar'],
                 ['text' => 'Target vs Actual', 'link' => 'reports/target_vs_actual.php', 'icon' => 'fas fa-chart-line'],

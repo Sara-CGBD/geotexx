@@ -137,16 +137,6 @@ $rolePermissions = [
             'Admin Panel' => 'No Access'
         ]
     ],
-    'recycle_user' => [
-        'name' => 'Recycle User',
-        'description' => 'Recycling operations management',
-        'modules' => [
-            'Recycle' => 'Full Access (Recycle Entry)',
-            'Scrap/Waste' => 'View Reports',
-            'Recycled Material Reports' => 'Full Access',
-            'Other Modules' => 'No Access'
-        ]
-    ],
     'store_user' => [
         'name' => 'Store User',
         'description' => 'Raw material store management and inventory',

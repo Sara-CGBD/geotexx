@@ -23,41 +23,43 @@ if (!$conn) {
 // Note: This API now fetches ONLY from fg_received_entry for bag deliveries
 // Removed dependency on branding_entries table
 
-// Get delivered quantities per batch from fg_deliveries
+// Get delivered quantities per (batch, bag_size) from fg_deliveries so we don't merge different bag sizes
 $delivered_quantities = [];
 $fgDeliveriesTableCheck = $conn->query("SHOW TABLES LIKE 'fg_deliveries'");
 if ($fgDeliveriesTableCheck && $fgDeliveriesTableCheck->num_rows > 0) {
-    // Check if fg_deliveries has cnc_cutting_batch column
     $fgDelCncCheck = $conn->query("SHOW COLUMNS FROM fg_deliveries LIKE 'cnc_cutting_batch'");
     if ($fgDelCncCheck && $fgDelCncCheck->num_rows > 0) {
-        // Check for delivery_quantity or delivery_qty column
+        $fgDelBagCheck = $conn->query("SHOW COLUMNS FROM fg_deliveries LIKE 'bag_size'");
+        $fgDelHasBagSize = ($fgDelBagCheck && $fgDelBagCheck->num_rows > 0);
         $fgDelQtyCheck = $conn->query("SHOW COLUMNS FROM fg_deliveries LIKE 'delivery_quantity'");
         $hasDeliveryQty = ($fgDelQtyCheck && $fgDelQtyCheck->num_rows > 0);
         if (!$hasDeliveryQty) {
             $fgDelQtyCheck = $conn->query("SHOW COLUMNS FROM fg_deliveries LIKE 'delivery_qty'");
             $hasDeliveryQty = ($fgDelQtyCheck && $fgDelQtyCheck->num_rows > 0);
         }
-        
         if ($hasDeliveryQty) {
             $delQtyCol = $fgDelQtyCheck->fetch_assoc()['Field'];
-            $delivered_query = "SELECT 
-                               cnc_cutting_batch,
-                               SUM(COALESCE($delQtyCol, 0)) as delivered_qty
-                               FROM fg_deliveries 
-                               WHERE cnc_cutting_batch IS NOT NULL 
-                               AND cnc_cutting_batch != ''";
-            
+            $delivered_query = "SELECT TRIM(COALESCE(cnc_cutting_batch,'')) as cnc_cutting_batch";
+            if ($fgDelHasBagSize) {
+                $delivered_query .= ", TRIM(COALESCE(bag_size,'')) as bag_size";
+            } else {
+                $delivered_query .= ", '' as bag_size";
+            }
+            $delivered_query .= ", SUM(COALESCE($delQtyCol, 0)) as delivered_qty FROM fg_deliveries WHERE cnc_cutting_batch IS NOT NULL AND cnc_cutting_batch != ''";
             $delIsDeletedCheck = $conn->query("SHOW COLUMNS FROM fg_deliveries LIKE 'is_deleted'");
             if ($delIsDeletedCheck && $delIsDeletedCheck->num_rows > 0) {
                 $delivered_query .= " AND (is_deleted = 0 OR is_deleted IS NULL)";
             }
-            
-            $delivered_query .= " GROUP BY cnc_cutting_batch";
-            
+            $delivered_query .= " GROUP BY TRIM(COALESCE(cnc_cutting_batch,''))";
+            if ($fgDelHasBagSize) {
+                $delivered_query .= ", TRIM(COALESCE(bag_size,''))";
+            }
             $delivered_result = $conn->query($delivered_query);
             if ($delivered_result) {
                 while ($row = $delivered_result->fetch_assoc()) {
-                    $delivered_quantities[$row['cnc_cutting_batch']] = (int)$row['delivered_qty'];
+                    $b = trim($row['cnc_cutting_batch'] ?? '');
+                    $bs = isset($row['bag_size']) ? trim($row['bag_size'] ?? '') : '';
+                    $delivered_quantities[$b . '||' . $bs] = (int)$row['delivered_qty'];
                 }
             }
         }
@@ -84,35 +86,33 @@ if ($fgReceivedCheck && $fgReceivedCheck->num_rows > 0) {
     $hasFgProjectId = ($fgProjectIdCheck && $fgProjectIdCheck->num_rows > 0);
     
     if ($hasFgCnc && $hasFgReceivedQty) {
+        // Group by (cnc_cutting_batch, bag_size) so same batch with different bag sizes / timings are separate options
         $fgQuery = "
             SELECT 
                 TRIM(cnc_cutting_batch) as cnc_cutting_batch,
+                " . ($hasFgBagSize ? "TRIM(COALESCE(bag_size,'')) as bag_size" : "'' as bag_size") . ",
                 SUM(COALESCE(received_quantity, 0)) as total_received";
-        
-        if ($hasFgBagSize) {
-            $fgQuery .= ", MAX(bag_size) as bag_size";
-        }
         if ($hasFgProjectId) {
             $fgQuery .= ", MAX(project_id) as project_id";
         }
-        
         $fgQuery .= "
             FROM fg_received_entry
             WHERE cnc_cutting_batch IS NOT NULL
               AND cnc_cutting_batch != ''";
-        
         if ($hasFgProductType) {
             $fgQuery .= " AND product_type = 'bag'";
         }
-        
         if ($hasFgIsDeleted) {
             $fgQuery .= " AND (is_deleted = 0 OR is_deleted IS NULL)";
         }
-        
         $fgQuery .= "
-            GROUP BY cnc_cutting_batch
+            GROUP BY TRIM(cnc_cutting_batch)";
+        if ($hasFgBagSize) {
+            $fgQuery .= ", TRIM(COALESCE(bag_size,''))";
+        }
+        $fgQuery .= "
             HAVING total_received > 0
-            ORDER BY cnc_cutting_batch DESC
+            ORDER BY cnc_cutting_batch DESC, bag_size ASC
             LIMIT 200";
 
         $fgResult = $conn->query($fgQuery);
@@ -120,12 +120,12 @@ if ($fgReceivedCheck && $fgReceivedCheck->num_rows > 0) {
             while ($row = $fgResult->fetch_assoc()) {
                 $batch = trim($row['cnc_cutting_batch']);
                 if ($batch === '') continue;
-
+                $bagSize = isset($row['bag_size']) ? trim($row['bag_size'] ?? '') : '';
                 $totalReceived = (int)$row['total_received'];
-                $delivered_qty = $delivered_quantities[$batch] ?? 0;
+                $key = $batch . '||' . $bagSize;
+                $delivered_qty = $delivered_quantities[$key] ?? 0;
                 $remaining_qty = $totalReceived - $delivered_qty;
 
-                // Only include batches with remaining quantity > 0
                 if ($remaining_qty > 0) {
                     $batchData = [
                         'batch' => $batch,
@@ -133,15 +133,12 @@ if ($fgReceivedCheck && $fgReceivedCheck->num_rows > 0) {
                         'remaining_qty' => $remaining_qty,
                         'delivered_qty' => $delivered_qty
                     ];
-                    
+                    if ($bagSize !== '') {
+                        $batchData['bag_size'] = $bagSize;
+                    }
                     if ($hasFgProjectId && isset($row['project_id'])) {
                         $batchData['project_id'] = $row['project_id'];
                     }
-                    
-                    if ($hasFgBagSize && isset($row['bag_size'])) {
-                        $batchData['bag_size'] = $row['bag_size'];
-                    }
-
                     $batches[] = $batchData;
                 }
             }

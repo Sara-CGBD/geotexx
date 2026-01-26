@@ -76,7 +76,7 @@ try {
     $deliveryId = $_POST['delivery_id'] ?? '';
     $fgEntryId = $_POST['fg_entry_id'] ?? '';
     $referenceNumber = $_POST['reference_number'] ?? '';
-    $bagSize = $_POST['bag_size'] ?? '';
+    $bagSize = trim($_POST['bag_size'] ?? '');
     $packagingType = $_POST['packaging_type'] ?? '';
     $deliveryQty = (float)($_POST['delivery_qty'] ?? 0);
     $deliveryProductType = $_POST['delivery_product_type'] ?? 'bag'; // roll or bag
@@ -98,7 +98,24 @@ try {
     // CNC cutting batch is only for bags, not for rolls
     $cncCuttingBatch = '';
     if ($deliveryProductType === 'bag') {
-        $cncCuttingBatch = $_POST['cnc_cutting_batch'] ?? '';
+        $cncCuttingBatch = trim($_POST['cnc_cutting_batch'] ?? '');
+        // Fetch bag_size from fg_entry table only (same as FG Entry form)
+        if ($cncCuttingBatch !== '') {
+            $feCol = $conn->query("SHOW COLUMNS FROM fg_entry LIKE 'bag_size'");
+            if ($feCol && $feCol->num_rows > 0) {
+                $feStmt = $conn->prepare("SELECT TRIM(bag_size) as bag_size FROM fg_entry WHERE product_type = 'bag' AND (TRIM(COALESCE(cnc_cutting_batch,'')) = ? OR TRIM(COALESCE(cnc_cutting_batch,'')) LIKE CONCAT(?, '||%')) AND bag_size IS NOT NULL AND TRIM(bag_size) != '' ORDER BY date_time DESC LIMIT 1");
+                if ($feStmt) {
+                    $feStmt->bind_param('ss', $cncCuttingBatch, $cncCuttingBatch);
+                    $feStmt->execute();
+                    $feRes = $feStmt->get_result();
+                    $feRow = $feRes ? $feRes->fetch_assoc() : null;
+                    if (is_array($feRow) && isset($feRow['bag_size']) && trim($feRow['bag_size']) !== '') {
+                        $bagSize = trim($feRow['bag_size']);
+                    }
+                    $feStmt->close();
+                }
+            }
+        }
     }
     $deliveryRollEntryType = $_POST['delivery_roll_entry_type'] ?? ''; // individual or bundle
     $deliveryQuantityUnit = $_POST['delivery_quantity_unit'] ?? 'kg'; // kg or sqm
@@ -491,11 +508,9 @@ try {
             // Calculate cost for this reference
             $refTotalCost = $refDeliveryQty * $unitPrice;
             
-            // Bind parameters for this reference
-            // Type string: 24 parameters
-            // s(1) i(1) s(10) d(1) s(1) d(3) s(2) i(1) s(1) d(2) s(1) = 24
+            // Bind parameters for this reference (24 params)
             $stmt->bind_param(
-                'sisssssssssdsddssisddsss',  // Type string: 24 characters
+                'sissssssssssdsddssisddsss',  // 24 chars: s,i,10×s, d,s,d,d, s,s,i,s,d,d,s,s,s
                 $currentDeliveryId,        // 1. s - delivery_id
                 $refFgEntryId,             // 2. i - fg_entry_id
                 $refReferenceNumber,       // 3. s - reference_number
@@ -582,9 +597,9 @@ try {
         $fgEntryIdForBind = ($fgEntryIdValue === null) ? 0 : (int)$fgEntryIdValue;
         
         $stmt->bind_param(
-            'sisssssssssdsdddssisdds',  // Type string: 24 characters
+            'sisssssssssdsddssisddsss',
             $deliveryId,              // 1. s - delivery_id
-            $fgEntryIdForBind,        // 2. i - fg_entry_id (0 for bags)
+            $fgEntryIdForBind,        // 2. i - fg_entry_id
             $referenceNumber,         // 3. s - reference_number
             $cncCuttingBatch,         // 4. s - cnc_cutting_batch
             $deliveryDate,            // 5. s - delivery_date
@@ -595,7 +610,7 @@ try {
             $bagSize,                 // 10. s - bag_size
             $packagingType,           // 11. s - packaging_type
             $deliveryQty,             // 12. d - delivery_quantity
-            $deliveryQuantityUnit,    // 13. s - delivery_quantity_unit (kg or sqm)
+            $deliveryQuantityUnit,    // 13. s - delivery_quantity_unit
             $refWeightKg,             // 14. d - weight_kg
             $refAreaSqm,              // 15. d - area_sqm
             $deliveryProductType,     // 16. s - delivery_product_type
@@ -632,13 +647,16 @@ try {
     $unitLabel = ($deliveryProductType === 'roll') ? 'kg' : 'pcs';
     $productLabel = ($deliveryProductType === 'roll') ? 'Rolls' : 'Bags';
     
+    // Format remaining for display (whole number for pcs, 2 decimals for kg)
+    $newRemainingDisplay = ($deliveryProductType === 'bag') ? (int)$newRemaining : number_format((float)$newRemaining, 2, '.', '');
+
     if ($deliveryProductType === 'roll' && !empty($rollReferencesData) && count($rollReferencesData) > 1) {
         $successMsg = count($rollReferencesData) . " reference(s) delivered successfully!\n\n";
         $successMsg .= "Delivery ID: {$deliveryId} (and variations)\n";
         $successMsg .= "Total Quantity: {$totalDeliveredQty} {$unitLabel}\n";
         $successMsg .= "Client: {$clientName}";
     } else {
-        $successMsg = " {$totalDeliveredQty} {$productLabel} delivered successfully!\n\n";
+        $successMsg = "{$totalDeliveredQty} {$productLabel} delivered successfully!\n\n";
         $successMsg .= "Delivery ID: {$deliveryId}\n";
         if ($deliveryProductType === 'roll') {
             $successMsg .= "Reference: {$referenceNumber}\n";
@@ -646,10 +664,9 @@ try {
             $successMsg .= "CNC Batch: {$cncCuttingBatch}\n";
         }
         $successMsg .= "Quantity: {$totalDeliveredQty} {$unitLabel}\n";
-        $successMsg .= "Remaining Stock: {$newRemaining} {$unitLabel}\n";
         $successMsg .= "Client: {$clientName}";
     }
-    
+
     header("Location: ../forms/fg_delivery_entry.php?success=" . urlencode($successMsg));
     exit();
     

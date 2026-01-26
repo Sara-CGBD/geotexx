@@ -8,7 +8,7 @@ if (!isset($_SESSION['user_id']) || !isset($_SESSION['username'])) {
 }
 
 $user_role = strtolower(trim($_SESSION['role'] ?? ''));
-$allowed_roles = ['admin', 'production_user', 'management', 'agm ops', 'recycle_user'];
+$allowed_roles = ['admin', 'production_user', 'management', 'agm ops'];
 if (!in_array($user_role, $allowed_roles)) {
     http_response_code(403);
     die("Access Denied");

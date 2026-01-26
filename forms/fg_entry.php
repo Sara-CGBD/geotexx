@@ -164,23 +164,9 @@ if ($brandingExists) {
     $hasCreatedAt = $conn->query("SHOW COLUMNS FROM branding_entries LIKE 'created_at'")->num_rows > 0;
 
     if ($hasRef) {
-        // Exclude references already completed in fg_entry (if table/column exists)
-        $fgRefFilter = "";
-        if ($fgTableExists) {
-            $fgHasRef = $conn->query("SHOW COLUMNS FROM fg_entry LIKE 'reference_number'")->num_rows > 0;
-            $fgHasDeleted = $conn->query("SHOW COLUMNS FROM fg_entry LIKE 'is_deleted'")->num_rows > 0;
-            if ($fgHasRef) {
-                $fgRefFilter = "AND be.reference_number NOT IN (
-                    SELECT reference_number FROM fg_entry 
-                    WHERE reference_number IS NOT NULL AND reference_number <> '' " .
-                    ($fgHasDeleted ? "AND (is_deleted = 0 OR is_deleted IS NULL)" : "") .
-                ")";
-            }
-        }
-
         $isDeletedFilter = $hasIsDeleted ? "AND (be.is_deleted = 0 OR be.is_deleted IS NULL)" : "";
 
-        // refToBrandedQtyMap: use merged_print_qty per (ref, batch, bag_size) then sum per reference (so max for FG reflects merged branding totals)
+        // refToBrandedQtyMap: use merged_print_qty per (ref, batch, bag_size) then sum per reference; then deduct already submitted FG (quality_checked) per reference
         if ($hasMergedPrintQty && $hasCnc && $hasPrintQty) {
             $brandingQtyQuery = "
                 SELECT reference_number, SUM(merged_per_batch) AS total_printed
@@ -191,7 +177,6 @@ if ($brandingExists) {
                     WHERE be.reference_number IS NOT NULL AND be.reference_number <> ''
                       AND be.cnc_cutting_batch IS NOT NULL AND be.cnc_cutting_batch <> ''
                       {$isDeletedFilter}
-                      {$fgRefFilter}
                     GROUP BY be.reference_number, be.cnc_cutting_batch" . ($hasBagSize ? ", be.bag_size" : "") . "
                 ) t
                 GROUP BY reference_number
@@ -223,7 +208,6 @@ if ($brandingExists) {
             WHERE be.reference_number IS NOT NULL
               AND be.reference_number <> ''
               {$isDeletedFilter}
-              {$fgRefFilter}
             GROUP BY be.reference_number
             ORDER BY {$orderCol} DESC
             LIMIT 200
@@ -246,6 +230,36 @@ if ($brandingExists) {
                 if (!isset($refToBrandedQtyMap[$ref])) {
                     $refToBrandedQtyMap[$ref] = (int)($row['total_printed'] ?? 0);
                 }
+            }
+        }
+
+        // Deduct already submitted FG (quality_checked) per reference so max shows remaining
+        if ($fgTableExists && !empty($refToBrandedQtyMap)) {
+            $fgHasRef = $conn->query("SHOW COLUMNS FROM fg_entry LIKE 'reference_number'")->num_rows > 0;
+            $fgHasProductType = $conn->query("SHOW COLUMNS FROM fg_entry LIKE 'product_type'")->num_rows > 0;
+            $fgHasQualityChecked = $conn->query("SHOW COLUMNS FROM fg_entry LIKE 'quality_checked'")->num_rows > 0;
+            if ($fgHasRef && $fgHasProductType && $fgHasQualityChecked) {
+                $usedRes = $conn->query("SELECT reference_number, COALESCE(SUM(quality_checked), 0) AS used FROM fg_entry 
+                    WHERE product_type = 'bag' AND reference_number IS NOT NULL AND reference_number <> '' 
+                    GROUP BY reference_number");
+                if ($usedRes) {
+                    while ($ur = $usedRes->fetch_assoc()) {
+                        $ref = $ur['reference_number'];
+                        $used = (int)($ur['used'] ?? 0);
+                        if (isset($refToBrandedQtyMap[$ref])) {
+                            $refToBrandedQtyMap[$ref] = max(0, $refToBrandedQtyMap[$ref] - $used);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Remove references with no remaining quantity (0) so they are not shown in the dropdown
+        foreach (array_keys($refToBrandedQtyMap) as $ref) {
+            if ((int)$refToBrandedQtyMap[$ref] <= 0) {
+                unset($refToBrandedQtyMap[$ref]);
+                unset($refToBatchMap[$ref]);
+                unset($refToBagSizeMap[$ref]);
             }
         }
     }
@@ -1334,7 +1348,7 @@ if ($hasRollTransfer) {
     <!-- Quality checked -->
     <div class="form-group" id="qualityCheckedFormGroup">
       <label>Quality Checked (pcs): <span id="totalPrintedQtyLabel" style="color:#27ae60; font-weight:600; font-size:13px;"></span> <span id="maxBrandedQtyLabel" style="color:#2196F3; font-weight:normal; font-size:13px;"></span></label>
-      <input type="number" id="quality_checked" name="quality_checked" min="1" onchange="validateQualityChecked(true); updateActualWeightFromQualityChecked();" onblur="validateQualityChecked(true)" oninput="debounceValidateQualityChecked(); updateActualWeightFromQualityChecked();">
+      <input type="number" id="quality_checked" name="quality_checked" min="1" readonly style="background-color:#f0f0f0;" onchange="validateQualityChecked(true); updateActualWeightFromQualityChecked();" onblur="validateQualityChecked(true)" oninput="debounceValidateQualityChecked(); updateActualWeightFromQualityChecked();">
       <small id="qualityCheckedHint" style="color:#6c757d; display:block; margin-top:5px;">
         <i class="fas fa-info-circle"></i> Enter the number of bags to be quality checked
       </small>
@@ -2230,10 +2244,18 @@ function updateReferenceFromCNCBatch(event) {
     if (qualityCheckedInput) {
       if (totalPrinted > 0) {
         qualityCheckedInput.setAttribute('max', totalPrinted);
+        // Auto-fill quality checked and passed qty with full remaining for this batch (receive at once)
+        qualityCheckedInput.value = totalPrinted;
+        const passedQtyInput = document.getElementById('passed_qty');
+        if (passedQtyInput) passedQtyInput.value = totalPrinted;
+        updateActualWeightFromQualityChecked();
+        calculateRejected();
         // Validate current value if it exceeds the limit
         const currentQty = parseInt(qualityCheckedInput.value) || 0;
         if (currentQty > totalPrinted) {
           validateQualityChecked(true);
+        } else {
+          validateQualityChecked(false);
         }
       } else {
         qualityCheckedInput.removeAttribute('max');

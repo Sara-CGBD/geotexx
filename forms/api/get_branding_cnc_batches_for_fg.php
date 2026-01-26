@@ -72,32 +72,23 @@ $result = $conn->query("SELECT $selectList FROM branding_entries
     LIMIT 50");
 $batches = [];
 
-// Already submitted (quality_checked) per (cnc_cutting_batch, bag_size) from fg_entry - deduct from max
-$usedByBatchBag = [];
+// One FG entry per (cnc_cutting_batch, bag_size): exclude batch+bag_size that already have any fg_entry
+$submittedBatchBagKeys = [];
 if ($conn->query("SHOW TABLES LIKE 'fg_entry'")->num_rows > 0) {
     $feCols = [];
     $feR = $conn->query("SHOW COLUMNS FROM fg_entry");
     if ($feR) while ($feC = $feR->fetch_assoc()) $feCols[$feC['Field']] = true;
-    if (!empty($feCols['product_type']) && !empty($feCols['cnc_cutting_batch']) && !empty($feCols['quality_checked'])) {
+    if (!empty($feCols['product_type']) && !empty($feCols['cnc_cutting_batch'])) {
         $hasFgBagSize = !empty($feCols['bag_size']);
-        $usedSelect = "TRIM(COALESCE(cnc_cutting_batch,'')) AS cnc_cutting_batch";
-        $usedGroup = "GROUP BY TRIM(COALESCE(cnc_cutting_batch,''))";
-        if ($hasFgBagSize) {
-            $usedSelect .= ", TRIM(COALESCE(bag_size,'')) AS bag_size";
-            $usedGroup .= ", TRIM(COALESCE(bag_size,''))";
-        } else {
-            $usedSelect .= ", '' AS bag_size";
-        }
-        $usedQuery = "SELECT $usedSelect, COALESCE(SUM(quality_checked), 0) AS used FROM fg_entry 
-            WHERE product_type = 'bag' AND cnc_cutting_batch IS NOT NULL AND cnc_cutting_batch != '' 
-            $usedGroup";
-        $usedRes = $conn->query($usedQuery);
-        if ($usedRes) {
-            while ($ur = $usedRes->fetch_assoc()) {
-                $kb = trim($ur['cnc_cutting_batch'] ?? '');
-                $kbs = isset($ur['bag_size']) ? trim($ur['bag_size'] ?? '') : '';
-                $key = $kb . '||' . $kbs;
-                $usedByBatchBag[$key] = (int)($ur['used'] ?? 0);
+        $submittedQuery = "SELECT DISTINCT TRIM(COALESCE(cnc_cutting_batch,'')) AS cnc_cutting_batch" .
+            ($hasFgBagSize ? ", TRIM(COALESCE(bag_size,'')) AS bag_size" : ", '' AS bag_size") .
+            " FROM fg_entry WHERE product_type = 'bag' AND cnc_cutting_batch IS NOT NULL AND cnc_cutting_batch != ''";
+        $subRes = $conn->query($submittedQuery);
+        if ($subRes) {
+            while ($sr = $subRes->fetch_assoc()) {
+                $kb = trim($sr['cnc_cutting_batch'] ?? '');
+                $kbs = isset($sr['bag_size']) ? trim($sr['bag_size'] ?? '') : '';
+                $submittedBatchBagKeys[$kb . '||' . $kbs] = true;
             }
         }
     }
@@ -108,12 +99,12 @@ if ($result) {
         $batch = trim($row['cnc_cutting_batch']);
         if ($batch === '') continue;
         $bagSize = $hasBagSize ? trim($row['bag_size'] ?? '') : '';
+        $key = $batch . '||' . $bagSize;
+        if (isset($submittedBatchBagKeys[$key])) continue;
         $entryDate = $row['first_date'] ?? '';
         $batchDate = is_string($entryDate) && strlen($entryDate) >= 10 ? substr($entryDate, 0, 10) : $entryDate;
         $totalPrintQty = (int)($row['total_print_qty'] ?? 0);
-        $key = $batch . '||' . $bagSize;
-        $used = isset($usedByBatchBag[$key]) ? $usedByBatchBag[$key] : 0;
-        $totalPrintQty = max(0, $totalPrintQty - $used);
+        if ($totalPrintQty <= 0) continue;
         $totalNcp = (int)($row['total_ncp_piece'] ?? 0);
         $batches[] = [
             'batch' => $batch,

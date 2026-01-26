@@ -804,7 +804,7 @@ if ($hasRollTransfer) {
   <h1>FG Delivery Entry</h1>
 
   <?php if (isset($_GET['success'])): ?>
-    <div class="alert alert-success">
+    <div class="alert alert-success" style="white-space: pre-line;">
       <?php echo htmlspecialchars($_GET['success']); ?>
     </div>
   <?php endif; ?>
@@ -2077,10 +2077,10 @@ function loadBrandingCNCBatches() {
       if (data.batches && data.batches.length > 0) {
         data.batches.forEach(batch => {
           const option = document.createElement('option');
-          option.value = batch.batch;
-          option.textContent = batch.batch + ' (Remaining: ' + batch.remaining_qty + ' pcs)';
-          
-          // Store batch data as data attributes
+          // Unique value per (batch, bag_size) so delivery is tied to the correct received lot
+          option.value = (batch.bag_size ? batch.batch + '||' + batch.bag_size : batch.batch);
+          const label = batch.bag_size ? (batch.batch + ' | ' + batch.bag_size + ' (Remaining: ' + batch.remaining_qty + ' pcs)') : (batch.batch + ' (Remaining: ' + batch.remaining_qty + ' pcs)');
+          option.textContent = label;
           option.setAttribute('data-remaining-qty', batch.remaining_qty);
           option.setAttribute('data-total-print-qty', batch.total_print_qty);
           option.setAttribute('data-delivered-qty', batch.delivered_qty);
@@ -2090,7 +2090,6 @@ function loadBrandingCNCBatches() {
           if (batch.project_id) {
             option.setAttribute('data-project-id', batch.project_id);
           }
-          
           cncBatchSelect.appendChild(option);
         });
         

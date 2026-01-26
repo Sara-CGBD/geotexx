@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 // fg_received_entry.php
 
 session_start();
@@ -229,50 +229,91 @@ if ($hasRollTransfer) {
     }
 }
 
-// Fetch CNC cutting batch numbers from fg_entry where product_type = 'bag'
-// Exclude batches that have already been submitted in fg_received_entry
+// Fetch CNC cutting batches from fg_entry (submitted bag entries): one option per (batch, bag_size) with date
+// Same batch can appear multiple times with different bag_size/date; exclude only (batch, bag_size) already in fg_received_entry
 $cncCuttingBatches = [];
 $hasFgEntry = $conn->query("SHOW TABLES LIKE 'fg_entry'")->num_rows > 0;
 if ($hasFgEntry) {
     $hasProductType = $conn->query("SHOW COLUMNS FROM fg_entry LIKE 'product_type'")->num_rows > 0;
     $hasCncBatch = $conn->query("SHOW COLUMNS FROM fg_entry LIKE 'cnc_cutting_batch'")->num_rows > 0;
     $hasPassedQty = $conn->query("SHOW COLUMNS FROM fg_entry LIKE 'passed_qty'")->num_rows > 0;
-    
+    $hasDateTime = $conn->query("SHOW COLUMNS FROM fg_entry LIKE 'date_time'")->num_rows > 0;
+    $hasFgBagSize = $conn->query("SHOW COLUMNS FROM fg_entry LIKE 'bag_size'")->num_rows > 0;
+    $hasFgReceived = $conn->query("SHOW TABLES LIKE 'fg_received_entry'")->num_rows > 0;
+    $hasReceivedCnc = $hasFgReceived && $conn->query("SHOW COLUMNS FROM fg_received_entry LIKE 'cnc_cutting_batch'")->num_rows > 0;
+    $hasReceivedBagSize = $hasFgReceived && $conn->query("SHOW COLUMNS FROM fg_received_entry LIKE 'bag_size'")->num_rows > 0;
+
     if ($hasProductType && $hasCncBatch) {
-        $hasFgReceived = $conn->query("SHOW TABLES LIKE 'fg_received_entry'")->num_rows > 0;
-        $excludeFilter = "";
-        if ($hasFgReceived) {
-            $hasCncCol = $conn->query("SHOW COLUMNS FROM fg_received_entry LIKE 'cnc_cutting_batch'")->num_rows > 0;
-            if ($hasCncCol) {
-                // Exclude CNC batches that exist in fg_received_entry
-                $excludeFilter = "AND cnc_cutting_batch NOT IN (
-                    SELECT DISTINCT cnc_cutting_batch 
-                    FROM fg_received_entry 
-                    WHERE cnc_cutting_batch IS NOT NULL 
-                      AND cnc_cutting_batch != ''
-                      AND product_type = 'bag'
-                )";
+        $dateCol = $hasDateTime ? ", MAX(fe.date_time) AS latest_submitted" : "";
+        $baseBatchExpr = "TRIM(SUBSTRING_INDEX(CONCAT(TRIM(COALESCE(fe.cnc_cutting_batch,'')), '||'), '||', 1))";
+        $bagSizeSelect = $hasFgBagSize ? "TRIM(COALESCE(fe.bag_size,'')) AS bag_size" : "'' AS bag_size";
+        $bagSizeGroup = $hasFgBagSize ? ", TRIM(COALESCE(fe.bag_size,''))" : "";
+        // Build set of (batch, bag_size) already in fg_received_entry so we exclude them in PHP (avoids HAVING/subquery issues)
+        $receivedKeys = [];
+        if ($hasReceivedCnc) {
+            $receivedSql = "SELECT DISTINCT TRIM(COALESCE(cnc_cutting_batch,'')) AS cb, TRIM(COALESCE(bag_size,'')) AS bs FROM fg_received_entry WHERE product_type = 'bag' AND cnc_cutting_batch IS NOT NULL AND cnc_cutting_batch != ''";
+            $receivedRes = $conn->query($receivedSql);
+            if ($receivedRes) {
+                while ($rr = $receivedRes->fetch_assoc()) {
+                    $receivedKeys[$rr['cb'] . '||' . $rr['bs']] = true;
+                }
             }
         }
-        
+        $qtyExpr = $hasPassedQty ? "SUM(COALESCE(fe.passed_qty, 0))" : "COUNT(*)";
         $cncQuery = $conn->query("
-            SELECT DISTINCT 
-                cnc_cutting_batch,
-                SUM(COALESCE(passed_qty, 0)) as total_quantity
-            FROM fg_entry 
-            WHERE product_type = 'bag'
-              AND cnc_cutting_batch IS NOT NULL
-              AND cnc_cutting_batch != ''
-              {$excludeFilter}
-            GROUP BY cnc_cutting_batch
-            ORDER BY cnc_cutting_batch DESC
+            SELECT 
+                {$baseBatchExpr} AS base_batch,
+                {$bagSizeSelect},
+                {$qtyExpr} as total_quantity
+                {$dateCol}
+            FROM fg_entry fe
+            WHERE fe.product_type = 'bag'
+              AND fe.cnc_cutting_batch IS NOT NULL
+              AND fe.cnc_cutting_batch != ''
+            GROUP BY {$baseBatchExpr}{$bagSizeGroup}
+            ORDER BY " . ($hasDateTime ? "latest_submitted DESC" : "base_batch DESC") . "
             LIMIT 200
         ");
         if ($cncQuery) {
+            $hasMaster = $conn->query("SHOW TABLES LIKE 'bag_size_master'")->num_rows > 0;
             while ($row = $cncQuery->fetch_assoc()) {
+                $baseBatch = $row['base_batch'] ?? '';
+                $bagSizeVal = isset($row['bag_size']) ? trim($row['bag_size'] ?? '') : '';
+                if (isset($receivedKeys[$baseBatch . '||' . $bagSizeVal])) {
+                    continue;
+                }
+                // Resolve numeric-only bag_size from bag_size_master
+                if ($bagSizeVal !== '' && preg_match('/^\d+$/', $bagSizeVal)) {
+                    if ($hasMaster) {
+                        $esc = $conn->real_escape_string($bagSizeVal);
+                        $len = (int) strlen($bagSizeVal);
+                        $ex = $conn->query("SELECT bag_size FROM bag_size_master WHERE TRIM(bag_size) LIKE '{$esc}%' AND TRIM(bag_size) LIKE '%mm%' AND LENGTH(TRIM(bag_size)) > {$len} ORDER BY bag_size ASC LIMIT 1");
+                        if ($ex && $exRow = $ex->fetch_assoc()) {
+                            $full = trim($exRow['bag_size'] ?? '');
+                            if ($full !== '') $bagSizeVal = $full;
+                        }
+                    }
+                    if ($bagSizeVal === '1000') $bagSizeVal = '1000mmX700mm';
+                }
+                $dateDisplay = '';
+                if (!empty($row['latest_submitted'])) {
+                    $dt = $row['latest_submitted'];
+                    if (preg_match('/^(\d{4})-(\d{2})-(\d{2})\s(\d{2}):(\d{2})/', $dt, $m)) {
+                        $h = (int)$m[4]; $min = $m[5];
+                        $ampm = ($h >= 12) ? 'PM' : 'AM';
+                        if ($h > 12) $h -= 12; elseif ($h === 0) $h = 12;
+                        $dateDisplay = $m[2] . '/' . $m[3] . '/' . $m[1] . ', ' . $h . ':' . $min . ' ' . $ampm;
+                    } else {
+                        $dateDisplay = $dt;
+                    }
+                }
+                $optionValue = $baseBatch . ($bagSizeVal !== '' ? '||' . $bagSizeVal : '');
                 $cncCuttingBatches[] = [
-                    'batch' => $row['cnc_cutting_batch'],
-                    'quantity' => (int)($row['total_quantity'] ?? 0)
+                    'batch' => $baseBatch,
+                    'option_value' => $optionValue,
+                    'bag_size' => $bagSizeVal,
+                    'quantity' => (int)($row['total_quantity'] ?? 0),
+                    'date_display' => $dateDisplay
                 ];
             }
         }
@@ -439,11 +480,12 @@ $shiftInCharge = trim($_SESSION['full_name'] ?? $_SESSION['username'] ?? 'User')
     <!-- CNC Cutting Batch - Shown only when Bag is selected -->
     <div class="form-group" id="cncBatchGroup" style="display:none;">
       <label>CNC Cutting Batch: <span style="color:red;">*</span></label>
-      <select id="cnc_cutting_batch" name="cnc_cutting_batch" required onchange="updateReceivedQuantityFromCNCBatch()">
+      <select id="cnc_cutting_batch" name="cnc_cutting_batch" required onchange="updateReceivedQuantityFromCNCBatch(); updateBagSizeFromDropdown();">
         <option value="">-- Select CNC Cutting Batch --</option>
       </select>
+      <input type="hidden" name="bag_size" id="bag_size_from_dropdown" value="">
       <small style="color:#6c757d; display:block; margin-top:8px;">
-        Select a CNC cutting batch from FG entries
+        Select a CNC cutting batch from FG entries (bag size shown is saved with the entry)
       </small>
     </div>
 
@@ -542,7 +584,8 @@ console.log('FG Trip Numbers loaded:', fgTripNumbers);
 const cncBatchQuantities = {};
 <?php
 foreach ($cncCuttingBatches as $batch) {
-    echo "cncBatchQuantities['" . htmlspecialchars($batch['batch'], ENT_QUOTES) . "'] = " . (int)$batch['quantity'] . ";\n";
+    $key = isset($batch['option_value']) && $batch['option_value'] !== '' ? $batch['option_value'] : $batch['batch'];
+    echo "cncBatchQuantities['" . htmlspecialchars($key, ENT_QUOTES) . "'] = " . (int)$batch['quantity'] . ";\n";
 }
 ?>
 
@@ -878,18 +921,33 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+// Set hidden bag_size from selected batch option (exact value shown in dropdown — best practice)
+function updateBagSizeFromDropdown() {
+  const cncSelect = document.getElementById('cnc_cutting_batch');
+  const hid = document.getElementById('bag_size_from_dropdown');
+  if (!cncSelect || !hid) return;
+  const opt = cncSelect.options[cncSelect.selectedIndex];
+  hid.value = (opt && opt.getAttribute('data-bag-size')) ? opt.getAttribute('data-bag-size') : '';
+}
+
 // Function to load CNC Cutting Batches into dropdown
 function loadCNCBatches() {
   const cncSelect = document.getElementById('cnc_cutting_batch');
   if (!cncSelect) return;
   
   cncSelect.innerHTML = '<option value="">-- Select CNC Cutting Batch --</option>';
+  const hid = document.getElementById('bag_size_from_dropdown');
+  if (hid) hid.value = '';
   
   if (cncCuttingBatches && cncCuttingBatches.length > 0) {
     cncCuttingBatches.forEach(batchData => {
       const option = document.createElement('option');
-      option.value = batchData.batch;
-      option.textContent = batchData.batch + ' (Qty: ' + batchData.quantity + ')';
+      const optVal = (batchData.option_value !== undefined && batchData.option_value !== '') ? batchData.option_value : batchData.batch;
+      option.value = optVal;
+      const bagSizeVal = (batchData.bag_size && batchData.bag_size !== '') ? batchData.bag_size : '';
+      option.setAttribute('data-bag-size', bagSizeVal);
+      const datePart = (batchData.date_display && batchData.date_display !== '') ? ' | ' + batchData.date_display : '';
+      option.textContent = batchData.batch + (bagSizeVal ? ' | ' + batchData.bag_size : '') + datePart + ' (Qty: ' + batchData.quantity + ')';
       cncSelect.appendChild(option);
     });
   } else {
