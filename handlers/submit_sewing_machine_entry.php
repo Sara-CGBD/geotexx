@@ -169,38 +169,65 @@ foreach ($alter_columns as $sql) {
         $check_existing->close();
     }
     
-    // Get bag_size from CNC entry if we have entry ID, otherwise use extracted bag_size
+    // Get bag_size and cutting_roll_quantity from CNC entry (for remaining_quantity)
     $bag_size = $cnc_bag_size; // Default to extracted bag_size
+    $cutting_roll_quantity = null;
     if ($cnc_entry_id !== null && $cnc_entry_id > 0) {
-        // Fetch bag_size from the specific CNC entry
-        $bag_size_query = $conn->prepare("SELECT bag_size FROM cnc_entries WHERE id = ?");
-        if ($bag_size_query) {
-            $bag_size_query->bind_param("i", $cnc_entry_id);
-            $bag_size_query->execute();
-            $bag_size_result = $bag_size_query->get_result();
-            if ($bag_size_row = $bag_size_result->fetch_assoc()) {
-                $bag_size = trim($bag_size_row['bag_size'] ?? $cnc_bag_size);
+        $cnc_row_query = $conn->prepare("SELECT bag_size, cutting_roll_quantity FROM cnc_entries WHERE id = ?");
+        if ($cnc_row_query) {
+            $cnc_row_query->bind_param("i", $cnc_entry_id);
+            $cnc_row_query->execute();
+            $cnc_row_result = $cnc_row_query->get_result();
+            if ($cnc_row = $cnc_row_result->fetch_assoc()) {
+                $bag_size = trim($cnc_row['bag_size'] ?? $cnc_bag_size);
+                $cutting_roll_quantity = isset($cnc_row['cutting_roll_quantity']) ? (int)$cnc_row['cutting_roll_quantity'] : null;
             }
-            $bag_size_query->close();
+            $cnc_row_query->close();
+        }
+    }
+    if ($cutting_roll_quantity === null && !empty($cnc_cutting_batch) && !empty($cnc_batch_date) && !empty($cnc_bag_size)) {
+        $hasDateTime = $conn->query("SHOW COLUMNS FROM cnc_entries LIKE 'date_time'")->num_rows > 0;
+        $dateCol = $hasDateTime ? 'date_time' : 'created_at';
+        $cnc_fall = $conn->prepare("SELECT cutting_roll_quantity FROM cnc_entries WHERE cnc_cutting_batch = ? AND DATE(" . $dateCol . ") = ? AND bag_size = ? LIMIT 1");
+        if ($cnc_fall) {
+            $cnc_fall->bind_param("sss", $cnc_cutting_batch, $cnc_batch_date, $cnc_bag_size);
+            $cnc_fall->execute();
+            $res = $cnc_fall->get_result();
+            $row = $res ? $res->fetch_assoc() : null;
+            if ($row && isset($row['cutting_roll_quantity'])) {
+                $cutting_roll_quantity = (int)$row['cutting_roll_quantity'];
+            }
+            $cnc_fall->close();
         }
     }
     
-    // Ensure bag_size column exists in sewing_machine_entry
+    // remaining_quantity = cutting_roll_quantity - (sewing_qty + ncp_piece), store in sewing_machine_entry
+    $total_used_for_remaining = (int)$sewing_qty + (int)$ncp_piece;
+    $remaining_quantity = null;
+    if ($cutting_roll_quantity !== null) {
+        $remaining_quantity = max(0, $cutting_roll_quantity - $total_used_for_remaining);
+    }
+    
+    // Ensure bag_size, final_sewing_quantity and remaining_quantity columns exist in sewing_machine_entry
     $conn->query("ALTER TABLE sewing_machine_entry ADD COLUMN IF NOT EXISTS bag_size VARCHAR(100)");
+    $conn->query("ALTER TABLE sewing_machine_entry ADD COLUMN IF NOT EXISTS final_sewing_quantity INT DEFAULT 0");
+    $conn->query("ALTER TABLE sewing_machine_entry ADD COLUMN IF NOT EXISTS remaining_quantity INT DEFAULT NULL");
+    
+    // final_sewing_quantity = sewing_qty - ncp_piece (stored per row)
+    $final_sewing_quantity = max(0, (int)$sewing_qty - (int)$ncp_piece);
     
     // Insert data
     $stmt = $conn->prepare("
         INSERT INTO sewing_machine_entry 
-        (sewing_id, date_time, shift, reporter_id, cnc_cutting_batch, reference_number, source_cnc_id, project_id, line_no, sewing_qty, ncp_piece, bag_size)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (sewing_id, date_time, shift, reporter_id, cnc_cutting_batch, reference_number, source_cnc_id, project_id, line_no, sewing_qty, ncp_piece, final_sewing_quantity, remaining_quantity, bag_size)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ");
 
     if ($stmt) {
          // Types: sewing_id(s), date_time(s), shift(s), reporter_id(i), cnc_cutting_batch(s), reference_number(s),
-         // source_cnc_id(s), project_id(i), line_no(s), sewing_qty(i), ncp_piece(i), bag_size(s)
-         // Total: 12 parameters = sssississiis
+         // source_cnc_id(s), project_id(i), line_no(s), sewing_qty(i), ncp_piece(i), final_sewing_quantity(i), remaining_quantity(i), bag_size(s)
          $stmt->bind_param(
-             "sssississiis",
+             "sssississiiiis",
              $sewing_id,
              $date_time,
              $shift,
@@ -212,6 +239,8 @@ foreach ($alter_columns as $sql) {
              $line_no,
              $sewing_qty,
              $ncp_piece,
+             $final_sewing_quantity,
+             $remaining_quantity,
              $bag_size
          );
 

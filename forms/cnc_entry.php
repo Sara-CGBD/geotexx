@@ -555,26 +555,26 @@ function selectCNCMachine(btn, groupId){
       return;
     }
     
-    const customInput = document.getElementById('cnc_machine_custom');
-    const hiddenInput = document.getElementById('cnc_machine_id');
-    
-    // Get current machine selection before change
-    const currentlySelectedBtn = document.querySelector(`#${groupId} .btn.selected`);
-    const currentMachineValue = hiddenInput ? hiddenInput.value : '';
-    const currentCustomValue = customInput ? customInput.value.trim() : '';
-    
-    // Determine if currently on Custom machine
-    const isCurrentlyCustom = (currentlySelectedBtn && currentlySelectedBtn.dataset.value === 'custom') || 
-                              (currentCustomValue !== '' && (currentMachineValue === '' || currentMachineValue === currentCustomValue));
-    
+  const customInput = document.getElementById('cnc_machine_custom');
+  const hiddenInput = document.getElementById('cnc_machine_id');
+  
+  // Get current machine selection before change
+  const currentlySelectedBtn = document.querySelector(`#${groupId} .btn.selected`);
+  const currentMachineValue = hiddenInput ? hiddenInput.value : '';
+  const currentCustomValue = customInput ? customInput.value.trim() : '';
+  
+  // Determine if currently on Custom machine
+  const isCurrentlyCustom = (currentlySelectedBtn && currentlySelectedBtn.dataset.value === 'custom') || 
+                            (currentCustomValue !== '' && (currentMachineValue === '' || currentMachineValue === currentCustomValue));
+  
     // Get value from data-value attribute or dataset
     const newMachineValue = btn.getAttribute('data-value') || btn.dataset.value;
     console.log('New machine value:', newMachineValue);
-    
-    // Check if switching from Custom to CNC-01/CNC-02
-    // NOTE: This warning will NOT show when switching TO Custom (Custom allows 100 rolls)
-    // It only shows when switching FROM Custom TO CNC-01/CNC-02
-    if (isCurrentlyCustom && (newMachineValue === 'CNC-01' || newMachineValue === 'CNC-02')) {
+  
+  // Check if switching from Custom to CNC-01/CNC-02
+  // NOTE: This warning will NOT show when switching TO Custom (Custom allows 100 rolls)
+  // It only shows when switching FROM Custom TO CNC-01/CNC-02
+  if (isCurrentlyCustom && (newMachineValue === 'CNC-01' || newMachineValue === 'CNC-02')) {
       // Safely get current roll count
       let currentRollCount = 0;
       if (typeof getCurrentTotalRollCount === 'function') {
@@ -584,28 +584,28 @@ function selectCNCMachine(btn, groupId){
           console.error('Error getting current roll count:', e);
         }
       }
+    
+    // If current roll count exceeds the limit for CNC-01/CNC-02 (4 rolls)
+    if (currentRollCount > 4) {
+      // Store the pending change
+      pendingMachineChange = {
+        btn: btn,
+        groupId: groupId
+      };
       
-      // If current roll count exceeds the limit for CNC-01/CNC-02 (4 rolls)
-      if (currentRollCount > 4) {
-        // Store the pending change
-        pendingMachineChange = {
-          btn: btn,
-          groupId: groupId
-        };
-        
-        // Show warning popup (only for CNC-01/CNC-02, not for Custom)
+      // Show warning popup (only for CNC-01/CNC-02, not for Custom)
         if (typeof showWarningPopup === 'function') {
-          showWarningPopup(`Warning: You can't add more than 4 rolls in ${newMachineValue}`);
+      showWarningPopup(`Warning: You can't add more than 4 rolls in ${newMachineValue}`);
         } else {
           alert(`Warning: You can't add more than 4 rolls in ${newMachineValue}`);
         }
-        return; // Don't apply change yet
-      }
+      return; // Don't apply change yet
     }
-    
-    // Apply the selection change directly if no warning needed
-    // This includes switching TO Custom (which allows 100 rolls, so no warning needed)
-    applyMachineSelection(btn, groupId);
+  }
+  
+  // Apply the selection change directly if no warning needed
+  // This includes switching TO Custom (which allows 100 rolls, so no warning needed)
+  applyMachineSelection(btn, groupId);
   } catch (error) {
     console.error('Error in selectCNCMachine:', error);
     alert('An error occurred while selecting CNC Machine: ' + error.message);
@@ -1306,25 +1306,25 @@ document.addEventListener('DOMContentLoaded', function() {
   
   // Initialize reference fields (disabled by default)
   if (typeof enableReferenceFields === 'function') {
-    enableReferenceFields();
+  enableReferenceFields();
   }
   if (typeof checkCustomMachineInput === 'function') {
-    checkCustomMachineInput();
+  checkCustomMachineInput();
   }
   
   // Load form data asynchronously after page renders for instant page load
   if (typeof loadFormData === 'function') {
-    loadFormData();
+  loadFormData();
   }
   
   // Generate cutting batch on page load (CW-XX format)
   if (typeof generateCuttingBatch === 'function') {
-    generateCuttingBatch();
+  generateCuttingBatch();
   }
   
   // Update summary on page load
   if (typeof updateSummary === 'function') {
-    updateSummary();
+  updateSummary();
   }
   
   // Initialize max cutting quantity

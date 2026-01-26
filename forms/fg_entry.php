@@ -78,25 +78,25 @@ $predefinedBagSizes = array(
 
 $bagSizes = $predefinedBagSizes;
 
-// Fetch recommended weights from database for all bag sizes
+// Fetch recommended weights (bag capacity) from bag_size_master for all bag sizes
 $bagSizeToRecommendedWeightMap = array();
-$fg_table_check = $conn->query("SHOW TABLES LIKE 'fg_entry'");
-if ($fg_table_check && $fg_table_check->num_rows > 0) {
-    // Get the most recent recommended_weight for each bag_size (latest entry for each size)
-    $weightQuery = "SELECT bag_size, recommended_weight 
-                    FROM fg_entry 
-                    WHERE bag_size IS NOT NULL 
-                      AND bag_size != '' 
-                      AND recommended_weight IS NOT NULL 
-                      AND recommended_weight > 0
-                    ORDER BY created_at DESC";
-    $weightResult = $conn->query($weightQuery);
+$master_check = $conn->query("SHOW TABLES LIKE 'bag_size_master'");
+if ($master_check && $master_check->num_rows > 0) {
+    $weightQuery = "SELECT bag_size, bag_capacity FROM bag_size_master 
+                    WHERE bag_size IS NOT NULL AND bag_size != '' AND bag_capacity IS NOT NULL AND bag_capacity != '' 
+                    ORDER BY id ASC";
+    $weightResult = @$conn->query($weightQuery);
     if ($weightResult) {
         while ($row = $weightResult->fetch_assoc()) {
-            $bagSize = $row['bag_size'];
-            // Only set if not already set (to get the most recent one due to DESC order)
+            $bagSize = trim($row['bag_size']);
+            if ($bagSize === '') continue;
+            // Keep first occurrence per bag_size (one capacity per size from master)
             if (!isset($bagSizeToRecommendedWeightMap[$bagSize])) {
-                $bagSizeToRecommendedWeightMap[$bagSize] = (float)$row['recommended_weight'];
+                $capacity = trim($row['bag_capacity']);
+                $num = preg_replace('/[^0-9.]/', '', $capacity);
+                if ($num !== '') {
+                    $bagSizeToRecommendedWeightMap[$bagSize] = (float)$num;
+                }
             }
         }
     }
@@ -104,6 +104,7 @@ if ($fg_table_check && $fg_table_check->num_rows > 0) {
 
 // Also add any custom bag sizes from fg_entry that are not in the predefined list
 $predefinedSizesList = array_column($predefinedBagSizes, 'size');
+$fg_table_check = $conn->query("SHOW TABLES LIKE 'fg_entry'");
 if ($fg_table_check && $fg_table_check->num_rows > 0) {
     $customBagQuery = $conn->query("SELECT DISTINCT bag_size, recommended_weight FROM fg_entry WHERE bag_size IS NOT NULL AND bag_size != '' AND bag_size NOT IN ('" . implode("','", $predefinedSizesList) . "') ORDER BY bag_size ASC LIMIT 10");
     if ($customBagQuery) {
@@ -158,6 +159,7 @@ if ($brandingExists) {
     $hasCnc = $conn->query("SHOW COLUMNS FROM branding_entries LIKE 'cnc_cutting_batch'")->num_rows > 0;
     $hasBagSize = $conn->query("SHOW COLUMNS FROM branding_entries LIKE 'bag_size'")->num_rows > 0;
     $hasPrintQty = $conn->query("SHOW COLUMNS FROM branding_entries LIKE 'print_qty'")->num_rows > 0;
+    $hasMergedPrintQty = $conn->query("SHOW COLUMNS FROM branding_entries LIKE 'merged_print_qty'")->num_rows > 0;
     $hasIsDeleted = $conn->query("SHOW COLUMNS FROM branding_entries LIKE 'is_deleted'")->num_rows > 0;
     $hasCreatedAt = $conn->query("SHOW COLUMNS FROM branding_entries LIKE 'created_at'")->num_rows > 0;
 
@@ -176,11 +178,40 @@ if ($brandingExists) {
             }
         }
 
+        $isDeletedFilter = $hasIsDeleted ? "AND (be.is_deleted = 0 OR be.is_deleted IS NULL)" : "";
+
+        // refToBrandedQtyMap: use merged_print_qty per (ref, batch, bag_size) then sum per reference (so max for FG reflects merged branding totals)
+        if ($hasMergedPrintQty && $hasCnc && $hasPrintQty) {
+            $brandingQtyQuery = "
+                SELECT reference_number, SUM(merged_per_batch) AS total_printed
+                FROM (
+                    SELECT be.reference_number,
+                           COALESCE(MAX(be.merged_print_qty), SUM(be.print_qty)) AS merged_per_batch
+                    FROM branding_entries be
+                    WHERE be.reference_number IS NOT NULL AND be.reference_number <> ''
+                      AND be.cnc_cutting_batch IS NOT NULL AND be.cnc_cutting_batch <> ''
+                      {$isDeletedFilter}
+                      {$fgRefFilter}
+                    GROUP BY be.reference_number, be.cnc_cutting_batch" . ($hasBagSize ? ", be.bag_size" : "") . "
+                ) t
+                GROUP BY reference_number
+                LIMIT 200
+            ";
+            $qRes = $conn->query($brandingQtyQuery);
+            if ($qRes) {
+                while ($row = $qRes->fetch_assoc()) {
+                    $ref = $row['reference_number'];
+                    if (!isset($refToBrandedQtyMap[$ref])) {
+                        $refToBrandedQtyMap[$ref] = (int)($row['total_printed'] ?? 0);
+                    }
+                }
+            }
+        }
+
         $cncCol = $hasCnc ? "MAX(be.cnc_cutting_batch) AS cnc_cutting_batch" : "NULL AS cnc_cutting_batch";
         $bagCol = $hasBagSize ? "MAX(be.bag_size) AS bag_size" : "NULL AS bag_size";
         $printCol = $hasPrintQty ? "SUM(be.print_qty) AS total_printed" : "0 AS total_printed";
         $orderCol = $hasCreatedAt ? "MAX(be.created_at)" : "MAX(be.reference_number)";
-        $isDeletedFilter = $hasIsDeleted ? "AND (be.is_deleted = 0 OR be.is_deleted IS NULL)" : "";
 
         $brandingQuery = "
             SELECT 
@@ -211,6 +242,7 @@ if ($brandingExists) {
                     }
                     $refToBagSizeMap[$ref][] = $row['bag_size'];
                 }
+                // refToBrandedQtyMap already filled from merged query when merged_print_qty exists; else use per-ref sum
                 if (!isset($refToBrandedQtyMap[$ref])) {
                     $refToBrandedQtyMap[$ref] = (int)($row['total_printed'] ?? 0);
                 }
@@ -581,14 +613,204 @@ if ($hasRollTransfer) {
       <label>Product Type: <span style="color:red;">*</span></label>
       <div class="btn-group" id="productTypeGroup" style="display:flex; gap:10px; flex-wrap:wrap;">
         <?php if ($canAccessRoll): ?>
-        <button type="button" class="btn product-type-btn" id="rollProductTypeBtn" onclick="selectProductType('roll')" style="background:#e0e0e0;color:#333; border:2px solid #ccc; cursor:pointer;">
+        <button type="button" class="btn product-type-btn" id="rollProductTypeBtn" onclick="if(window.selectProductType) window.selectProductType('roll');" style="background:#e0e0e0;color:#333; border:2px solid #ccc; cursor:pointer;">
           <i class="fas fa-scroll"></i> Roll
         </button>
         <?php endif; ?>
         <?php if ($canAccessBag): ?>
-        <button type="button" class="btn product-type-btn" id="bagProductTypeBtn" onclick="selectProductType('bag')" style="background:#e0e0e0;color:#333; border:2px solid #ccc; cursor:pointer;">
+        <button type="button" class="btn product-type-btn" id="bagProductTypeBtn" style="background:#e0e0e0;color:#333; border:2px solid #ccc; cursor:pointer !important; pointer-events:auto !important; position:relative; z-index:10; user-select:none; -webkit-user-select:none;">
           <i class="fas fa-shopping-bag"></i> Bag
         </button>
+        <script>
+          // Define functions early so they're available for button handlers
+          // These will be redefined later, but having them here ensures they exist when needed
+          if (typeof window.selectProductType === 'undefined') {
+            window.selectProductType = function(type) {
+              console.log('selectProductType (early) called with type:', type);
+              const productTypeInput = document.getElementById('product_type');
+              if (productTypeInput) {
+                productTypeInput.value = type;
+              }
+              // Show product fields container
+              const productFieldsContainer = document.getElementById('productFieldsContainer');
+              if (productFieldsContainer) productFieldsContainer.style.display = 'block';
+              
+              // Show bag-specific fields
+              const bagCncBatchGroup = document.getElementById('bagCncBatchGroup');
+              const bagReferenceGroup = document.getElementById('bagReferenceGroup');
+              const cncBatchDisplayGroup = document.getElementById('cncBatchDisplayGroup');
+              const bagSizeFormGroup = document.getElementById('bagSizeFormGroup');
+              
+              if (type === 'bag') {
+                if (bagCncBatchGroup) bagCncBatchGroup.style.display = 'block';
+                // Hide reference group for bags (only for rolls)
+                if (bagReferenceGroup) bagReferenceGroup.style.display = 'none';
+                if (cncBatchDisplayGroup) cncBatchDisplayGroup.style.display = 'block';
+                if (bagSizeFormGroup) bagSizeFormGroup.style.display = 'block';
+                
+                // Load CNC batches directly (no reference number needed for bags)
+                if (window.loadBagReferences) window.loadBagReferences();
+              }
+              
+              // Full implementation will be loaded later and will override this
+              if (window.selectProductTypeFull) {
+                return window.selectProductTypeFull(type);
+              }
+            };
+          }
+          
+          // Define placeholder functions that will be replaced later
+          window.loadBagReferences = function() {
+            // Wait for full implementation
+            if (window.loadBagReferencesFull) {
+              return window.loadBagReferencesFull();
+            } else {
+              console.warn('loadBagReferencesFull not yet available');
+            }
+          };
+          
+          window.loadBagReferencesFromBranding = function() {
+            // Wait for full implementation
+            if (window.loadBagReferencesFromBrandingFull) {
+              return window.loadBagReferencesFromBrandingFull();
+            } else {
+              console.warn('loadBagReferencesFromBrandingFull not yet available');
+            }
+          };
+          
+          // Set up button click handler and auto-select for bag-only users
+          <?php if (!$canAccessRoll && $canAccessBag): ?>
+          (function() {
+            function setupBagButton() {
+              const btn = document.getElementById('bagProductTypeBtn');
+              if (!btn) {
+                setTimeout(setupBagButton, 50);
+                return;
+              }
+              
+              // Ensure button is fully enabled and clickable
+              btn.removeAttribute('disabled');
+              btn.disabled = false;
+              btn.style.pointerEvents = 'auto';
+              btn.style.cursor = 'pointer';
+              btn.style.opacity = '1';
+              btn.style.visibility = 'visible';
+              btn.style.display = '';
+              btn.style.position = 'relative';
+              btn.style.zIndex = '10';
+              
+              // Remove old onclick and add event listener
+              btn.removeAttribute('onclick');
+              btn.onclick = null;
+              
+              // Add click event listener
+              btn.addEventListener('click', function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                console.log('Bag button clicked');
+                
+                // Update button styling
+                btn.style.background = '#2196F3';
+                btn.style.color = '#fff';
+                btn.style.border = '2px solid #1976D2';
+                btn.classList.add('selected');
+                
+                // Remove selected styling from other buttons
+                document.querySelectorAll('.product-type-btn').forEach(b => {
+                  if (b !== btn) {
+                    b.style.background = '#e0e0e0';
+                    b.style.color = '#333';
+                    b.style.border = '2px solid #ccc';
+                    b.classList.remove('selected');
+                  }
+                });
+                
+                // Set product type
+                const productTypeInput = document.getElementById('product_type');
+                if (productTypeInput) {
+                  productTypeInput.value = 'bag';
+                }
+                
+                // Show product fields
+                const productFieldsContainer = document.getElementById('productFieldsContainer');
+                if (productFieldsContainer) productFieldsContainer.style.display = 'block';
+                
+                // Show bag-specific fields
+                const bagCncBatchGroup = document.getElementById('bagCncBatchGroup');
+                const bagReferenceGroup = document.getElementById('bagReferenceGroup');
+                const cncBatchDisplayGroup = document.getElementById('cncBatchDisplayGroup');
+                const bagSizeFormGroup = document.getElementById('bagSizeFormGroup');
+                
+                if (bagCncBatchGroup) bagCncBatchGroup.style.display = 'block';
+                // Hide reference group for bags (only for rolls)
+                if (bagReferenceGroup) bagReferenceGroup.style.display = 'none';
+                if (cncBatchDisplayGroup) cncBatchDisplayGroup.style.display = 'block';
+                if (bagSizeFormGroup) bagSizeFormGroup.style.display = 'block';
+                
+                // Hide roll-specific fields
+                const tripNumberGroup = document.getElementById('tripNumberGroup');
+                const rollReferenceGroup = document.getElementById('rollReferenceGroup');
+                const rollSizeFormGroup = document.getElementById('rollSizeFormGroup');
+                
+                if (tripNumberGroup) tripNumberGroup.style.display = 'none';
+                if (rollReferenceGroup) rollReferenceGroup.style.display = 'none';
+                if (rollSizeFormGroup) rollSizeFormGroup.style.display = 'none';
+                
+                // Call selectProductType if available, otherwise use direct approach
+                if (window.selectProductType && typeof window.selectProductType === 'function') {
+                  window.selectProductType('bag');
+                } else {
+                  // Direct approach - load CNC batches (no reference number for bags)
+                  // Try multiple ways to load batches
+                  if (window.loadBagReferences) {
+                    window.loadBagReferences();
+                  } else if (window.loadBagReferencesFull) {
+                    window.loadBagReferencesFull();
+                  } else if (typeof loadBagReferencesFull === 'function') {
+                    loadBagReferencesFull();
+                  }
+                  
+                  // Update summary if function exists
+                  if (typeof updateSummary === 'function') {
+                    updateSummary();
+                  }
+                }
+              });
+              
+              // Auto-select if function is available
+              if (window.selectProductType && typeof window.selectProductType === 'function') {
+                console.log('Auto-selecting Bag');
+                window.selectProductType('bag');
+              } else {
+                // Wait for function
+                const checkInterval = setInterval(function() {
+                  if (window.selectProductType && typeof window.selectProductType === 'function') {
+                    clearInterval(checkInterval);
+                    console.log('Auto-selecting Bag - function now available');
+                    window.selectProductType('bag');
+                  }
+                }, 100);
+                
+                // Stop checking after 3 seconds
+                setTimeout(function() {
+                  clearInterval(checkInterval);
+                  // Manually trigger selection
+                  btn.click();
+                }, 3000);
+              }
+            }
+            
+            // Try immediately and on various events
+            setupBagButton();
+            if (document.readyState === 'loading') {
+              document.addEventListener('DOMContentLoaded', setupBagButton);
+            }
+            setTimeout(setupBagButton, 200);
+            setTimeout(setupBagButton, 500);
+            window.addEventListener('load', setupBagButton);
+          })();
+          <?php endif; ?>
+        </script>
         <?php endif; ?>
         <?php if (!$canAccessRoll && !$canAccessBag): ?>
         <div style="padding:15px; background:#fff3cd; border:1px solid #ffc107; border-radius:6px; color:#856404;">
@@ -626,7 +848,7 @@ if ($hasRollTransfer) {
     <!-- CNC Cutting Batch (for Bags) -->
     <div class="form-group" id="bagCncBatchGroup">
       <label>CNC Cutting Batch: <span style="color:red;">*</span></label>
-      <select id="bag_cnc_cutting_batch" onchange="updateReferenceFromCNCBatch()">
+      <select id="bag_cnc_cutting_batch" name="bag_cnc_cutting_batch">
         <option value="">Select Product Type First</option>
       </select>
       <small id="cnc_batch_hint" style="color:#6c757d; display:block; margin-top:5px;">Select a CNC cutting batch for bags</small>
@@ -691,8 +913,9 @@ if ($hasRollTransfer) {
     // Reference to Branded Quantity mapping (total bags produced in branding)
     const refToBrandedQtyMap = <?php echo json_encode($refToBrandedQtyMap); ?>;
     
-    // Bag size to recommended weight mapping from database
-    const bagSizeToRecommendedWeightFromDB = <?php echo json_encode($bagSizeToRecommendedWeightMap); ?>;
+    // Bag size to recommended weight mapping from database (attach to window for use in later script blocks)
+    window.bagSizeToRecommendedWeightFromDB = <?php echo json_encode($bagSizeToRecommendedWeightMap); ?>;
+    const bagSizeToRecommendedWeightFromDB = window.bagSizeToRecommendedWeightFromDB;
     
     // FG roll references by trip
     const fgTripReferences = <?php echo json_encode($fgRollTripReferences); ?>;
@@ -986,11 +1209,8 @@ if ($hasRollTransfer) {
     ];
     </script>
 
-    <!-- CNC Cutting Batch Number (hidden field - populated from dropdown for bags, auto-filled for rolls) -->
-    <div class="form-group" id="cncBatchDisplayGroup" style="display:none;">
-      <label>CNC Cutting Batch:</label>
-      <input type="text" id="cnc_cutting_batch" name="cnc_cutting_batch" readonly style="background-color: #f0f0f0;" placeholder="Auto-filled">
-    </div>
+    <!-- Hidden CNC Cutting Batch field for form submission (populated from dropdown) -->
+    <input type="hidden" id="cnc_cutting_batch" name="cnc_cutting_batch" value="">
 
     <!-- Hidden datetime -->
     <input type="hidden" id="dateTime" name="date_time">
@@ -1043,38 +1263,38 @@ if ($hasRollTransfer) {
     <div class="form-group" id="bagSizeFormGroup">
       <label>Bag Size:</label>
       <small id="bagSizeHint" style="color:#2196F3; display:block; margin-bottom:8px; font-weight:500;">
-        <i class="fas fa-info-circle"></i> Select a Reference Number first. Branded bags will show specific sizes, non-branded will show all sizes.
+        <i class="fas fa-info-circle"></i> Select a CNC Cutting Batch first to see available bag sizes from branding
       </small>
       <div style="margin-bottom: 10px; max-height: 500px; overflow-y: auto; border: 1px solid #ddd; padding: 10px; border-radius: 5px;">
         <div class="btn-group" id="bagSizeButtonGroup">
-          <button type="button" class="btn" onclick="selectBagSize('2000mmX1500mm', null)">2000mmX1500mm</button>
-          <button type="button" class="btn" onclick="selectBagSize('1200mmX950mm', null)">1200mmX950mm</button>
-          <button type="button" class="btn" onclick="selectBagSize('1250mmX1000mm', null)">1250mmX1000mm</button>
-          <button type="button" class="btn" onclick="selectBagSize('1225mmX1000mm', null)">1225mmX1000mm</button>
-          <button type="button" class="btn" onclick="selectBagSize('1300mmX1050mm', null)">1300mmX1050mm</button>
-          <button type="button" class="btn" onclick="selectBagSize('1600mmX850mm', null)">1600mmX850mm</button>
-          <button type="button" class="btn" onclick="selectBagSize('1100mmX850mm', null)">1100mmX850mm</button>
-          <button type="button" class="btn" onclick="selectBagSize('1200mmX600mm', null)">1200mmX600mm</button>
-          <button type="button" class="btn" onclick="selectBagSize('1100mmX800mm', null)">1100mmX800mm</button>
-          <button type="button" class="btn" onclick="selectBagSize('1125mmX900mm', null)">1125mmX900mm</button>
-          <button type="button" class="btn" onclick="selectBagSize('1150mmX800mm', null)">1150mmX800mm</button>
-          <button type="button" class="btn" onclick="selectBagSize('1150mmX850mm', null)">1150mmX850mm</button>
-          <button type="button" class="btn" onclick="selectBagSize('1150mmX900mm', null)">1150mmX900mm</button>
-          <button type="button" class="btn" onclick="selectBagSize('1700mmX1250mm', null)">1700mmX1250mm</button>
-          <button type="button" class="btn" onclick="selectBagSize('1050mmX800mm', null)">1050mmX800mm</button>
-          <button type="button" class="btn" onclick="selectBagSize('1075mmX850mm', null)">1075mmX850mm</button>
-          <button type="button" class="btn" onclick="selectBagSize('1030mmX700mm', null)">1030mmX700mm</button>
-          <button type="button" class="btn" onclick="selectBagSize('1000mmX800mm', null)">1000mmX800mm</button>
-          <button type="button" class="btn" onclick="selectBagSize('950mmX750mm', null)">950mmX750mm</button>
-          <button type="button" class="btn" onclick="selectBagSize('950mmX500mm', null)">950mmX500mm</button>
-          <button type="button" class="btn" onclick="selectBagSize('830mmX600mm', null)">830mmX600mm</button>
-          <button type="button" class="btn" onclick="selectBagSize('300mmX299mm', null)">300mmX299mm</button>
-          <button type="button" class="btn" onclick="selectBagSize('500mmX499mm', null)">500mmX499mm</button>
-          <button type="button" class="btn" onclick="selectBagSize('700mmX700mm', null)">700mmX700mm</button>
-          <button type="button" class="btn" onclick="selectBagSize('850mmX700mm', null)">850mmX700mm</button>
-          <button type="button" class="btn" onclick="selectBagSize('1030mmX750mm', null)">1030mmX750mm</button>
-          <button type="button" class="btn" onclick="selectBagSize('1000mmX700mm', null)">1000mmX700mm</button>
-          <button type="button" class="btn custom-bag-size-btn" onclick="selectBagSize('custom', null)" style="background:#6c757d;color:#fff;">Custom (Enter manually)</button>
+          <button type="button" class="btn" onclick="selectBagSize('2000mmX1500mm', null, this)">2000mmX1500mm</button>
+          <button type="button" class="btn" onclick="selectBagSize('1200mmX950mm', null, this)">1200mmX950mm</button>
+          <button type="button" class="btn" onclick="selectBagSize('1250mmX1000mm', null, this)">1250mmX1000mm</button>
+          <button type="button" class="btn" onclick="selectBagSize('1225mmX1000mm', null, this)">1225mmX1000mm</button>
+          <button type="button" class="btn" onclick="selectBagSize('1300mmX1050mm', null, this)">1300mmX1050mm</button>
+          <button type="button" class="btn" onclick="selectBagSize('1600mmX850mm', null, this)">1600mmX850mm</button>
+          <button type="button" class="btn" onclick="selectBagSize('1100mmX850mm', null, this)">1100mmX850mm</button>
+          <button type="button" class="btn" onclick="selectBagSize('1200mmX600mm', null, this)">1200mmX600mm</button>
+          <button type="button" class="btn" onclick="selectBagSize('1100mmX800mm', null, this)">1100mmX800mm</button>
+          <button type="button" class="btn" onclick="selectBagSize('1125mmX900mm', null, this)">1125mmX900mm</button>
+          <button type="button" class="btn" onclick="selectBagSize('1150mmX800mm', null, this)">1150mmX800mm</button>
+          <button type="button" class="btn" onclick="selectBagSize('1150mmX850mm', null, this)">1150mmX850mm</button>
+          <button type="button" class="btn" onclick="selectBagSize('1150mmX900mm', null, this)">1150mmX900mm</button>
+          <button type="button" class="btn" onclick="selectBagSize('1700mmX1250mm', null, this)">1700mmX1250mm</button>
+          <button type="button" class="btn" onclick="selectBagSize('1050mmX800mm', null, this)">1050mmX800mm</button>
+          <button type="button" class="btn" onclick="selectBagSize('1075mmX850mm', null, this)">1075mmX850mm</button>
+          <button type="button" class="btn" onclick="selectBagSize('1030mmX700mm', null, this)">1030mmX700mm</button>
+          <button type="button" class="btn" onclick="selectBagSize('1000mmX800mm', null, this)">1000mmX800mm</button>
+          <button type="button" class="btn" onclick="selectBagSize('950mmX750mm', null, this)">950mmX750mm</button>
+          <button type="button" class="btn" onclick="selectBagSize('950mmX500mm', null, this)">950mmX500mm</button>
+          <button type="button" class="btn" onclick="selectBagSize('830mmX600mm', null, this)">830mmX600mm</button>
+          <button type="button" class="btn" onclick="selectBagSize('300mmX299mm', null, this)">300mmX299mm</button>
+          <button type="button" class="btn" onclick="selectBagSize('500mmX499mm', null, this)">500mmX499mm</button>
+          <button type="button" class="btn" onclick="selectBagSize('700mmX700mm', null, this)">700mmX700mm</button>
+          <button type="button" class="btn" onclick="selectBagSize('850mmX700mm', null, this)">850mmX700mm</button>
+          <button type="button" class="btn" onclick="selectBagSize('1030mmX750mm', null, this)">1030mmX750mm</button>
+          <button type="button" class="btn" onclick="selectBagSize('1000mmX700mm', null, this)">1000mmX700mm</button>
+          <button type="button" class="btn custom-bag-size-btn" onclick="selectBagSize('custom', null, this)" style="background:#6c757d;color:#fff;">Custom (Enter manually)</button>
         </div>
       </div>
       <input type="text" id="bag_size_custom" placeholder="Enter custom bag size" style="margin-top: 10px; display: none;">
@@ -1102,19 +1322,19 @@ if ($hasRollTransfer) {
       <input type="hidden" id="thickness_mm" name="thickness_mm" value="">
     </div>
 
-    <!-- Actual weight for bags (manual input, always shown for bags) -->
+    <!-- Actual weight for bags (1 kg per quality checked pc, after branding print quantity) -->
     <div class="form-group" id="actualWeightBagGroup" style="display:none;">
       <label>Actual Weight (kg): <span style="color:red;">*</span></label>
-      <input type="number" id="actual_weight_bag" name="actual_weight_bag" min="0.01" step="0.01" placeholder="Enter actual weight in kg" required>
+      <input type="number" id="actual_weight_bag" name="actual_weight_bag" min="1" step="1" placeholder="Auto: 1 kg per quality checked pc" required>
       <small style="color:#6c757d; display:block; margin-top:5px;">
-        <i class="fas fa-info-circle"></i> Enter the actual weight of the bags manually
+        <i class="fas fa-info-circle"></i> Set to 1 kg per quality checked piece (same as branding print quantity passed)
       </small>
     </div>
 
     <!-- Quality checked -->
     <div class="form-group" id="qualityCheckedFormGroup">
       <label>Quality Checked (pcs): <span id="totalPrintedQtyLabel" style="color:#27ae60; font-weight:600; font-size:13px;"></span> <span id="maxBrandedQtyLabel" style="color:#2196F3; font-weight:normal; font-size:13px;"></span></label>
-      <input type="number" id="quality_checked" name="quality_checked" min="1" onchange="validateQualityChecked(true)" onblur="validateQualityChecked(true)" oninput="debounceValidateQualityChecked()">
+      <input type="number" id="quality_checked" name="quality_checked" min="1" onchange="validateQualityChecked(true); updateActualWeightFromQualityChecked();" onblur="validateQualityChecked(true)" oninput="debounceValidateQualityChecked(); updateActualWeightFromQualityChecked();">
       <small id="qualityCheckedHint" style="color:#6c757d; display:block; margin-top:5px;">
         <i class="fas fa-info-circle"></i> Enter the number of bags to be quality checked
       </small>
@@ -1182,10 +1402,32 @@ function debounceValidateQualityChecked() {
   if (qualityCheckedDebounceTimer) {
     clearTimeout(qualityCheckedDebounceTimer);
   }
-  
-  // Set new timer - validate after 500ms of no typing (without resetting value)
+
+  // After user stops typing, if value exceeds max show modern popup and reset
   qualityCheckedDebounceTimer = setTimeout(function() {
-    validateQualityChecked(false); // false = don't reset value, just show hints
+    const productType = document.getElementById('product_type').value;
+    if (productType !== 'bag') {
+      validateQualityChecked(false);
+      return;
+    }
+    const qualityCheckedInput = document.getElementById('quality_checked');
+    const qualityChecked = parseInt(qualityCheckedInput.value, 10) || 0;
+    let maxAllowed = 0;
+    const cncBatchSelect = document.getElementById('bag_cnc_cutting_batch');
+    if (cncBatchSelect && cncBatchSelect.value) {
+      const opt = cncBatchSelect.options[cncBatchSelect.selectedIndex];
+      if (opt) maxAllowed = parseInt(opt.getAttribute('data-total-printed'), 10) || 0;
+    }
+    if (maxAllowed === 0) {
+      const ref = document.getElementById('reference_number').value;
+      if (ref && typeof refToBrandedQtyMap !== 'undefined' && refToBrandedQtyMap[ref])
+        maxAllowed = refToBrandedQtyMap[ref];
+    }
+    if (maxAllowed > 0 && qualityChecked > maxAllowed) {
+      validateQualityChecked(true); // show popup and reset
+    } else {
+      validateQualityChecked(false);
+    }
   }, 500);
 }
 
@@ -1281,8 +1523,8 @@ document.addEventListener('DOMContentLoaded', function() {
         rollButton.style.display = '';
         rollButton.disabled = false;
         setTimeout(function() {
-          if (typeof selectProductType === 'function') {
-            selectProductType('roll');
+          if (window.selectProductType && typeof window.selectProductType === 'function') {
+            window.selectProductType('roll');
           } else {
             rollButton.click();
           }
@@ -1338,7 +1580,8 @@ const bagSizeToRecommendedKg = {
   '830mmx600mm': 78
 };
 
-function selectProductType(type) {
+// Full implementation of selectProductType (replaces placeholder)
+function selectProductTypeFull(type) {
   console.log('selectProductType called with type:', type);
   
   // Remove selected styling from all product type buttons
@@ -1459,16 +1702,14 @@ function selectProductType(type) {
     if(tripNumberGroup) tripNumberGroup.style.display = 'none';
     if(productFieldsContainer) productFieldsContainer.style.display = 'block';
     
-    // Show reference dropdown for bags (to get CNC batch from branding entries)
-    if (bagReferenceGroup) bagReferenceGroup.style.display = 'block';
+    // Hide reference dropdown for bags (only for rolls)
+    if (bagReferenceGroup) bagReferenceGroup.style.display = 'none';
     
-    // Show CNC batch display field (will be populated from reference selection)
-    const cncBatchDisplayGroup = document.getElementById('cncBatchDisplayGroup');
-    if (cncBatchDisplayGroup) cncBatchDisplayGroup.style.display = 'block';
-    
-    // Show CNC batch dropdown for bags (alternative method - can be used instead of reference)
+    // Show CNC batch dropdown for bags (direct selection from branding entries, no auto-fill)
     const bagCncBatchGroup = document.getElementById('bagCncBatchGroup');
     if (bagCncBatchGroup) bagCncBatchGroup.style.display = 'block';
+    
+    // cncBatchDisplayGroup removed - no auto-fill field for bags
     
     const bagSizeFormGroup = document.getElementById('bagSizeFormGroup');
     const recommendedWeightGroup = document.getElementById('recommendedWeightGroup');
@@ -1476,27 +1717,39 @@ function selectProductType(type) {
     const qualityCheckedFormGroup = document.getElementById('qualityCheckedFormGroup');
     const passedQtyFormGroup = document.getElementById('passedQtyFormGroup');
     const rejectedQtyFormGroup = document.getElementById('rejectedQtyFormGroup');
-    const cncBatchDisplayGroup = document.getElementById('cncBatchDisplayGroup');
   
     if(bagSizeFormGroup) bagSizeFormGroup.style.display = 'block';
     if(actualWeightBagGroup) actualWeightBagGroup.style.display = 'block';
     if(qualityCheckedFormGroup) qualityCheckedFormGroup.style.display = 'block';
     if(passedQtyFormGroup) passedQtyFormGroup.style.display = 'block';
     if(rejectedQtyFormGroup) rejectedQtyFormGroup.style.display = 'block';
-    // Show CNC batch display group - it will be populated when reference is selected
-    if(cncBatchDisplayGroup) cncBatchDisplayGroup.style.display = 'block';
+    // cncBatchDisplayGroup removed - no auto-fill field for bags
     
     // Hide roll-specific fields
     const rollSizeFormGroup = document.getElementById('rollSizeFormGroup');
 
     if(rollSizeFormGroup) rollSizeFormGroup.style.display = 'none';
     
-    loadBagReferences();
-    loadBagReferencesFromBranding(); // Load references from branding entries
+    // Load CNC batches immediately (no delay)
+    if (typeof loadBagReferencesFull === 'function') {
+      loadBagReferencesFull();
+    } else if (window.loadBagReferencesFull) {
+      window.loadBagReferencesFull();
+    } else if (window.loadBagReferences) {
+      window.loadBagReferences();
+    }
   }
   
   updateSummary();
 }
+
+// Assign full implementation to window and replace placeholder
+window.selectProductTypeFull = selectProductTypeFull;
+window.selectProductType = function(type) {
+  if (window.selectProductTypeFull) {
+    return window.selectProductTypeFull(type);
+  }
+};
 
 function loadBagReferencesFromBranding() {
   // Populate reference dropdown with references from branding entries
@@ -1543,57 +1796,154 @@ function loadBagReferencesFromBranding() {
   }
 }
 
-function loadBagReferences() {
-  // Load CNC cutting batches for bags (instead of reference numbers)
+// Full implementation of loadBagReferences
+function loadBagReferencesFull() {
+  // Load CNC cutting batches from branding_entries (batches that were submitted in branding entry)
   const cncBatchSelect = document.getElementById('bag_cnc_cutting_batch');
   const cncBatchHint = document.getElementById('cnc_batch_hint');
   
-  if (!cncBatchSelect) return;
+  if (!cncBatchSelect) {
+    return;
+  }
   
-  cncBatchSelect.innerHTML = '<option value="">-- Loading CNC Cutting Batches... --</option>';
+  // Don't reload if dropdown already has options (except placeholder) and a selection exists
+  // This prevents clearing the user's selection
+  if (cncBatchSelect.options.length > 1 && cncBatchSelect.value) {
+    return; // Already loaded and has a selection
+  }
   
-  // Fetch CNC cutting batches from API
-  fetch('api/get_cnc_cutting_batches.php')
-    .then(response => response.json())
+  // Attach change event listener only once using global handler
+  if (!window.handleCNCBatchChangeGlobal) {
+    window.handleCNCBatchChangeGlobal = function(e) {
+      // Process immediately - browser has already set the selection
+      updateReferenceFromCNCBatch(e);
+    };
+  }
+  
+  if (!cncBatchSelect.hasAttribute('data-listener-attached')) {
+    cncBatchSelect.addEventListener('change', window.handleCNCBatchChangeGlobal, false);
+    cncBatchSelect.setAttribute('data-listener-attached', 'true');
+  }
+  
+  // Show loading state briefly
+  if (cncBatchHint) {
+    cncBatchHint.textContent = 'Loading batches...';
+    cncBatchHint.style.color = '#2196F3';
+  }
+  
+  // Fetch CNC cutting batches from branding_entries table immediately
+  fetch('api/get_branding_cnc_batches_for_fg.php')
+    .then(response => {
+      if (!response.ok) {
+        // Silently retry or just show empty
+        return { success: true, batches: [] };
+      }
+      return response.json();
+    })
     .then(data => {
       if (data.success && data.batches && data.batches.length > 0) {
+        // Preserve current selection if one exists
+        const currentValue = cncBatchSelect.value;
+        const currentIndex = cncBatchSelect.selectedIndex;
+        
+        // Clear and populate dropdown efficiently
         cncBatchSelect.innerHTML = '<option value="">-- Select CNC Cutting Batch --</option>';
+        
+        // Use DocumentFragment for better performance
+        const fragment = document.createDocumentFragment();
+        let preservedIndex = -1;
+        let optionIndex = 1; // Start at 1 because 0 is the placeholder
+        
         data.batches.forEach(batch => {
-    const option = document.createElement('option');
-          option.value = batch.cnc_cutting_batch;
-          // Display batch number with date if available
-          let displayText = batch.cnc_cutting_batch;
+          const option = document.createElement('option');
+          const batchValue = batch.cnc_cutting_batch || batch.batch;
+          const bagSizePart = (batch.bag_size || '').trim();
+          // Unique value per (batch, bag_size) so selecting one option gives correct data-bag-size
+          option.value = bagSizePart ? batchValue + '||' + bagSizePart : batchValue;
+          
+          // Store total branded qty (used in display and for max Quality Checked)
+          var totalBranded = parseInt(batch.total_print_qty, 10) || 0;
+
+          // Display batch number with date, bag size, quantity, and reference if available
+          let displayText = batchValue;
           if (batch.batch_date) {
-            displayText += ' (' + batch.batch_date + ')';
+            displayText += ' - ' + batch.batch_date;
+          }
+          if (batch.bag_size) {
+            displayText += ' [' + batch.bag_size + ']';
+          }
+          displayText += ' — ' + totalBranded + ' pcs';
+          if (batch.reference_numbers) {
+            const refs = batch.reference_numbers.split(', ').slice(0, 2);
+            displayText += ' (' + refs.join(', ') + (batch.reference_numbers.split(', ').length > 2 ? '...' : '') + ')';
           }
           option.textContent = displayText;
-          option.setAttribute('data-reference', batch.reference_number || '');
+          option.setAttribute('data-reference', batch.reference_numbers || '');
           option.setAttribute('data-bag-size', batch.bag_size || '');
-          option.setAttribute('data-total-printed', batch.total_printed || 0);
+          option.setAttribute('data-print-qty', totalBranded);
+          option.setAttribute('data-total-printed', totalBranded);
+          option.setAttribute('data-ncp-piece', batch.total_ncp_piece || 0);
           option.setAttribute('data-batch-date', batch.batch_date || '');
-          cncBatchSelect.appendChild(option);
-  });
+          
+          // Check if this was the previously selected value (match by full value or batch only for backwards compat)
+          const optionVal = option.value;
+          if (currentValue && (optionVal === currentValue || batchValue === currentValue)) {
+            preservedIndex = optionIndex;
+            option.selected = true;
+          }
+          
+          fragment.appendChild(option);
+          optionIndex++;
+        });
+        cncBatchSelect.appendChild(fragment);
+        
+        // Restore selection if it was preserved
+        if (preservedIndex > 0) {
+          cncBatchSelect.selectedIndex = preservedIndex;
+          cncBatchSelect.value = currentValue;
+        }
+        
+        // Re-attach event listener after innerHTML (which removes listeners)
+        // Use the global handler to avoid duplicates
+        if (!window.handleCNCBatchChangeGlobal) {
+          window.handleCNCBatchChangeGlobal = function(e) {
+            // Let the browser handle the selection naturally - don't interfere
+            const select = e.target || document.getElementById('bag_cnc_cutting_batch');
+            if (select && select.value) {
+              // Process immediately - the selection is already set by the browser
+              updateReferenceFromCNCBatch(e);
+            }
+          };
+        }
+        cncBatchSelect.removeEventListener('change', window.handleCNCBatchChangeGlobal);
+        cncBatchSelect.addEventListener('change', window.handleCNCBatchChangeGlobal, false);
+        cncBatchSelect.setAttribute('data-listener-attached', 'true');
+        
         if (cncBatchHint) {
           cncBatchHint.textContent = 'Select a CNC cutting batch from branding entries';
           cncBatchHint.style.color = '#6c757d';
         }
       } else {
-        cncBatchSelect.innerHTML = '<option value="">-- No CNC Cutting Batches Available --</option>';
+        // If no batches, just show empty option - no error message
+        if (cncBatchSelect.options.length <= 1) {
+          cncBatchSelect.innerHTML = '<option value="">-- No Batches Available --</option>';
+        }
         if (cncBatchHint) {
-          cncBatchHint.textContent = 'No CNC cutting batches found. Please create branding entries first.';
-          cncBatchHint.style.color = '#e74c3c';
+          cncBatchHint.textContent = 'No CNC cutting batches found in branding entries';
+          cncBatchHint.style.color = '#6c757d';
         }
       }
     })
     .catch(err => {
-      console.error('Error loading CNC cutting batches:', err);
-      cncBatchSelect.innerHTML = '<option value="">-- Error Loading Batches --</option>';
+      // Silently handle errors - don't show error messages, just keep existing state
+      if (cncBatchSelect.options.length <= 1) {
+        cncBatchSelect.innerHTML = '<option value="">-- Select CNC Cutting Batch --</option>';
+      }
       if (cncBatchHint) {
-        cncBatchHint.textContent = 'Error loading CNC cutting batches. Please refresh the page.';
-        cncBatchHint.style.color = '#e74c3c';
+        cncBatchHint.textContent = 'Select a CNC cutting batch from branding entries';
+        cncBatchHint.style.color = '#6c757d';
       }
     });
-  
   
   // Reset all bag size buttons to be visible
   const bagSizeButtons = document.querySelectorAll('#bagSizeButtonGroup .btn');
@@ -1605,7 +1955,7 @@ function loadBagReferences() {
   // Reset bag size hint
   const bagSizeHint = document.getElementById('bagSizeHint');
   if (bagSizeHint) {
-    bagSizeHint.innerHTML = '<i class="fas fa-info-circle"></i> Select a Reference Number first to see available bag sizes from branding';
+    bagSizeHint.innerHTML = '<i class="fas fa-info-circle"></i> Select a CNC Cutting Batch first to see available bag sizes from branding';
     bagSizeHint.style.color = '#2196F3';
   }
   
@@ -1640,7 +1990,6 @@ function loadBagReferences() {
   
   // Show bag-specific fields
   const bagCncBatchGroup = document.getElementById('bagCncBatchGroup');
-  const cncBatchDisplayGroup = document.getElementById('cncBatchDisplayGroup');
   const bagSizeFormGroup = document.getElementById('bagSizeFormGroup');
   const qualityCheckedFormGroup = document.getElementById('qualityCheckedFormGroup');
   const passedQtyFormGroup = document.getElementById('passedQtyFormGroup');
@@ -1657,12 +2006,11 @@ function loadBagReferences() {
   }
   
   if(bagCncBatchGroup) bagCncBatchGroup.style.display = 'block';
-  // Show CNC batch display group - it will be populated when reference is selected from branding entries
-  if(cncBatchDisplayGroup) cncBatchDisplayGroup.style.display = 'block';
+  // cncBatchDisplayGroup removed - no auto-fill field for bags
   if(bagSizeFormGroup) bagSizeFormGroup.style.display = 'block';
   
-  // Populate reference dropdown with references from branding entries
-  loadBagReferencesFromBranding();
+  // Load CNC batches directly (no reference number field for bags)
+  if (window.loadBagReferences) window.loadBagReferences();
   if(qualityCheckedFormGroup) qualityCheckedFormGroup.style.display = 'block';
   if(passedQtyFormGroup) passedQtyFormGroup.style.display = 'block';
   if(rejectedQtyFormGroup) rejectedQtyFormGroup.style.display = 'block';
@@ -1683,34 +2031,131 @@ function loadBagReferences() {
   updateSummary();
 }
 
-function updateReferenceFromCNCBatch() {
+// Assign full implementations to window so placeholders can use them
+// Do this immediately when function is defined
+if (typeof loadBagReferencesFull === 'function') {
+  window.loadBagReferencesFull = loadBagReferencesFull;
+  console.log('Assigned loadBagReferencesFull to window');
+}
+if (typeof loadBagReferencesFromBranding === 'function') {
+  window.loadBagReferencesFromBrandingFull = loadBagReferencesFromBranding;
+}
+
+// Replace placeholder functions with ones that call full implementations
+function loadBagReferences() {
+  if (window.loadBagReferencesFull) {
+    return window.loadBagReferencesFull();
+  }
+}
+
+function updateReferenceFromCNCBatch(event) {
   const cncBatchSelect = document.getElementById('bag_cnc_cutting_batch');
   const cncBatchInput = document.getElementById('cnc_cutting_batch');
-  const referenceHiddenInput = document.getElementById('reference_number');
-  const productType = document.getElementById('product_type').value;
-  
-  if (!cncBatchSelect || productType !== 'bag') return;
-  
-  const selectedBatch = cncBatchSelect.value;
-  const selectedOption = cncBatchSelect.options[cncBatchSelect.selectedIndex];
-  
-  if (selectedBatch && selectedOption) {
-    // Set CNC cutting batch in hidden field
+
+  if (!cncBatchSelect) {
+    return false;
+  }
+
+  // Get the selected value directly from the select element
+  let selectedBatch = cncBatchSelect.value;
+  let selectedIndex = cncBatchSelect.selectedIndex;
+
+  // If value is empty but index is set, try to get from index
+  if (!selectedBatch && selectedIndex > 0 && selectedIndex < cncBatchSelect.options.length) {
+    const option = cncBatchSelect.options[selectedIndex];
+    if (option && option.value) {
+      selectedBatch = option.value;
+    }
+  }
+
+  if (!selectedBatch || selectedBatch === '' || selectedIndex <= 0) {
+    // Clear hidden field if nothing selected
     if (cncBatchInput) {
-      cncBatchInput.value = selectedBatch;
+      cncBatchInput.value = '';
     }
-    
-    // Get reference number from the selected option's data attribute
-    const referenceNumber = selectedOption.getAttribute('data-reference') || '';
-    if (referenceHiddenInput && referenceNumber) {
-      referenceHiddenInput.value = referenceNumber;
+    // Re-enable bag size selection when no CNC batch is selected
+    enableBagSizeSelection();
+    return false;
+  }
+
+  const selectedOption = cncBatchSelect.options[selectedIndex];
+  
+  if (!selectedOption) {
+    return false;
+  }
+  
+  // CRITICAL: Ensure the selection persists visually
+  // Sometimes the browser needs explicit confirmation
+  if (selectedIndex > 0 && selectedIndex < cncBatchSelect.options.length) {
+    // Explicitly set the selection to ensure it's visible
+    cncBatchSelect.selectedIndex = selectedIndex;
+    cncBatchSelect.value = selectedBatch;
+    // Mark the option as selected
+    for (let i = 0; i < cncBatchSelect.options.length; i++) {
+      cncBatchSelect.options[i].selected = (i === selectedIndex);
     }
-    
+  }
+  
+  // Set CNC cutting batch in hidden field for form submission (batch only; value may be "batch||bag_size")
+  if (cncBatchInput) {
+    cncBatchInput.value = selectedBatch.indexOf('||') >= 0 ? selectedBatch.split('||')[0] : selectedBatch;
+  }
+  
+  // Visual feedback
+  cncBatchSelect.style.border = '2px solid #2196F3';
+  cncBatchSelect.style.backgroundColor = '#f0f8ff';
+  
+  // Force a reflow to ensure the selection is rendered
+  void cncBatchSelect.offsetHeight;
+  
+  try {
     // Get bag size and update bag size selection
     const bagSize = selectedOption.getAttribute('data-bag-size') || '';
     const bagSizeInput = document.getElementById('bag_size');
+    const bagSizeHint = document.getElementById('bagSizeHint');
+    
     if (bagSize && bagSizeInput) {
       bagSizeInput.value = bagSize;
+      
+      // Update hint to show bag size was found
+      if (bagSizeHint) {
+        bagSizeHint.innerHTML = '<i class="fas fa-check-circle"></i> Bag size from selected batch: ' + bagSize;
+        bagSizeHint.style.color = '#4caf50';
+      }
+      
+      // DISABLE bag size selection - it comes from the CNC batch
+      disableBagSizeSelection();
+      
+      // Show recommended weight field (fetched from DB by bag size)
+      const recommendedWeightGroup = document.getElementById('recommendedWeightGroup');
+      const actualWeightBagGroup = document.getElementById('actualWeightBagGroup');
+      const weightInput = document.getElementById('recommended_weight');
+      if (recommendedWeightGroup) recommendedWeightGroup.style.display = 'block';
+      if (actualWeightBagGroup) actualWeightBagGroup.style.display = 'block';
+      
+      // Fetch recommended weight from DB by bag size (use window so it works across script blocks)
+      var weightMap = window.bagSizeToRecommendedWeightFromDB;
+      if (weightInput && weightMap && typeof weightMap === 'object') {
+        var bagSizeTrimmed = (bagSize || '').trim();
+        var recommendedWeight = weightMap[bagSizeTrimmed];
+        if (recommendedWeight == null || recommendedWeight === '') {
+          var bagLower = bagSizeTrimmed.toLowerCase().replace(/\s+/g, '');
+          for (var key in weightMap) {
+            if (weightMap.hasOwnProperty(key) && key.toLowerCase().replace(/\s+/g, '') === bagLower) {
+              recommendedWeight = weightMap[key];
+              break;
+            }
+          }
+        }
+        if (recommendedWeight != null && recommendedWeight !== '') {
+          weightInput.value = recommendedWeight;
+        } else {
+          weightInput.value = '';
+        }
+        weightInput.setAttribute('readonly', 'readonly');
+        weightInput.style.backgroundColor = '#f0f0f0';
+      }
+      
       // Auto-select the matching bag size button (case-insensitive and handle spacing)
       let bagSizeSelected = false;
       document.querySelectorAll('#bagSizeButtonGroup .btn').forEach(btn => {
@@ -1720,26 +2165,49 @@ function updateReferenceFromCNCBatch() {
         const normalizedBagSize = bagSize.toLowerCase().replace(/\s+/g, '');
         if (normalizedBtnText === normalizedBagSize || btnText === bagSize) {
           btn.classList.add('selected');
-          // Trigger selectBagSize to set recommended weight
-          selectBagSize(bagSize, btn);
+          btn.style.background = '#2196F3';
+          btn.style.color = '#fff';
+          // Weight already set above from DB by bag size
           bagSizeSelected = true;
         } else {
           btn.classList.remove('selected');
+          btn.style.background = '';
+          btn.style.color = '';
         }
       });
       
-      // If no button matched, try to find a close match or use custom
+      // If no button matched, try to find a close match
       if (!bagSizeSelected) {
-        // Try to find a button that contains the bag size or vice versa
         document.querySelectorAll('#bagSizeButtonGroup .btn').forEach(btn => {
           const btnText = btn.textContent.trim();
           if (btnText.toLowerCase().includes(bagSize.toLowerCase()) || 
               bagSize.toLowerCase().includes(btnText.toLowerCase())) {
             btn.classList.add('selected');
-            selectBagSize(btnText, btn);
+            btn.style.background = '#2196F3';
+            btn.style.color = '#fff';
+            // Weight already set above from DB by bag size
             bagSizeSelected = true;
           }
         });
+      }
+      
+      if (!bagSizeSelected) {
+        if (bagSizeHint) {
+          bagSizeHint.innerHTML = '<i class="fas fa-info-circle"></i> Bag size from batch: ' + bagSize + ' (not in predefined list)';
+          bagSizeHint.style.color = '#ff9800';
+        }
+      }
+    } else {
+      // Still show recommended weight section when CNC batch selected (no bag size from batch)
+      const recommendedWeightGroupNoSize = document.getElementById('recommendedWeightGroup');
+      const actualWeightBagGroupNoSize = document.getElementById('actualWeightBagGroup');
+      if (recommendedWeightGroupNoSize) recommendedWeightGroupNoSize.style.display = 'block';
+      if (actualWeightBagGroupNoSize) actualWeightBagGroupNoSize.style.display = 'block';
+      const weightInputNoSize = document.getElementById('recommended_weight');
+      if (weightInputNoSize) weightInputNoSize.value = '';
+      if (bagSizeHint) {
+        bagSizeHint.innerHTML = '<i class="fas fa-info-circle"></i> No bag size specified for this batch - select manually';
+        bagSizeHint.style.color = '#6c757d';
       }
     }
     
@@ -1750,7 +2218,7 @@ function updateReferenceFromCNCBatch() {
     
     if (totalPrintedLabel) {
       if (totalPrinted > 0) {
-        totalPrintedLabel.textContent = '(Total Printed: ' + totalPrinted + ' pcs)';
+        totalPrintedLabel.textContent = '(Max: ' + totalPrinted + ' pcs from branding)';
         totalPrintedLabel.style.display = 'inline';
       } else {
         totalPrintedLabel.textContent = '';
@@ -1758,7 +2226,7 @@ function updateReferenceFromCNCBatch() {
       }
     }
     
-    // Set max attribute on quality checked input to prevent exceeding total printed
+    // Set max = total branded bags passed for this CNC batch in branding entry
     if (qualityCheckedInput) {
       if (totalPrinted > 0) {
         qualityCheckedInput.setAttribute('max', totalPrinted);
@@ -1772,19 +2240,15 @@ function updateReferenceFromCNCBatch() {
       }
     }
     
-    // Update max branded quantity label
-    if (referenceNumber) {
-      updateMaxBrandedQtyLabel(referenceNumber);
+    // Update summary (no reference number needed for bags)
+    if (typeof updateSummary === 'function') {
+      updateSummary();
     }
     
-    updateSummary();
-  } else {
-    // No batch selected - clear the total printed label
-    const totalPrintedLabel = document.getElementById('totalPrintedQtyLabel');
-    if (totalPrintedLabel) {
-      totalPrintedLabel.textContent = '';
-      totalPrintedLabel.style.display = 'none';
-    }
+    return true;
+  } catch (error) {
+    console.error('Error in updateReferenceFromCNCBatch:', error);
+    return false;
   }
 }
 
@@ -1903,7 +2367,7 @@ function updateCNCBatchFromReference() {
       const chosenSize = availableBagSizes[0];
       bagSizeInput.value = chosenSize;
       // Trigger selectBagSize to also set recommended weight/thickness UI
-      selectBagSize(chosenSize, null);
+      selectBagSize(chosenSize, null, null);
       // Highlight the matching button
       document.querySelectorAll('#bagSizeButtonGroup .btn').forEach(btn => {
         const txt = btn.textContent.trim();
@@ -1925,7 +2389,7 @@ function updateCNCBatchFromReference() {
       });
       const bagSizeHint = document.getElementById('bagSizeHint');
       if (bagSizeHint) {
-        bagSizeHint.innerHTML = '<i class="fas fa-info-circle"></i> Select a Reference Number first. Branded bags will show specific sizes, non-branded will show all sizes.';
+        bagSizeHint.innerHTML = '<i class="fas fa-info-circle"></i> Select a CNC Cutting Batch first. Bag sizes will be shown based on the selected batch.';
         bagSizeHint.style.color = '#2196F3';
       }
       
@@ -2092,10 +2556,16 @@ function validateQualityChecked(resetValue = true) {
       // Only reset value and show popup if resetValue is true (on blur/change)
       if (resetValue) {
         // Show modern popup notification
-        const warningMsg = 'Quality Checked (<strong>' + qualityChecked + ' pcs</strong>) cannot exceed Total Printed quantity (<strong>' + totalPrinted + ' pcs</strong>) for this CNC cutting batch.<br><br>Please enter a value less than or equal to <strong>' + totalPrinted + ' pcs</strong>.';
+        const warningMsg = 'Quality Checked (<strong>' + qualityChecked + ' pcs</strong>) cannot exceed branded quantity (<strong>' + totalPrinted + ' pcs</strong>) for this CNC cutting batch (from branding entry).<br><br>Please enter a value less than or equal to <strong>' + totalPrinted + ' pcs</strong>.';
         showWarningPopup(warningMsg);
         
-        // Reset to total printed quantity
+        // Reset only quality checked; do not change actual weight (flag blocks sync and async updates)
+        window._fgResettingQualityCheckedDueToMax = true;
+        if (window._fgResettingQualityCheckedDueToMaxTimer) clearTimeout(window._fgResettingQualityCheckedDueToMaxTimer);
+        window._fgResettingQualityCheckedDueToMaxTimer = setTimeout(function() {
+          window._fgResettingQualityCheckedDueToMax = false;
+          window._fgResettingQualityCheckedDueToMaxTimer = null;
+        }, 1500);
         qualityCheckedInput.value = totalPrinted;
         
         // Recalculate rejected after reset
@@ -2104,7 +2574,7 @@ function validateQualityChecked(resetValue = true) {
       
       // Show warning hint (always, even during typing)
       if (qualityCheckedHint) {
-        qualityCheckedHint.innerHTML = '<i class="fas fa-exclamation-triangle"></i> <strong style="color:#e74c3c;">Quality Checked cannot exceed Total Printed (' + totalPrinted + ' pcs)</strong>';
+        qualityCheckedHint.innerHTML = '<i class="fas fa-exclamation-triangle"></i> <strong style="color:#e74c3c;">Quality Checked cannot exceed branded qty (' + totalPrinted + ' pcs)</strong>';
         qualityCheckedHint.style.color = '#e74c3c';
       }
       
@@ -2114,7 +2584,7 @@ function validateQualityChecked(resetValue = true) {
     } else if (qualityChecked > 0) {
       // Valid entry - show success message
       if (qualityCheckedHint) {
-        qualityCheckedHint.innerHTML = '<i class="fas fa-check-circle"></i> Valid - Maximum: ' + totalPrinted + ' pcs (Total Printed)';
+        qualityCheckedHint.innerHTML = '<i class="fas fa-check-circle"></i> Valid - Max: ' + totalPrinted + ' pcs (branded for this batch)';
         qualityCheckedHint.style.color = '#4caf50';
       }
     }
@@ -2129,7 +2599,14 @@ function validateQualityChecked(resetValue = true) {
       if (qualityChecked > maxBranded) {
         // Only reset value and show popup if resetValue is true (on blur/change)
         if (resetValue) {
-        qualityCheckedInput.value = maxBranded;
+          // Reset only quality checked; do not change actual weight (flag blocks sync and async updates)
+          window._fgResettingQualityCheckedDueToMax = true;
+          if (window._fgResettingQualityCheckedDueToMaxTimer) clearTimeout(window._fgResettingQualityCheckedDueToMaxTimer);
+          window._fgResettingQualityCheckedDueToMaxTimer = setTimeout(function() {
+            window._fgResettingQualityCheckedDueToMax = false;
+            window._fgResettingQualityCheckedDueToMaxTimer = null;
+          }, 1500);
+          qualityCheckedInput.value = maxBranded;
           const warningMsg = 'Quality Checked (<strong>' + qualityChecked + ' pcs</strong>) cannot exceed <strong>' + maxBranded + ' bags</strong>. This is the total number of bags branded under reference <strong>' + referenceNumber + '</strong>.';
           showWarningPopup(warningMsg);
         }
@@ -2168,8 +2645,24 @@ function validateQualityChecked(resetValue = true) {
     }
   }
   
+  // Update actual weight: 1 kg per quality checked pc (after branding print quantity passed)
+  updateActualWeightFromQualityChecked();
   // Calculate rejected after validation
   calculateRejected();
+}
+
+function updateActualWeightFromQualityChecked() {
+  if (window._fgResettingQualityCheckedDueToMax) return;
+  const productType = document.getElementById('product_type').value;
+  if (productType !== 'bag') return;
+  const qualityCheckedInput = document.getElementById('quality_checked');
+  const actualWeightInput = document.getElementById('actual_weight_bag');
+  if (!qualityCheckedInput || !actualWeightInput) return;
+  const qualityChecked = parseInt(qualityCheckedInput.value, 10) || 0;
+  // Actual weight = 1 kg per quality checked piece (incremented by 1 per pc)
+  actualWeightInput.value = qualityChecked > 0 ? qualityChecked : '';
+  actualWeightInput.setAttribute('min', '1');
+  actualWeightInput.setAttribute('step', '1');
 }
 
 function calculateRejected() {
@@ -2180,6 +2673,8 @@ function calculateRejected() {
   // Set rejected quantity (minimum 0)
   document.getElementById('rejected_qty').value = Math.max(0, rejectedQty);
   
+  // Keep actual weight in sync: 1 kg per quality checked pc
+  updateActualWeightFromQualityChecked();
   updateSummary();
 }
 
@@ -2209,19 +2704,91 @@ function selectRollSizeFG(size, btn) {
   updateSummary();
 }
 
-function selectBagSize(size, recommendedWeight) {
+// Function to disable bag size selection (when CNC batch is selected)
+function disableBagSizeSelection() {
+  const bagSizeButtons = document.querySelectorAll('#bagSizeButtonGroup .btn');
+  const customInput = document.getElementById('bag_size_custom');
+  
+  bagSizeButtons.forEach(btn => {
+    btn.disabled = true;
+    btn.style.opacity = '0.5';
+    btn.style.cursor = 'not-allowed';
+    // Remove onclick to prevent clicks
+    btn.onclick = function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      return false;
+    };
+  });
+  
+  if (customInput) {
+    customInput.disabled = true;
+    customInput.style.opacity = '0.5';
+    customInput.style.cursor = 'not-allowed';
+  }
+}
+
+// Function to enable bag size selection (when no CNC batch is selected)
+function enableBagSizeSelection() {
+  const bagSizeButtons = document.querySelectorAll('#bagSizeButtonGroup .btn');
+  const customInput = document.getElementById('bag_size_custom');
+  
+  bagSizeButtons.forEach(btn => {
+    btn.disabled = false;
+    btn.style.opacity = '1';
+    btn.style.cursor = 'pointer';
+    // Restore onclick handlers
+    const size = btn.textContent.trim();
+    if (size === 'Custom (Enter manually)') {
+      btn.onclick = function() { selectBagSize('custom', null, this); };
+    } else {
+      btn.onclick = function() { selectBagSize(size, null, this); };
+    }
+  });
+  
+  if (customInput) {
+    customInput.disabled = false;
+    customInput.style.opacity = '1';
+    customInput.style.cursor = 'text';
+  }
+}
+
+function selectBagSize(size, recommendedWeight, clickedButton) {
+  // Check if bag size selection is disabled (CNC batch selected)
+  const cncBatchSelect = document.getElementById('bag_cnc_cutting_batch');
+  if (cncBatchSelect && cncBatchSelect.value) {
+    // Bag size is locked when CNC batch is selected
+    return false;
+  }
+  
   const customInput = document.getElementById('bag_size_custom');
   const hiddenInput = document.getElementById('bag_size');
   const weightInput = document.getElementById('recommended_weight');
   
   // Remove selected class from all buttons in bag size group
-  const bagSizeGroup = event.target.closest('.btn-group');
-  if (bagSizeGroup) {
-    bagSizeGroup.querySelectorAll('.btn').forEach(btn => btn.classList.remove('selected'));
-  }
+  const bagSizeButtons = document.querySelectorAll('#bagSizeButtonGroup .btn');
+  bagSizeButtons.forEach(btn => {
+    btn.classList.remove('selected');
+    btn.style.background = '';
+    btn.style.color = '';
+  });
   
-  // Add selected class to clicked button
-  event.target.classList.add('selected');
+  // Add selected class to clicked button (if provided)
+  if (clickedButton) {
+    clickedButton.classList.add('selected');
+    clickedButton.style.background = '#2196F3';
+    clickedButton.style.color = '#fff';
+  } else {
+    // Find and highlight the matching button
+    bagSizeButtons.forEach(btn => {
+      const btnText = btn.textContent.trim();
+      if (btnText === size || (size === 'custom' && btnText === 'Custom (Enter manually)')) {
+        btn.classList.add('selected');
+        btn.style.background = '#2196F3';
+        btn.style.color = '#fff';
+      }
+    });
+  }
   
   if (size === 'custom') {
     // Show custom input
@@ -2281,9 +2848,10 @@ function selectBagSize(size, recommendedWeight) {
       // Require thickness selection first; don't set until user chooses
       weightInput.value = '';
     } else {
-      // First try to get from database mapping
-      if (bagSizeToRecommendedWeightFromDB && bagSizeToRecommendedWeightFromDB.hasOwnProperty(size)) {
-        weightInput.value = bagSizeToRecommendedWeightFromDB[size];
+      // First try to get from database mapping (use window for cross-script access)
+      var dbWeightMap = window.bagSizeToRecommendedWeightFromDB;
+      if (dbWeightMap && dbWeightMap.hasOwnProperty(size)) {
+        weightInput.value = dbWeightMap[size];
       } else if (bagSizeToRecommendedKg.hasOwnProperty(size)) {
         // Fallback to predefined mapping
         weightInput.value = bagSizeToRecommendedKg[size];
@@ -2450,11 +3018,30 @@ function validateForm(){
       }
     }
     
-    // Validate bag size only for bags
+    // Validate bag size and quality checked vs branding max for bags
     if(productType === 'bag') {
       const bagSizeField = document.getElementById("bag_size");
       if(!bagSizeField || !bagSizeField.value){
         alert("Please select a bag size.");
+        return false;
+      }
+
+      const qualityCheckedInput = document.getElementById("quality_checked");
+      const qualityChecked = parseInt(qualityCheckedInput.value, 10) || 0;
+      let maxBranded = 0;
+      const cncBatchSelect = document.getElementById('bag_cnc_cutting_batch');
+      if (cncBatchSelect && cncBatchSelect.value) {
+        const selOpt = cncBatchSelect.options[cncBatchSelect.selectedIndex];
+        if (selOpt) maxBranded = parseInt(selOpt.getAttribute('data-total-printed'), 10) || 0;
+      }
+      if (maxBranded === 0) {
+        const ref = document.getElementById('reference_number').value;
+        if (ref && typeof refToBrandedQtyMap !== 'undefined' && refToBrandedQtyMap[ref])
+          maxBranded = refToBrandedQtyMap[ref];
+      }
+      if (maxBranded > 0 && qualityChecked > maxBranded) {
+        const warningMsg = 'Quality Checked (<strong>' + qualityChecked + ' pcs</strong>) cannot exceed branded quantity (<strong>' + maxBranded + ' pcs</strong>) from branding entry.<br><br>Please enter a value less than or equal to <strong>' + maxBranded + ' pcs</strong>.';
+        showWarningPopup(warningMsg);
         return false;
       }
       
@@ -2579,7 +3166,7 @@ function clearForm() {
   // Reset bag size hint
   const bagSizeHint = document.getElementById('bagSizeHint');
   if (bagSizeHint) {
-    bagSizeHint.innerHTML = '<i class="fas fa-info-circle"></i> Select a Reference Number first to see available bag sizes from branding';
+    bagSizeHint.innerHTML = '<i class="fas fa-info-circle"></i> Select a CNC Cutting Batch first to see available bag sizes from branding';
     bagSizeHint.style.color = '#2196F3';
   }
   
@@ -2629,9 +3216,15 @@ function clearForm() {
     bagCncBatchSelect.value = '';
   }
   
-  // Hide bag CNC batch group
-  const bagCncBatchGroup = document.getElementById('bagCncBatchGroup');
-  if (bagCncBatchGroup) bagCncBatchGroup.style.display = 'none';
+  // Re-enable bag size selection when CNC batch is cleared
+  enableBagSizeSelection();
+  
+    // Hide bag CNC batch group
+    const bagCncBatchGroup = document.getElementById('bagCncBatchGroup');
+    if (bagCncBatchGroup) bagCncBatchGroup.style.display = 'none';
+    
+    // Re-enable bag size selection when switching away from bag product type
+    enableBagSizeSelection();
   
   // Hide custom bag size input
   const customInput = document.getElementById('bag_size_custom');
@@ -2722,6 +3315,33 @@ document.addEventListener('DOMContentLoaded', function() {
   
   // Load form data asynchronously after page renders for instant page load
   loadFormData();
+  
+  // Auto-select product type if user can only access one type (after everything is loaded)
+  <?php if (!$canAccessRoll && $canAccessBag): ?>
+    // User can only access Bag - ensure it's selected
+    setTimeout(function() {
+      const bagButton = document.getElementById('bagProductTypeBtn');
+      if (bagButton && typeof selectProductType === 'function') {
+        console.log('Auto-selecting Bag after page load');
+        selectProductType('bag');
+      } else if (bagButton) {
+        console.log('Clicking Bag button directly');
+        bagButton.click();
+      } else {
+        console.error('Bag button not found');
+      }
+    }, 500);
+  <?php elseif ($canAccessRoll && !$canAccessBag): ?>
+    // User can only access Roll - ensure it's selected
+    setTimeout(function() {
+      const rollButton = document.getElementById('rollProductTypeBtn');
+      if (rollButton && typeof selectProductType === 'function') {
+        selectProductType('roll');
+      } else if (rollButton) {
+        rollButton.click();
+      }
+    }, 500);
+  <?php endif; ?>
 });
 
 // Load form dropdowns asynchronously to avoid blocking page render
@@ -2757,6 +3377,38 @@ function loadFormData() {
   // Note: FG-specific data (references, batches, etc.) will be loaded on-demand
   // when user selects product type to avoid loading unnecessary data
 }
+
+// Additional window.onload handler to ensure auto-select works
+window.addEventListener('load', function() {
+  <?php if (!$canAccessRoll && $canAccessBag): ?>
+    // Final attempt to auto-select Bag
+    setTimeout(function() {
+      const bagButton = document.getElementById('bagProductTypeBtn');
+      const productTypeInput = document.getElementById('product_type');
+      
+      if (bagButton && productTypeInput && productTypeInput.value !== 'bag') {
+        console.log('Window loaded - auto-selecting Bag');
+        if (window.selectProductType && typeof window.selectProductType === 'function') {
+          window.selectProductType('bag');
+        } else {
+          bagButton.click();
+        }
+      }
+    }, 1000);
+  <?php elseif ($canAccessRoll && !$canAccessBag): ?>
+    setTimeout(function() {
+      const rollButton = document.getElementById('rollProductTypeBtn');
+      const productTypeInput = document.getElementById('product_type');
+      if (rollButton && productTypeInput && productTypeInput.value !== 'roll') {
+        if (window.selectProductType && typeof window.selectProductType === 'function') {
+          window.selectProductType('roll');
+        } else {
+          rollButton.click();
+        }
+      }
+    }, 1000);
+  <?php endif; ?>
+});
 </script>
 </body>
 </html>

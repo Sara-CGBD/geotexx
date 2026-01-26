@@ -203,6 +203,7 @@ $brandingId = 'BR-' . date('Ymd') . '-' . str_pad($nextBrandingNumber, 3, '0', S
       </select>
       <div id="batch_loading" style="display: none; margin-top: 10px;"></div>
       <input type="hidden" id="referenceNumber" name="referenceNumber" value="">
+      <input type="hidden" id="sewing_entry_ids" name="sewing_entry_ids" value="">
     </div>
 
     <!-- Project Selection -->
@@ -922,15 +923,12 @@ function loadCNCCuttingBatches() {
             
             batches.forEach(batch => {
                 const option = document.createElement('option');
-                option.value = batch.batch;
-                
-                // Create composite key for batch data (batch + bag_size)
+                // Use unique value (batch||bag_size) so each batch+bag_size row has correct remaining_qty
                 const batchKey = batch.bag_size ? `${batch.batch}||${batch.bag_size}` : batch.batch;
+                option.value = batchKey;
                 
-                // Store batch data for reference lookup (using composite key)
+                // Store batch data for reference lookup (composite key only - do not overwrite batch.batch)
                 window.batchDataMap[batchKey] = batch;
-                // Also store by batch name only for backward compatibility
-                window.batchDataMap[batch.batch] = batch;
                 
                 // Store full batch data as JSON on the option element
                 option.setAttribute('data-batch-data', JSON.stringify(batch));
@@ -971,11 +969,17 @@ function loadCNCCuttingBatches() {
                     }
                 }
                 
-                // Add remaining quantity (use merged remaining_qty from grouped query)
-                const qty = batch.remaining_qty || batch.total_remaining_qty || 0;
-                if (qty > 0) {
-                    displayText += ` - ${formatNumber(qty)}`;
+                // Show merged sewing quantity from sewing machine entry (same batch + bag size merged)
+                const sewingQty = parseInt(batch.total_sewing_qty, 10) || 0;
+                displayText += ` - ${formatNumber(sewingQty)} sewing`;
+                const entryCount = parseInt(batch.entry_count, 10) || parseInt(batch.merged_count, 10) || 0;
+                if (entryCount > 1) {
+                    displayText += ` (merged from ${entryCount} entries)`;
                 }
+                
+                // Always show remaining pieces (from sewing minus branding used for this batch)
+                const qty = parseInt(batch.remaining_qty, 10) || parseInt(batch.total_remaining_qty, 10) || 0;
+                displayText += ` - ${formatNumber(qty)} remaining`;
                 
                 option.textContent = displayText;
                 
@@ -1036,6 +1040,8 @@ function updateReferenceFromBatch() {
     
     if (!selectedBatch) {
         refInput.value = '';
+        const sewingIdsInput = document.getElementById('sewing_entry_ids');
+        if (sewingIdsInput) sewingIdsInput.value = '';
         if (bagSizeInput) bagSizeInput.value = '';
         if (printQtyInput) {
             printQtyInput.removeAttribute('data-max-qty');
@@ -1061,12 +1067,14 @@ function updateReferenceFromBatch() {
         }
     }
     
-    // Fallback to batchDataMap if not found on option
+    // Fallback to batchDataMap if not found on option (selectedBatch may be "batch||bag_size")
     if (!batch && window.batchDataMap) {
-        // Try composite key first (batch + bag_size)
-        const bagSize = selectedOption ? (selectedOption.getAttribute('data-bag-size') || '') : '';
-        const compositeKey = bagSize ? `${selectedBatch}||${bagSize}` : selectedBatch;
-        batch = window.batchDataMap[compositeKey] || window.batchDataMap[selectedBatch];
+        batch = window.batchDataMap[selectedBatch] || null;
+        if (!batch && selectedOption) {
+            const bagSize = selectedOption.getAttribute('data-bag-size') || '';
+            const compositeKey = bagSize ? `${selectedBatch}||${bagSize}` : selectedBatch;
+            batch = window.batchDataMap[compositeKey] || null;
+        }
     }
     
     // Auto-fill bag_size from the selected batch's data attribute
@@ -1077,6 +1085,9 @@ function updateReferenceFromBatch() {
     
     // Process batch data if found
     if (batch) {
+        // Store sewing entry IDs for traceability (grouped sewing entries)
+        const sewingIdsInput = document.getElementById('sewing_entry_ids');
+        if (sewingIdsInput) sewingIdsInput.value = batch.sewing_entry_ids || '';
         
         // Update reference number
         if (batch.references && batch.references.length > 0) {
