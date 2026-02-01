@@ -2,7 +2,8 @@
 // Secure Database Configuration
 // IMPORTANT: Change these credentials for production!
 
-$host = "localhost";
+$host = "127.0.0.1";
+$port = 3307;
 $username = "root";
 $password = "";
 // NOTE: Project database is named 'geobagg'
@@ -10,7 +11,7 @@ $dbname = "geobagg";
 $db = $dbname; // Backward compatibility for modules that expect $db
 
 // Create database connection with error handling
-$conn = new mysqli($host, $username, $password, $dbname);
+$conn = new mysqli($host, $username, $password, $dbname, $port);
 
 // Check connection
 if ($conn->connect_error) {

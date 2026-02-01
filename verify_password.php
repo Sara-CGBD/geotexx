@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 // Verify password hash
 $password = "Test@123";
 
@@ -11,7 +11,7 @@ echo "<p><strong>New Generated Hash:</strong> {$new_hash}</p>";
 echo "<hr>";
 
 // Connect to database
-$conn = new mysqli("localhost", "root", "root123", "geobagg");
+$conn = new mysqli("127.0.0.1", "root", "root123", "geobagg", 3307);
 if ($conn->connect_error) {
     die("Connection failed: " . $conn->connect_error);
 }

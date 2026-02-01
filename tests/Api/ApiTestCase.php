@@ -61,7 +61,7 @@ abstract class ApiTestCase extends TestCase
 
     protected static function injectTestConnection(): \mysqli
     {
-        $conn = new \mysqli('localhost', 'root', '', 'geobagg_test');
+        $conn = new \mysqli('127.0.0.1', 'root', '', 'geobagg_test', 3307);
         if ($conn->connect_error) {
             throw new \RuntimeException('Unable to connect to test database: ' . $conn->connect_error);
         }

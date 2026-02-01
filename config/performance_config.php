@@ -22,7 +22,7 @@ class PerformanceConfig {
     public static function getConnection() {
         if (self::$conn === null || !self::$conn->ping()) {
             // Default XAMPP: root user, no password; DB name is 'geobagg'
-            self::$conn = new mysqli("localhost", "root", "", "geobagg");
+            self::$conn = new mysqli("127.0.0.1", "root", "", "geobagg", 3307);
             if (self::$conn->connect_error) {
                 error_log("Database connection failed: " . self::$conn->connect_error);
                 die("Database connection failed. Please contact system administrator.");

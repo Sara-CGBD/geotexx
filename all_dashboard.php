@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 session_start();
 
 // Check if user is logged in
@@ -15,7 +15,7 @@ if (isset($_SESSION['role']) && strtolower(trim($_SESSION['role'])) !== 'admin')
 }
 
 // Connect to database for stats
-$conn = new mysqli("localhost", "root", "root123", "geobagg");
+$conn = new mysqli("127.0.0.1", "root", "root123", "geobagg", 3307);
 if ($conn->connect_error) {
     $conn = null;
 }

@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 // swing_machine_entry_with_dedicated_tables.php
 // This version uses dedicated operators and helpers tables
 
@@ -25,7 +25,7 @@ if (SecurityConfig::isAccountLocked($_SESSION['username'])) {
 date_default_timezone_set('Asia/Dhaka');
 
 // Connect DB
-$conn = new mysqli("localhost", "root", "root123", "geobagg");
+$conn = new mysqli("127.0.0.1", "root", "root123", "geobagg", 3307);
 if ($conn->connect_error) die("DB connection failed: " . $conn->connect_error);
 
 // Fetch projects

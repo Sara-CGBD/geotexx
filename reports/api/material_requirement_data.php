@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 session_start();
 require_once '../../forms/security_config.php';
 
@@ -21,7 +21,7 @@ header('Content-Type: application/json');
 
 try {
     date_default_timezone_set('Asia/Dhaka');
-    $conn = new mysqli("localhost", "root", "root123", "geobagg");
+    $conn = new mysqli("127.0.0.1", "root", "root123", "geobagg", 3307);
     
     if ($conn->connect_error) {
         throw new Exception("Connection failed: " . $conn->connect_error);

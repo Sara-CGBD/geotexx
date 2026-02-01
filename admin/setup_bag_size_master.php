@@ -1,7 +1,7 @@
-﻿<?php
+<?php
 // Setup bag_size_master table
 
-$conn = new mysqli("localhost", "root", "root123", "geobagg");
+$conn = new mysqli("127.0.0.1", "root", "root123", "geobagg", 3307);
 if ($conn->connect_error) {
     die("Connection failed: " . $conn->connect_error);
 }

@@ -31,5 +31,8 @@ cache/
 # Development files
 dev/
 
+# DB backups (from database/backup_db.php)
+database/backups/
+
 
 forms/api/debug_branding_remaining.php

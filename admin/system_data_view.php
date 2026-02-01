@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 session_start();
 require_once '../config/config.php';
 
@@ -9,7 +9,7 @@ if (!isset($_SESSION['user_id']) || !isset($_SESSION['username'])) {
 }
 
 // Connect to database (XAMPP default: root with no password)
-$conn = new mysqli("localhost", "root", "", "geobagg");
+$conn = new mysqli("127.0.0.1", "root", "", "geobagg", 3307);
 if ($conn->connect_error) {
     die("Database connection failed: " . $conn->connect_error);
 }

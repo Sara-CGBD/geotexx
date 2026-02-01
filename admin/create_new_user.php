@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 // Security headers
 header("X-Content-Type-Options: nosniff");
 header("X-Frame-Options: SAMEORIGIN");
@@ -12,7 +12,7 @@ if (!isset($_SESSION['user_id']) || !isset($_SESSION['username']) || strtolower(
 }
 
 // Database connection (XAMPP default: root with no password)
-$conn = new mysqli("localhost", "root", "", "geobagg");
+$conn = new mysqli("127.0.0.1", "root", "", "geobagg", 3307);
 if ($conn->connect_error) {
   die("Connection failed: " . $conn->connect_error);
 }

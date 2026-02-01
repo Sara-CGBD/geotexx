@@ -8,6 +8,7 @@ class DBPool {
     private static $instance = null;
     private $connection = null;
     private $host;
+    private $port;
     private $user;
     private $pass;
     private $db;
@@ -18,13 +19,15 @@ class DBPool {
         if (file_exists($config_file)) {
             include $config_file;
             // Prefer config.php values, fallback to sensible defaults
-            $this->host = $host ?? 'localhost';
+            $this->host = $host ?? '127.0.0.1';
+            $this->port = $port ?? 3307;
             $this->user = $username ?? $user ?? 'root';
             $this->pass = $password ?? $pass ?? '';
             $this->db = $dbname ?? $db ?? 'geobagg';
         } else {
             // Fallback to defaults
-            $this->host = 'localhost';
+            $this->host = '127.0.0.1';
+            $this->port = 3307;
             $this->user = 'root';
             $this->pass = '';
             $this->db = 'geobagg';
@@ -44,7 +47,8 @@ class DBPool {
                 $this->host,
                 $this->user,
                 $this->pass,
-                $this->db
+                $this->db,
+                $this->port
             );
             
             if ($this->connection->connect_error) {

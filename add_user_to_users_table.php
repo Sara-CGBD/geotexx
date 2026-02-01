@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 // Add user to the correct 'users' table
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
@@ -6,7 +6,7 @@ ini_set('display_errors', 1);
 echo "<h2>Adding User to 'users' Table</h2>";
 
 // Database connection
-$conn = new mysqli("localhost", "root", "root123", "geobagg");
+$conn = new mysqli("127.0.0.1", "root", "root123", "geobagg", 3307);
 
 if ($conn->connect_error) {
     echo "âŒ Database connection failed: " . $conn->connect_error;

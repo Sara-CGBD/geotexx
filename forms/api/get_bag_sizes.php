@@ -1,8 +1,8 @@
-﻿<?php
+<?php
 header('Content-Type: application/json');
 
 // Database connection
-$conn = new mysqli("localhost", "root", "root123", "geobagg");
+$conn = new mysqli("127.0.0.1", "root", "root123", "geobagg", 3307);
 if ($conn->connect_error) {
     echo json_encode(['success' => false, 'error' => 'Database connection failed']);
     exit();

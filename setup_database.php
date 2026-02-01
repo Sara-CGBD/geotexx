@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 /**
  * Database Setup Script
  * Creates the required tables for the GEOCIL Automation System
@@ -8,12 +8,13 @@ echo "ðŸ”§ Setting up GEOCIL Automation Database\n";
 echo "=======================================\n\n";
 
 // Database connection
-$host = "localhost";
+$host = "127.0.0.1";
+$port = 3307;
 $username = "root";
 $password = "";
 $dbname = "geobagg";
 
-$conn = new mysqli($host, $username, $password);
+$conn = new mysqli($host, $username, $password, "", $port);
 
 if ($conn->connect_error) {
     die("Connection failed: " . $conn->connect_error);

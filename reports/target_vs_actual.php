@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 session_start();
 require_once '../forms/security_config.php';
 
@@ -22,7 +22,7 @@ if (SecurityConfig::isAccountLocked($_SESSION['username'])) {
 date_default_timezone_set('Asia/Dhaka');
 
 // Database connection (XAMPP default: root with no password)
-$conn = new mysqli("localhost", "root", "", "geobagg");
+$conn = new mysqli("127.0.0.1", "root", "", "geobagg", 3307);
 if ($conn->connect_error) {
     die("Connection failed: " . $conn->connect_error);
 }

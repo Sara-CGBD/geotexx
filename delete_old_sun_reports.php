@@ -6,7 +6,7 @@
 require_once __DIR__ . '/config/config.php';
 
 try {
-    $conn = new mysqli(DB_HOST, DB_USER, DB_PASS, DB_NAME);
+    $conn = new mysqli($host, $username, $password, $dbname, $port);
     
     if ($conn->connect_error) {
         die("Connection failed: " . $conn->connect_error);

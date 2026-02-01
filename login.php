@@ -38,9 +38,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     // Single database connection for entire login process
-    // Default XAMPP ships with root user and NO password; adjust here if yours differs
-    // NOTE: Current database name is 'geobagg' (not 'geobagg')
-    $conn = @new mysqli("localhost", "root", "", "geobagg");
+    // Default XAMPP: root user, no password; DB name is 'geobagg'
+    $conn = @new mysqli("127.0.0.1", "root", "", "geobagg", 3307);
     if ($conn->connect_error) {
         error_log("Login DB connection failed: " . $conn->connect_error);
         header("Location: login.html?error=db");

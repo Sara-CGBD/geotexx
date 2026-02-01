@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 session_start();
 require_once '../../forms/security_config.php';
 
@@ -22,7 +22,7 @@ if (!in_array($user_role, $allowed_roles)) {
 date_default_timezone_set('Asia/Dhaka');
 
 // Database connection
-$conn = new mysqli("localhost", "root", "root123", "geobagg");
+$conn = new mysqli("127.0.0.1", "root", "root123", "geobagg", 3307);
 if ($conn->connect_error) {
     http_response_code(500);
     echo json_encode(['error' => 'Database connection failed']);
