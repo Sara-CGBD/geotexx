@@ -83,6 +83,10 @@ function expandReferenceRanges($referenceString) {
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     try {
+        // DEBUG: Log what is actually being submitted (if log shows text like CNC-240710-01 but DB shows 0 → bind_param is wrong)
+        error_log("POST cnc_cutting_batch = " . ($_POST['cnc_cutting_batch'] ?? 'NULL'));
+        error_log("bag_size POST = " . ($_POST['bag_size'] ?? 'NULL'));
+
         // Get form data
         $entryId = $_POST['entry_id'] ?? '';
         $dateTime = $_POST['date_time'] ?? date('Y-m-d H:i:s');
@@ -91,36 +95,52 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $tripNumber = $_POST['trip_number'] ?? '';
         $referenceNumber = $_POST['reference_number'] ?? '';
         $deliveredQuantity = trim($_POST['delivered_quantity'] ?? '0');
-        $cncCuttingBatch = trim($_POST['cnc_cutting_batch'] ?? '');
+        $cnc_cutting_batch = trim($_POST['cnc_cutting_batch'] ?? '');
         $receivedQuantity = trim($_POST['received_quantity'] ?? '0');
+        $summary = trim($_POST['summary'] ?? '');
+        
+        // Extract batch identifier: dropdown sends "BATCH" or "BATCH||bagSize" — save only BATCH, never "0"
+        $cncCuttingBatch = (strpos($cnc_cutting_batch, '||') !== false) ? trim(explode('||', $cnc_cutting_batch)[0]) : $cnc_cutting_batch;
+        if ($cncCuttingBatch === '0' || $cncCuttingBatch === '') {
+            $cncCuttingBatch = '';
+        }
+        
+        // For bags: if still empty or "0", try to read from summary (e.g. "CNC Batch: CW-01" or "CNC Batch: CW-01||1150mmX900mm")
+        if ($productType === 'bag' && ($cncCuttingBatch === '' || $cncCuttingBatch === '0') && $summary !== '') {
+            if (preg_match('/CNC\s+Batch\s*:\s*([^\s]+)/i', $summary, $m)) {
+                $fromSummary = trim($m[1]);
+                if ($fromSummary !== '' && $fromSummary !== '0') {
+                    $cncCuttingBatch = (strpos($fromSummary, '||') !== false) ? trim(explode('||', $fromSummary)[0]) : $fromSummary;
+                    if ($cncCuttingBatch === '0') {
+                        $cncCuttingBatch = '';
+                    }
+                    error_log("FG Received Entry - Bag: Extracted cnc_cutting_batch from summary: '" . $cncCuttingBatch . "'");
+                }
+            }
+        }
+        
+        // Fallback: from reference_number if it looks like a batch (e.g. CW-01)
+        if ($productType === 'bag' && ($cncCuttingBatch === '' || $cncCuttingBatch === '0') && !empty($referenceNumber) && preg_match('/^[A-Za-z]+-?\d+$/', trim($referenceNumber))) {
+            $cncCuttingBatch = trim($referenceNumber);
+            $referenceNumber = '';
+            error_log("FG Received Entry - Bag: Extracted cnc_cutting_batch from reference_number: " . $cncCuttingBatch);
+        }
+        
+        // Never save "0" — if we still have 0, treat as empty (will fail validation for bags)
+        if ($cncCuttingBatch === '0') {
+            $cncCuttingBatch = '';
+        }
         
         // DEBUG: Log initial values
         error_log("FG Received Entry - Initial POST values:");
         error_log("  product_type = '" . $productType . "'");
-        error_log("  cnc_cutting_batch from POST = '" . $cncCuttingBatch . "'");
-        error_log("  reference_number from POST = '" . $referenceNumber . "'");
+        error_log("  cnc_cutting_batch from POST (raw) = '" . $cnc_cutting_batch . "', final = '" . $cncCuttingBatch . "'");
+        error_log("  summary (first 200 chars) = '" . substr($summary, 0, 200) . "'");
         
-        // For bags, ensure CNC cutting batch is properly captured
-        // IMPORTANT: If form sent CNC batch in reference_number field, extract it here
-        if ($productType === 'bag') {
-            // If CNC cutting batch is empty, check if it was sent in reference_number by mistake
-            if (empty($cncCuttingBatch) && !empty($referenceNumber)) {
-                // If reference_number looks like a batch number (e.g., "CW-01"), use it as CNC batch
-                if (preg_match('/^[A-Za-z]+-?\d+$/', $referenceNumber)) {
-                    $cncCuttingBatch = $referenceNumber;
-                    $referenceNumber = ''; // Clear it since it was actually the CNC batch
-                    error_log("FG Received Entry - Bag: Extracted cnc_cutting_batch from reference_number: " . $cncCuttingBatch);
-                }
-            }
-            
-            // Final check - ensure we have a CNC cutting batch value
-            error_log("FG Received Entry - Bag: Final cncCuttingBatch = '" . $cncCuttingBatch . "'");
-        }
-        
+        $bag_size = trim($_POST['bag_size'] ?? '');
         $availableQuantity = trim($_POST['available_quantity'] ?? '0');
         $shiftInCharge = trim($_POST['shift_in_charge'] ?? $_SESSION['full_name'] ?? $_SESSION['username'] ?? 'User');
         $remarks = $_POST['remarks'] ?? '';
-        $summary = $_POST['summary'] ?? '';
 
         // Validate required fields
         if (empty($entryId)) {
@@ -147,9 +167,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 exit();
             }
         } elseif ($productType === 'bag') {
-            // For bags, CNC cutting batch is required
-            if (empty($cncCuttingBatch)) {
-                error_log("FG Received Entry - Bag validation FAILED: cncCuttingBatch is empty!");
+            // For bags, CNC cutting batch is required and must not be "0"
+            if ($cncCuttingBatch === '' || $cncCuttingBatch === '0') {
+                error_log("FG Received Entry - Bag validation FAILED: cncCuttingBatch is empty or 0!");
                 header("Location: ../forms/fg_received_entry.php?error=missing_field&field=cnc_cutting_batch");
                 exit();
             }
@@ -174,6 +194,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 reference_number TEXT,
                 delivered_quantity DECIMAL(10,2) DEFAULT 0,
                 cnc_cutting_batch VARCHAR(100) DEFAULT NULL,
+                bag_size VARCHAR(100) DEFAULT NULL,
                 received_quantity DECIMAL(10,2) DEFAULT 0,
                 available_quantity DECIMAL(10,2) DEFAULT 0,
                 weight_kg DECIMAL(10,2) DEFAULT NULL,
@@ -197,6 +218,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         if (!in_array('cnc_cutting_batch', $existingCols)) {
             $conn->query("ALTER TABLE fg_received_entry ADD COLUMN cnc_cutting_batch VARCHAR(100) DEFAULT NULL AFTER delivered_quantity");
+        }
+        if (!in_array('bag_size', $existingCols)) {
+            $conn->query("ALTER TABLE fg_received_entry ADD COLUMN bag_size VARCHAR(100) DEFAULT NULL AFTER cnc_cutting_batch");
         }
         if (!in_array('received_quantity', $existingCols)) {
             $conn->query("ALTER TABLE fg_received_entry ADD COLUMN received_quantity DECIMAL(10,2) DEFAULT 0 AFTER cnc_cutting_batch");
@@ -279,9 +303,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $stmt = $conn->prepare("
             INSERT INTO fg_received_entry (
                 entry_id, date_time, shift, product_type, trip_number, reference_number, 
-                delivered_quantity, cnc_cutting_batch, received_quantity, available_quantity,
+                delivered_quantity, cnc_cutting_batch, bag_size, received_quantity, available_quantity,
                 weight_kg, area_sqm, shift_in_charge, remarks, summary
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ");
 
         if (!$stmt) {
@@ -380,29 +404,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             
             // Determine final values based on product type
             if ($productType === 'bag') {
-                // For bags: reference_number is NULL/empty, cnc_cutting_batch contains the batch value
+                // For bags: reference_number is NULL/empty, cnc_cutting_batch and bag_size from form
                 $finalReferenceNumber = null;
-                $finalCncBatch = $cncCuttingBatch; // Use the CNC batch from the form directly
+                $finalCncBatch = $cncCuttingBatch;
+                if ((string)$finalCncBatch === '0') {
+                    $finalCncBatch = null;
+                }
+                $finalBagSize = $bag_size !== '' ? $bag_size : null;
                 
                 error_log("FG Received Entry - Bag Insert Parameters:");
                 error_log("  Entry ID: " . $currentEntryId);
-                error_log("  CNC Batch: '" . $finalCncBatch . "'");
-                error_log("  Reference: NULL");
+                error_log("  CNC Batch: '" . ($finalCncBatch ?? '') . "'");
+                error_log("  Bag Size: '" . ($finalBagSize ?? '') . "'");
                 error_log("  Quantity: " . $refQty);
             } else {
-                // For rolls: reference_number contains the roll reference, cnc_cutting_batch is NULL
+                // For rolls: reference_number contains the roll reference, cnc_cutting_batch and bag_size NULL
                 $finalReferenceNumber = $ref;
                 $finalCncBatch = null;
+                $finalBagSize = null;
                 
                 error_log("FG Received Entry - Roll Insert Parameters:");
                 error_log("  Entry ID: " . $currentEntryId);
                 error_log("  Reference: " . $finalReferenceNumber);
-                error_log("  CNC Batch: NULL");
                 error_log("  Quantity: " . $refQty);
             }
             
+            // s=string, d=decimal, i=integer — cnc_cutting_batch (8th) and bag_size (9th) must be "s", never "i" or "d"
             $stmt->bind_param(
-                "ssssissddddssss",
+                "ssssisdssddddsss",
                 $currentEntryId,
                 $dateTimeValue,
                 $shift,
@@ -411,6 +440,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $finalReferenceNumber,
                 $deliveredQuantityValue,
                 $finalCncBatch,
+                $finalBagSize,
                 $refQty,
                 $refAvailableQty,
                 $refWeight,

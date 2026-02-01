@@ -26,8 +26,8 @@ $dateFrom = $_GET['date_from'] ?? date('Y-m-d', strtotime('-30 days'));
 $dateTo = $_GET['date_to'] ?? date('Y-m-d');
 $batchFilter = $_GET['batch'] ?? '';
 
-// Build query for Swing Scrap (linked to CNC cutting batches)
-$whereConditions = ["s.is_deleted = 0", "s.scrap_category = 'Swing Scrap'", "s.cutting_batch IS NOT NULL"];
+// Build query for Sewing Scrap (linked to CNC cutting batches)
+$whereConditions = ["s.is_deleted = 0", "s.scrap_category IN ('Sewing Scrap', 'Swing Scrap')", "s.cutting_batch IS NOT NULL"];
 $params = [];
 $types = '';
 
@@ -92,7 +92,7 @@ $stmt->close();
 $batchesQuery = "SELECT DISTINCT s.cutting_batch 
                  FROM scrap s 
                  WHERE s.is_deleted = 0 
-                   AND s.scrap_category = 'Swing Scrap' 
+                   AND s.scrap_category IN ('Sewing Scrap', 'Swing Scrap') 
                    AND s.cutting_batch IS NOT NULL 
                  ORDER BY s.cutting_batch DESC 
                  LIMIT 100";

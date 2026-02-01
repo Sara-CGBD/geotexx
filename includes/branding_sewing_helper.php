@@ -26,12 +26,13 @@ function getGroupedSewingForBranding($conn) {
                 SUM(COALESCE(ncp_piece, 0)) as total_ncp_piece,
                 GROUP_CONCAT(id ORDER BY id) as sewing_entry_ids,
                 COUNT(*) as merged_count
-            FROM `" . $conn->real_escape_string($table) . "`
+            FROM `{$table}`
             WHERE cnc_cutting_batch IS NOT NULL AND cnc_cutting_batch != ''
             GROUP BY cnc_cutting_batch, COALESCE(bag_size,''), project_id, COALESCE(line_no,'')
             HAVING COUNT(*) >= 1
             ORDER BY MAX(created_at) DESC";
 
+    // Table name is validated before calling this function, safe to use directly
     $result = $conn->query($sql);
     if (!$result) {
         return [];
@@ -48,13 +49,28 @@ function getGroupedSewingForBranding($conn) {
  * @return int
  */
 function getCuttingQuantity($conn, $cncCuttingBatch, $bagSize = null) {
-    $batch = $conn->real_escape_string($cncCuttingBatch);
-    $sql = "SELECT COALESCE(SUM(COALESCE(cutting_roll_quantity, 0)), 0) as cut_qty FROM cnc_entries WHERE cnc_cutting_batch = '$batch'";
+    // Use prepared statement for security
     if ($bagSize !== null && $bagSize !== '') {
-        $bag = $conn->real_escape_string($bagSize);
-        $sql .= " AND TRIM(COALESCE(bag_size,'')) = '$bag'";
+        $stmt = $conn->prepare("SELECT COALESCE(SUM(COALESCE(cutting_roll_quantity, 0)), 0) as cut_qty FROM cnc_entries WHERE cnc_cutting_batch = ? AND TRIM(COALESCE(bag_size,'')) = ?");
+        if ($stmt) {
+            $stmt->bind_param("ss", $cncCuttingBatch, $bagSize);
+            $stmt->execute();
+            $result = $stmt->get_result();
+            $stmt->close();
+        } else {
+            $result = false;
+        }
+    } else {
+        $stmt = $conn->prepare("SELECT COALESCE(SUM(COALESCE(cutting_roll_quantity, 0)), 0) as cut_qty FROM cnc_entries WHERE cnc_cutting_batch = ?");
+        if ($stmt) {
+            $stmt->bind_param("s", $cncCuttingBatch);
+            $stmt->execute();
+            $result = $stmt->get_result();
+            $stmt->close();
+        } else {
+            $result = false;
+        }
     }
-    $result = $conn->query($sql);
     if (!$result || $result->num_rows === 0) {
         return 0;
     }

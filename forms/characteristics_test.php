@@ -34,8 +34,53 @@ $reporter_name = $_SESSION['username'];
     
     // Fetch reference numbers from roll_entry - support bundles and line detection
     // Tests are done AFTER roll entry submission
+    // Exclude references that have been routed by AGM
     $references = [];
     $bundleReferences = [];
+    
+    // Helper function to check if a reference has been routed
+    $isReferenceRouted = function($conn, $reference) {
+        // Check if routed table exists
+        $routedTableExists = $conn->query("SHOW TABLES LIKE 'routed'")->num_rows > 0;
+        if (!$routedTableExists) {
+            return false;
+        }
+        
+        // Check exact match first
+        $stmt = $conn->prepare("SELECT 1 FROM routed WHERE reference_number = ? LIMIT 1");
+        if ($stmt) {
+            $stmt->bind_param('s', $reference);
+            $stmt->execute();
+            $result = $stmt->get_result();
+            $routed = ($result && $result->num_rows > 0);
+            $stmt->close();
+            if ($routed) return true;
+        }
+        
+        // Check prefix match (stored ref is prefix of query ref)
+        $stmt = $conn->prepare("SELECT 1 FROM routed WHERE ? LIKE CONCAT(reference_number, '%') LIMIT 1");
+        if ($stmt) {
+            $stmt->bind_param('s', $reference);
+            $stmt->execute();
+            $result = $stmt->get_result();
+            $routed = ($result && $result->num_rows > 0);
+            $stmt->close();
+            if ($routed) return true;
+        }
+        
+        // Check prefix match (query ref is prefix of stored ref)
+        $stmt = $conn->prepare("SELECT 1 FROM routed WHERE reference_number LIKE CONCAT(?, '%') LIMIT 1");
+        if ($stmt) {
+            $stmt->bind_param('s', $reference);
+            $stmt->execute();
+            $result = $stmt->get_result();
+            $routed = ($result && $result->num_rows > 0);
+            $stmt->close();
+            return $routed;
+        }
+        
+        return false;
+    };
     
     try {
         $refQuery = $conn->query("SELECT DISTINCT re.reference_number, MAX(re.date_time) as created_at
@@ -51,6 +96,11 @@ $reporter_name = $_SESSION['username'];
         if ($refQuery) {
             while ($row = $refQuery->fetch_assoc()) {
                 $ref = $row['reference_number'];
+                
+                // Check if this reference has been routed by AGM - skip if routed
+                if ($isReferenceRouted($conn, $ref)) {
+                    continue;
+                }
                 
                 // Detect line number (L1 or L2) from reference
                 $lineIndicator = '';
@@ -869,6 +919,23 @@ $generated_lab_test_no = generateLabTestNumber($conn);
               Clear
             </button>
           </div>
+          
+          <!-- Reference Test Status Display (shown when Apply is clicked) -->
+          <div id="char_reference_test_status_container" style="display:none; margin-top:15px; padding:0; background:#ffffff; border:1px solid #e0e0e0; border-radius:8px; box-shadow:0 1px 4px rgba(0,0,0,0.08); max-width:550px; margin-left:auto; margin-right:auto;">
+            <div style="padding:12px 16px; background:linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius:8px 8px 0 0; color:white;">
+              <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+                <div style="display:flex; align-items:center; gap:8px;">
+                  <i class="fas fa-list-check" style="font-size:16px;"></i>
+                  <h3 style="margin:0; font-size:14px; font-weight:600;" id="char_reference_status_title">Test Status</h3>
+                </div>
+                <div style="font-size:11px; opacity:0.95; font-weight:500;" id="char_reference_status_summary"></div>
+              </div>
+            </div>
+            <div id="char_reference_test_status_list" style="padding:12px; max-height:300px; overflow-y:auto;">
+              <!-- Status will be populated here -->
+            </div>
+          </div>
+          
           <!-- Hidden input to store the selected product_reference when line-based selection is used -->
           <input type="hidden" id="char_line_based_product_reference" name="product_reference" value="">
         </div>
@@ -1096,6 +1163,55 @@ generateReportID();
 
 // Add event listener to sand_weight to trigger recalculation
 document.getElementById('sand_weight').addEventListener('input', calculateSieve);
+
+// Load references list on page load
+document.addEventListener('DOMContentLoaded', function() {
+    loadCharReferencesList();
+});
+
+// Load references list from API
+function loadCharReferencesList() {
+    fetch('api/get_characteristics_references_list.php')
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                const select = document.getElementById('char_reference_number');
+                if (!select) return;
+                
+                // Clear existing options except the first placeholder
+                select.innerHTML = '<option value="">Select Reference</option>';
+                
+                // Add bundle references
+                if (data.bundleReferences && data.bundleReferences.length > 0) {
+                    data.bundleReferences.forEach(bundle => {
+                        const option = document.createElement('option');
+                        option.value = bundle.reference;
+                        option.setAttribute('data-is-bundle', 'true');
+                        option.setAttribute('data-base-ref', bundle.base_reference);
+                        option.setAttribute('data-roll-count', bundle.roll_count);
+                        option.setAttribute('data-line', bundle.line || '');
+                        option.textContent = bundle.reference + ' (Bundle - ' + bundle.roll_count + ' rolls)';
+                        select.appendChild(option);
+                    });
+                }
+                
+                // Add single roll references
+                if (data.references && data.references.length > 0) {
+                    data.references.forEach(ref => {
+                        const refValue = typeof ref === 'string' ? ref : ref.reference;
+                        const lineIndicator = typeof ref === 'object' ? (ref.line || '') : '';
+                        const option = document.createElement('option');
+                        option.value = refValue;
+                        option.setAttribute('data-is-bundle', 'false');
+                        option.setAttribute('data-line', lineIndicator);
+                        option.textContent = refValue;
+                        select.appendChild(option);
+                    });
+                }
+            }
+        })
+        .catch(err => console.error('Error loading references:', err));
+}
 
 // Handle reference selection - check if bundle and show individual roll selector
 function handleCharReferenceSelection(selectedValue) {
@@ -1350,9 +1466,13 @@ function populateCharLineReferences(line) {
     
     // Populate both dropdowns
     lineReferences.forEach(ref => {
+        // Check if this reference is part of a bundle (ends with -N pattern)
+        const isPartOfBundle = /-\d+$/.test(ref.value);
+        const displayText = isPartOfBundle ? ref.text + ' (Bundle)' : ref.text;
+        
         const fromOption = document.createElement('option');
         fromOption.value = ref.value;
-        fromOption.textContent = ref.text;
+        fromOption.textContent = displayText;
         fromOption.setAttribute('data-is-bundle', ref.isBundle);
         fromOption.setAttribute('data-base-ref', ref.baseRef);
         fromOption.setAttribute('data-roll-count', ref.rollCount);
@@ -1360,7 +1480,7 @@ function populateCharLineReferences(line) {
         
         const toOption = document.createElement('option');
         toOption.value = ref.value;
-        toOption.textContent = ref.text;
+        toOption.textContent = displayText;
         toOption.setAttribute('data-is-bundle', ref.isBundle);
         toOption.setAttribute('data-base-ref', ref.baseRef);
         toOption.setAttribute('data-roll-count', ref.rollCount);
@@ -1468,8 +1588,44 @@ function updateCharReferenceRange(autoSelect = true) {
         let actualBaseRef = baseRef;
         let actualRollCount = rollCount;
         
+        // Extract base reference from the selected value
+        const rollMatch = fromValue.match(/^(.+)-(\d+)$/);
+        if (rollMatch) {
+            actualBaseRef = rollMatch[1];
+            const selectedRollNum = parseInt(rollMatch[2]);
+            
+            // If first roll (-1) is selected, find the highest roll number for this base reference
+            if (selectedRollNum === 1) {
+                // Find all rolls for this base reference in the To dropdown
+                let highestRoll = 0;
+                let highestRollRef = '';
+                
+                Array.from(toRefSelect.options).forEach(option => {
+                    if (option.value && option.value !== '') {
+                        const optionRollMatch = option.value.match(/^(.+)-(\d+)$/);
+                        if (optionRollMatch) {
+                            const optionBaseRef = optionRollMatch[1];
+                            const optionRollNum = parseInt(optionRollMatch[2]);
+                            
+                            // If it's from the same base reference
+                            if (optionBaseRef === actualBaseRef && optionRollNum > highestRoll) {
+                                highestRoll = optionRollNum;
+                                highestRollRef = option.value;
+                            }
+                        }
+                    }
+                });
+                
+                // Auto-select the highest roll found
+                if (highestRollRef && highestRoll > 1) {
+                    toRefSelect.value = highestRollRef;
+                    return; // Exit early since we've found and selected the last roll
+                }
+            }
+        }
+        
+        // Fallback to original logic for other cases
         if (!actualBaseRef) {
-            const rollMatch = fromValue.match(/^(.+)-(\d+)$/);
             if (rollMatch) {
                 actualBaseRef = rollMatch[1];
             } else {
@@ -1559,6 +1715,160 @@ function applyCharBulkReferenceSelection() {
         }
         productRefSelect.value = rangeOption.value;
     }
+    
+    // Check which references in the range have been submitted
+    checkCharReferenceTestStatus(fromRef, toRef);
+}
+
+// Check which references in range have been submitted for Characteristics Test
+function checkCharReferenceTestStatus(fromRef, toRef) {
+    const container = document.getElementById('char_reference_test_status_container');
+    const statusList = document.getElementById('char_reference_test_status_list');
+    const statusTitle = document.getElementById('char_reference_status_title');
+    const statusSummary = document.getElementById('char_reference_status_summary');
+    
+    if (!container || !statusList) {
+        console.error('Reference status container elements not found!');
+        return;
+    }
+    
+    // Show container with loading state
+    container.style.display = 'block';
+    if (statusTitle) statusTitle.textContent = 'Test Status';
+    statusList.innerHTML = '<div style="padding:20px; text-align:center; color:#666;"><i class="fas fa-spinner fa-spin" style="font-size:18px;"></i><div style="margin-top:8px; font-size:12px;">Loading...</div></div>';
+    if (statusSummary) statusSummary.innerHTML = '';
+    
+    // Fetch submitted references
+    fetch(`api/check_submitted_tests_range_char.php?from_reference=${encodeURIComponent(fromRef)}&to_reference=${encodeURIComponent(toRef)}`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                displayCharReferenceStatus(data, fromRef, toRef);
+            } else {
+                statusList.innerHTML = `<div style="padding:12px; text-align:center; color:#dc3545; font-size:12px;"><i class="fas fa-exclamation-triangle"></i> ${data.error || 'Unknown error'}</div>`;
+            }
+        })
+        .catch(error => {
+            console.error('Error checking reference status:', error);
+            statusList.innerHTML = `<div style="padding:12px; text-align:center; color:#dc3545; font-size:12px;"><i class="fas fa-exclamation-triangle"></i> Error loading status</div>`;
+        });
+}
+
+// Display reference status with modern UI
+function displayCharReferenceStatus(data, fromRef, toRef) {
+    const statusList = document.getElementById('char_reference_test_status_list');
+    const statusSummary = document.getElementById('char_reference_status_summary');
+    
+    if (!statusList) return;
+    
+    const submittedRefs = data.submitted_references || [];
+    const submittedRefSet = new Set(submittedRefs.map(r => r.reference));
+    
+    // Get all references in range
+    const fromSelect = document.getElementById('char_from_reference');
+    const toSelect = document.getElementById('char_to_reference');
+    const allRefs = [];
+    
+    if (fromSelect && toSelect) {
+        const fromIndex = Array.from(fromSelect.options).findIndex(opt => opt.value === fromRef);
+        const toIndex = Array.from(toSelect.options).findIndex(opt => opt.value === toRef);
+        
+        if (fromIndex !== -1 && toIndex !== -1) {
+            for (let i = fromIndex; i <= toIndex; i++) {
+                const opt = fromSelect.options[i];
+                if (opt && opt.value) {
+                    allRefs.push(opt.value);
+                }
+            }
+        }
+    }
+    
+    // If we couldn't get refs from dropdown, use submitted refs to infer
+    if (allRefs.length === 0) {
+        // Extract base and generate range
+        const fromMatch = fromRef.match(/^(.+?)-(\d+)$/);
+        const toMatch = toRef.match(/^(.+?)-(\d+)$/);
+        if (fromMatch && toMatch && fromMatch[1] === toMatch[1]) {
+            const base = fromMatch[1];
+            const fromNum = parseInt(fromMatch[2]);
+            const toNum = parseInt(toMatch[2]);
+            for (let i = fromNum; i <= toNum; i++) {
+                allRefs.push(base + '-' + i);
+            }
+        } else {
+            allRefs.push(fromRef, toRef);
+        }
+    }
+    
+    const pendingRefs = allRefs.filter(ref => !submittedRefSet.has(ref));
+    const submittedCount = submittedRefs.length;
+    const pendingCount = pendingRefs.length;
+    
+    // Update summary
+    if (statusSummary) {
+        statusSummary.innerHTML = `${allRefs.length} refs | ${submittedCount} done | ${pendingCount} pending`;
+    }
+    
+    // Build HTML - compact modern design
+    let html = '';
+    
+    if (submittedCount > 0) {
+        html += `
+            <div style="margin-bottom:12px;">
+                <div style="display:flex; align-items:center; gap:6px; margin-bottom:8px; padding:6px 10px; background:#e8f5e9; border-radius:6px;">
+                    <i class="fas fa-check-circle" style="color:#4caf50; font-size:14px;"></i>
+                    <span style="color:#2e7d32; font-size:12px; font-weight:600;">Submitted (${submittedCount})</span>
+                </div>
+                <div style="display:flex; flex-wrap:wrap; gap:6px;">
+        `;
+        
+        submittedRefs.forEach(ref => {
+            const statusBadge = ref.status === 'approved' ? '<span style="background:#4caf50; color:white; padding:1px 6px; border-radius:3px; font-size:10px; font-weight:500;">✓</span>' :
+                           ref.status === 'checked' ? '<span style="background:#2196f3; color:white; padding:1px 6px; border-radius:3px; font-size:10px; font-weight:500;">✓</span>' :
+                           '<span style="background:#ff9800; color:white; padding:1px 6px; border-radius:3px; font-size:10px; font-weight:500;">⏳</span>';
+            html += `
+                <div style="padding:6px 10px; background:#f8f9fa; border:1px solid #e0e0e0; border-radius:5px; display:flex; align-items:center; gap:6px; font-size:11px;">
+                    <span style="color:#333; font-weight:500;">${ref.reference}</span>
+                    ${statusBadge}
+                </div>
+            `;
+        });
+        
+        html += `</div></div>`;
+    }
+    
+    if (pendingCount > 0) {
+        html += `
+            <div>
+                <div style="display:flex; align-items:center; gap:6px; margin-bottom:8px; padding:6px 10px; background:#fff3e0; border-radius:6px;">
+                    <i class="fas fa-clock" style="color:#ff9800; font-size:14px;"></i>
+                    <span style="color:#e65100; font-size:12px; font-weight:600;">Pending (${pendingCount})</span>
+                </div>
+                <div style="display:flex; flex-wrap:wrap; gap:6px;">
+        `;
+        
+        pendingRefs.forEach(ref => {
+            html += `
+                <div style="padding:6px 10px; background:#fff8e1; border:1px solid #ffcc80; border-radius:5px; display:flex; align-items:center; gap:6px; font-size:11px;">
+                    <span style="color:#333; font-weight:500;">${ref}</span>
+                    <span style="background:#ff9800; color:white; padding:1px 6px; border-radius:3px; font-size:10px; font-weight:500;">→</span>
+                </div>
+            `;
+        });
+        
+        html += `</div></div>`;
+    }
+    
+    if (submittedCount === 0 && pendingCount === 0) {
+        html = `
+            <div style="padding:20px; text-align:center; color:#999;">
+                <i class="fas fa-info-circle" style="font-size:20px; color:#2196F3; margin-bottom:8px;"></i>
+                <div style="font-size:12px; color:#666;">No references found in range</div>
+            </div>
+        `;
+    }
+    
+    statusList.innerHTML = html;
 }
 
 // Clear bulk reference selection
@@ -1753,7 +2063,13 @@ function calculateSieve() {
 
 // Calculate opening size based on O-value
 function calculateOpening() {
-  const oValue = parseFloat(document.getElementById('o_value_input').value);
+  const oValueInput = document.getElementById('o_value_input');
+  if (!oValueInput) {
+    alert('O-value input field not found');
+    return;
+  }
+  
+  const oValue = parseFloat(oValueInput.value);
   
   if (!oValue || oValue < 0 || oValue > 100) {
     alert('Please enter a valid O-value between 0 and 100');
@@ -1765,9 +2081,26 @@ function calculateOpening() {
   let upperSize = 0, lowerSize = 0, upperPass = 0, lowerPass = 0;
   let found = false;
   
-  for (let i = 1; i <= 8; i++) {
-    const passing = parseFloat(document.getElementById('passing_' + i).value) || 0;
-    const sieveSize = parseFloat(document.getElementById('sieve_size_' + i).value) || 0;
+  // First, find how many sieve rows exist
+  const tbody = document.getElementById('sieve_tbody');
+  if (!tbody) {
+    alert('Sieve table not found');
+    return;
+  }
+  
+  const rows = tbody.querySelectorAll('tr');
+  const maxRows = rows.length;
+  
+  for (let i = 1; i <= maxRows; i++) {
+    const passingEl = document.getElementById('passing_' + i);
+    const sieveSizeEl = document.getElementById('sieve_size_' + i);
+    
+    if (!passingEl || !sieveSizeEl) continue;
+    
+    const passing = parseFloat(passingEl.value) || 0;
+    const sieveSize = parseFloat(sieveSizeEl.value) || 0;
+    
+    if (sieveSize <= 0) continue; // Skip empty rows
     
     if (passing <= oValue) {
       // Found the lower bound (passing just below O-value)
@@ -1776,9 +2109,13 @@ function calculateOpening() {
       
       // Get upper bound from previous row (passing just above O-value)
       if (i > 1) {
-        upperSize = parseFloat(document.getElementById('sieve_size_' + (i-1)).value) || 0;
-        upperPass = parseFloat(document.getElementById('passing_' + (i-1)).value) || 0;
-        found = true;
+        const prevSieveSizeEl = document.getElementById('sieve_size_' + (i-1));
+        const prevPassingEl = document.getElementById('passing_' + (i-1));
+        if (prevSieveSizeEl && prevPassingEl) {
+          upperSize = parseFloat(prevSieveSizeEl.value) || 0;
+          upperPass = parseFloat(prevPassingEl.value) || 0;
+          found = true;
+        }
       } else {
         // O-value is higher than the first sieve's passing %
         // Use the first sieve size as the result
@@ -1792,14 +2129,18 @@ function calculateOpening() {
   
   // If O-value is lower than all sieves, use the last sieve
   if (!found && lowerSize === 0) {
-    for (let i = 8; i >= 1; i--) {
-      const sieveSize = parseFloat(document.getElementById('sieve_size_' + i).value) || 0;
-      const passing = parseFloat(document.getElementById('passing_' + i).value) || 0;
-      if (sieveSize > 0) {
-        lowerSize = sieveSize;
-        lowerPass = passing;
-        found = true;
-        break;
+    for (let i = maxRows; i >= 1; i--) {
+      const sieveSizeEl = document.getElementById('sieve_size_' + i);
+      const passingEl = document.getElementById('passing_' + i);
+      if (sieveSizeEl && passingEl) {
+        const sieveSize = parseFloat(sieveSizeEl.value) || 0;
+        const passing = parseFloat(passingEl.value) || 0;
+        if (sieveSize > 0) {
+          lowerSize = sieveSize;
+          lowerPass = passing;
+          found = true;
+          break;
+        }
       }
     }
   }
@@ -1834,13 +2175,24 @@ function calculateOpening() {
     calculationHTML = `O${oValue} = ${openingSize.toFixed(3)} mm (${(openingSize * 1000).toFixed(0)} μm)`;
   }
   
-  document.getElementById('opening_size').value = openingSize.toFixed(4);
-  document.getElementById('calculation_text').innerHTML = calculationHTML;
-  document.getElementById('calculation_display').style.display = 'block';
+  const openingSizeEl = document.getElementById('opening_size');
+  const calculationTextEl = document.getElementById('calculation_text');
+  const calculationDisplayEl = document.getElementById('calculation_display');
+  const finalResultEl = document.getElementById('final_result');
+  const resultDisplayEl = document.getElementById('result_display');
   
-  document.getElementById('final_result').innerHTML = 
+  if (!openingSizeEl || !calculationTextEl || !calculationDisplayEl || !finalResultEl || !resultDisplayEl) {
+    alert('Required display elements not found. Please refresh the page.');
+    return;
+  }
+  
+  openingSizeEl.value = openingSize.toFixed(4);
+  calculationTextEl.innerHTML = calculationHTML;
+  calculationDisplayEl.style.display = 'block';
+  
+  finalResultEl.innerHTML = 
     `Apparent Opening Size (O${oValue}): ${openingSize.toFixed(3)} mm (${(openingSize * 1000).toFixed(0)} μm)`;
-  document.getElementById('result_display').style.display = 'block';
+  resultDisplayEl.style.display = 'block';
 }
 
 // Admin rejection modal functions

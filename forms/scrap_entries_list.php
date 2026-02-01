@@ -165,12 +165,12 @@ $conn->close();
         </div>
         <div class="stat-card orange">
             <div class="stat-value"><?php 
-                $swingCount = count(array_filter($entries, function($e) { 
-                    return $e['scrap_category'] === 'Swing Scrap'; 
+                $sewingCount = count(array_filter($entries, function($e) { 
+                    return $e['scrap_category'] === 'Sewing Scrap' || $e['scrap_category'] === 'Swing Scrap'; 
                 }));
-                echo $swingCount;
+                echo $sewingCount;
             ?></div>
-            <div class="stat-label">Swing Production Scrap</div>
+            <div class="stat-label">Sewing Production Scrap</div>
         </div>
         <div class="stat-card blue">
             <div class="stat-value"><?php 

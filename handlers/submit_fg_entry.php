@@ -34,11 +34,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         
         // Get form data
         $dateTime          = $_POST['date_time'] ?? date('Y-m-d H:i:s');
-        $shift             = $_POST['shift'] ?? '';
-        $productType       = $_POST['product_type'] ?? '';
+        $shift             = trim($_POST['shift'] ?? '');
+        // Ensure shift is always set for DB: Day 8:00–19:59, Night otherwise
+        if ($shift === '' || (strtolower($shift) !== 'day' && strtolower($shift) !== 'night')) {
+            $h = (int)date('H');
+            $shift = ($h >= 8 && $h <= 19) ? 'Day' : 'Night';
+        }
+        $productType       = strtolower(trim($_POST['product_type'] ?? ''));
         $rollEntryType     = $_POST['roll_entry_type'] ?? '';
         $referenceNumber   = $_POST['reference_number'] ?? '';
-        $cncCuttingBatch   = $_POST['cnc_cutting_batch'] ?? '';
         // Get shift_in_charge value
         $shiftInCharge = trim($_POST['shift_in_charge'] ?? $_POST['qc_inspector'] ?? '');
         
@@ -81,8 +85,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($shiftInCharge === '0' || $shiftInCharge === 0 || trim($shiftInCharge) === '0') {
             $shiftInCharge = 'User';
         }
-        $projectId         = $_POST['project_id'] ?? '';
-        $bagSize           = $_POST['bag_size'] ?? '';
+        $projectId         = trim($_POST['project_id'] ?? '');
+        // CNC batch: for bags always use dropdown (bag_cnc_cutting_batch) so every selected batch is saved correctly
+        $cncFromSelect     = trim((string)($_POST['bag_cnc_cutting_batch'] ?? ''));
+        $cncFromHidden     = trim((string)($_POST['cnc_cutting_batch'] ?? ''));
+        if ($productType === 'bag') {
+            $cncRaw = ($cncFromSelect !== '' && $cncFromSelect !== '0') ? $cncFromSelect : $cncFromHidden;
+        } else {
+            $cncRaw = $cncFromHidden !== '' ? $cncFromHidden : $cncFromSelect;
+        }
+        // Extract batch identifier (before "||" if present; options are "BATCH" or "BATCH||bagSize")
+        $cncCuttingBatch   = (strpos($cncRaw, '||') !== false) ? trim(explode('||', $cncRaw)[0]) : $cncRaw;
+        if ($cncCuttingBatch === '0' || $cncCuttingBatch === '') {
+            $cncCuttingBatch = ($productType === 'bag' && $cncFromSelect !== '' && $cncFromSelect !== '0')
+                ? (strpos($cncFromSelect, '||') !== false ? trim(explode('||', $cncFromSelect)[0]) : $cncFromSelect)
+                : '';
+        }
+        $bagSize           = trim($_POST['bag_size'] ?? '');
         $rollSize          = $_POST['roll_size'] ?? '';
         $recommendedWeight = $_POST['recommended_weight'] ?? '';
         // Handle weight fields - get from appropriate field based on product type
@@ -95,6 +114,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $actualWeight = trim($_POST['actual_weight_bag'] ?? '');
         }
         $totalArea         = trim($_POST['total_area'] ?? '');
+        $tripNumber        = ($productType === 'roll') ? trim($_POST['trip_number'] ?? '') : null;
         $qualityChecked    = $_POST['quality_checked'] ?? '';
         $passedQty         = $_POST['passed_qty'] ?? '';
         $rejectedQty       = $_POST['rejected_qty'] ?? '';
@@ -132,9 +152,66 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         error_log("FG Entry Debug - POST batch_number: " . ($_POST['batch_number'] ?? 'NOT SET'));
         error_log("FG Entry Debug - Final batch_number used: " . $batchNumber);
 
+        // For bags: resolve project_id from branding_entries if empty (projects load async)
+        if ($productType === 'bag' && (empty($projectId) || $projectId === '0') && !empty($cncCuttingBatch)) {
+            $beCheck = $conn->query("SHOW COLUMNS FROM branding_entries LIKE 'project_id'");
+            if ($beCheck && $beCheck->num_rows > 0) {
+                $batchEsc = $conn->real_escape_string($cncCuttingBatch);
+                $bagSizeEsc = $conn->real_escape_string(trim($bagSize));
+                // Match by cnc_cutting_batch; prefer exact bag_size match, else any
+                $sql = "SELECT project_id FROM branding_entries 
+                        WHERE TRIM(cnc_cutting_batch) = '$batchEsc' 
+                        AND project_id IS NOT NULL AND project_id > 0 
+                        ORDER BY (TRIM(COALESCE(bag_size,'')) = '$bagSizeEsc') DESC
+                        LIMIT 1";
+                $res = $conn->query($sql);
+                if ($res) {
+                    $row = $res->fetch_assoc();
+                    if (is_array($row) && !empty($row['project_id'])) {
+                        $projectId = (string)(int)$row['project_id'];
+                    }
+                }
+            }
+        }
+        // Fallback to default project if still empty
+        if (empty($projectId) || $projectId === '0') {
+            require_once '../config/project_helper.php';
+            $defProj = getDefaultProject($conn);
+            if ($defProj && !empty($defProj['id'])) {
+                $projectId = (string)(int)$defProj['id'];
+            }
+        }
+
+        // Validate project_id after resolution - must have a value
+        if (empty($projectId) || $projectId === '0') {
+            header("Location: ../forms/fg_entry.php?error=" . urlencode("Missing required field: project_id. Please select a project or ensure the form loads projects."));
+            exit();
+        }
+
+        // For bags: resolve bag_size from branding_entries if empty but cnc_cutting_batch is set
+        if ($productType === 'bag' && (empty($bagSize) || trim($bagSize) === '') && !empty($cncCuttingBatch)) {
+            $beCols = [];
+            if ($r = $conn->query("SHOW COLUMNS FROM branding_entries")) {
+                while ($c = $r->fetch_assoc()) $beCols[$c['Field']] = true;
+            }
+            if (!empty($beCols['bag_size'])) {
+                $batchEsc = $conn->real_escape_string($cncCuttingBatch);
+                $res = $conn->query("SELECT TRIM(COALESCE(bag_size,'')) as bag_size FROM branding_entries 
+                    WHERE TRIM(cnc_cutting_batch) = '$batchEsc' AND bag_size IS NOT NULL AND TRIM(bag_size) != '' 
+                    LIMIT 1");
+                if ($res) {
+                    $row = $res->fetch_assoc();
+                    if (is_array($row) && !empty(trim($row['bag_size'] ?? ''))) {
+                        $bagSize = trim($row['bag_size']);
+                        $_POST['bag_size'] = $bagSize;
+                    }
+                }
+            }
+        }
+
         // Required fields validation (allow 0 values)
         $required = [
-            'fg_id', 'product_type', 'shift_in_charge', 'project_id'
+            'fg_id', 'product_type', 'shift_in_charge'
         ];
         
         // Add product-specific required fields
@@ -177,15 +254,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
         
-        // Additional validation for rolls
+        // Roll validation: roll_size is optional (form only requires reference_number)
         if ($productType === 'roll') {
-            // Check roll_size (might be in bag_size field for rolls)
             $rollSize = $_POST['roll_size'] ?? $_POST['bag_size'] ?? '';
-            if (empty($rollSize)) {
-                header("Location: ../forms/fg_entry.php?error=" . urlencode("Missing required field: roll_size"));
-                exit();
+            if (!empty($rollSize)) {
+                $bagSize = $rollSize; // Use roll size as bag_size for rolls when provided
             }
-            
+            // Allow empty roll_size - reference_number is the required field for rolls
         }
 
         // Get FG ID from form
@@ -239,7 +314,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $existingFgCols[] = $row['Field'];
             }
         }
-        // Ensure critical columns
+        // Ensure critical columns (including shift so it is always saved)
+        if (!in_array('shift', $existingFgCols)) {
+            $conn->query("ALTER TABLE fg_entry ADD COLUMN shift VARCHAR(20) DEFAULT NULL AFTER date_time");
+            $existingFgCols[] = 'shift';
+        }
         $ensureCols = [
             'product_type' => "ALTER TABLE fg_entry ADD COLUMN product_type VARCHAR(20) AFTER shift",
             'roll_entry_type' => "ALTER TABLE fg_entry ADD COLUMN roll_entry_type VARCHAR(20) AFTER product_type",
@@ -261,6 +340,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         if (!in_array('measurement_type', $existingFgCols)) {
             $conn->query("ALTER TABLE fg_entry ADD COLUMN measurement_type VARCHAR(20) NULL AFTER actual_weight");
+        }
+        if (!in_array('trip_number', $existingFgCols)) {
+            $conn->query("ALTER TABLE fg_entry ADD COLUMN trip_number INT NULL AFTER reference_number");
+            $existingFgCols[] = 'trip_number';
         }
         
         // Allow NULL for recommended_weight (not applicable for rolls)

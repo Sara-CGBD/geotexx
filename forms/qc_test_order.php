@@ -51,6 +51,340 @@ if (isset($_GET['action']) && $_GET['action'] === 'generate_external_ref') {
     exit();
 }
 
+// AJAX endpoint to check reference-level test status for a range
+if (isset($_GET['action']) && $_GET['action'] === 'check_reference_test_status') {
+    // Suppress any output and errors that might interfere with JSON
+    ob_start();
+    error_reporting(E_ALL);
+    ini_set('display_errors', 0);
+    
+    try {
+        require_once 'security_config.php';
+        
+        // Verify user is logged in for AJAX call
+        if (!isset($_SESSION['user_id'])) {
+            ob_clean();
+            header('Content-Type: application/json');
+            echo json_encode([
+                'success' => false,
+                'error' => 'Not authenticated'
+            ]);
+            exit();
+        }
+        
+        $fromRef = $_GET['from_reference'] ?? '';
+        $toRef = $_GET['to_reference'] ?? '';
+        $testName = $_GET['test_name'] ?? '';
+        $method = $_GET['method'] ?? '';
+        
+        if (empty($fromRef) || empty($toRef) || empty($testName) || empty($method)) {
+            ob_clean();
+            header('Content-Type: application/json');
+            echo json_encode([
+                'success' => false,
+                'error' => 'Missing required parameters',
+                'debug' => [
+                    'from_ref' => $fromRef,
+                    'to_ref' => $toRef,
+                    'test_name' => $testName,
+                    'method' => $method
+                ]
+            ]);
+            exit();
+        }
+        
+        $conn = SecurityConfig::getConnection();
+        if (!$conn) {
+            throw new Exception('Database connection failed');
+        }
+        
+        // Generate all references in the range
+        $references = [];
+        $fromBaseRef = '';
+        $fromRollNum = 0;
+        $fromSuffix = '';
+        $toBaseRef = '';
+        $toRollNum = 0;
+        $toSuffix = '';
+        
+        // Parse from reference: extract base, roll number, and suffix (e.g., -GT0.9.H0.1)
+        // Pattern: BASE-R##-SUFFIX or BASE-##-SUFFIX or BASE-R## or BASE-##
+        // Try to match -R## or -## followed by optional suffix
+        if (preg_match('/^(.+?)-R(\d{1,2})(.*)$/', $fromRef, $fromMatches)) {
+            // Format: BASE-R##-SUFFIX or BASE-R##
+            $fromBaseRef = $fromMatches[1];
+            $fromRollNum = (int)$fromMatches[2];
+            $fromSuffix = $fromMatches[3]; // This captures the suffix like -GT0.9.H0.1
+        } elseif (preg_match('/^(.+?)-(\d{1,2})(.*)$/', $fromRef, $fromMatches)) {
+            // Format: BASE-##-SUFFIX or BASE-##
+            $fromBaseRef = $fromMatches[1];
+            $fromRollNum = (int)$fromMatches[2];
+            $fromSuffix = $fromMatches[3]; // This captures the suffix like -GT0.9.H0.1
+        } else {
+            // No roll number pattern found - use reference as-is
+            $fromBaseRef = $fromRef;
+            $fromRollNum = 1;
+            $fromSuffix = '';
+        }
+        
+        // Parse to reference
+        if (preg_match('/^(.+?)-R(\d{1,2})(.*)$/', $toRef, $toMatches)) {
+            // Format: BASE-R##-SUFFIX or BASE-R##
+            $toBaseRef = $toMatches[1];
+            $toRollNum = (int)$toMatches[2];
+            $toSuffix = $toMatches[3]; // This captures the suffix like -GT0.9.H0.1
+        } elseif (preg_match('/^(.+?)-(\d{1,2})(.*)$/', $toRef, $toMatches)) {
+            // Format: BASE-##-SUFFIX or BASE-##
+            $toBaseRef = $toMatches[1];
+            $toRollNum = (int)$toMatches[2];
+            $toSuffix = $toMatches[3]; // This captures the suffix like -GT0.9.H0.1
+        } else {
+            // No roll number pattern found - use reference as-is
+            $toBaseRef = $toRef;
+            $toRollNum = 1;
+            $toSuffix = '';
+        }
+        
+        // Generate references
+        // If same base and same suffix, generate range; otherwise use endpoints as-is
+        if ($fromBaseRef === $toBaseRef && $fromSuffix === $toSuffix && $fromRollNum > 0 && $toRollNum > 0 && $fromRollNum <= $toRollNum) {
+            // Same base reference and suffix - generate all in range
+            for ($roll = $fromRollNum; $roll <= $toRollNum; $roll++) {
+                // Preserve original format (R## or just ##) and suffix
+                if (strpos($fromRef, '-R') !== false) {
+                    $references[] = $fromBaseRef . '-R' . str_pad($roll, 2, '0', STR_PAD_LEFT) . $fromSuffix;
+                } else {
+                    $references[] = $fromBaseRef . '-' . $roll . $fromSuffix;
+                }
+            }
+        } else {
+            // Different base references, different suffixes, or invalid range - use endpoints as-is
+            $references[] = $fromRef;
+            if ($toRef !== $fromRef) {
+                $references[] = $toRef;
+            }
+        }
+        
+        // Log for debugging
+        error_log("QC Reference Status: From='$fromRef', To='$toRef'");
+        error_log("QC Reference Status: Parsed - FromBase='$fromBaseRef', FromRoll=$fromRollNum, FromSuffix='$fromSuffix'");
+        error_log("QC Reference Status: Parsed - ToBase='$toBaseRef', ToRoll=$toRollNum, ToSuffix='$toSuffix'");
+        error_log("QC Reference Status: Generated " . count($references) . " references: " . implode(', ', $references));
+        
+        // Get test standard ID
+        // Note: test_standards table uses 'standard_code' not 'method'
+        $testStdStmt = $conn->prepare("SELECT id FROM test_standards WHERE test_name = ? AND standard_code = ? LIMIT 1");
+        $testStdStmt->bind_param('ss', $testName, $method);
+        $testStdStmt->execute();
+        $testStdResult = $testStdStmt->get_result();
+        $testStandardId = null;
+        if ($testStdRow = $testStdResult->fetch_assoc()) {
+            $testStandardId = $testStdRow['id'];
+        }
+        $testStdStmt->close();
+        
+        // Log if test standard not found
+        if (!$testStandardId) {
+            error_log("QC Reference Status: Test standard not found for test_name='$testName', method='$method'");
+        }
+    
+        // Check status for each reference
+        $results = [];
+        foreach ($references as $ref) {
+            $status = 'pending';
+            $submittedDate = null;
+            $reportNumber = null;
+            $reportId = null;
+            
+            if ($testStandardId) {
+                // Check if test is submitted for this reference
+                // Use multiple matching strategies to handle variations:
+                // 1. Exact match
+                // 2. LIKE pattern (handles partial matches)
+                // 3. Case-insensitive match
+                
+                $found = false;
+                $checkRow = null;
+                
+                // Strategy 1: Exact match (most reliable)
+                $checkStmt = $conn->prepare("
+                    SELECT id, report_number, created_at, status, sample_reference_id
+                    FROM qc_test_orders
+                    WHERE sample_reference_id = ?
+                    AND test_standard_id = ?
+                    AND chosen_method = ?
+                    AND status NOT IN ('rejected_by_checker', 'rejected_by_approver')
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                ");
+                $checkStmt->bind_param('sis', $ref, $testStandardId, $method);
+                $checkStmt->execute();
+                $checkResult = $checkStmt->get_result();
+                
+                if ($checkRow = $checkResult->fetch_assoc()) {
+                    $found = true;
+                    error_log("QC Reference Status: Found (exact match) for ref='$ref', report='{$checkRow['report_number']}', stored_ref='{$checkRow['sample_reference_id']}'");
+                }
+                $checkStmt->close();
+                
+                // Strategy 2: If exact match failed, try LIKE pattern (handles suffix variations)
+                if (!$found) {
+                    // Try matching with LIKE - this handles cases where stored ref might have extra parts
+                    $refPattern = $ref . '%';
+                    $checkStmt = $conn->prepare("
+                        SELECT id, report_number, created_at, status, sample_reference_id
+                        FROM qc_test_orders
+                        WHERE sample_reference_id LIKE ?
+                        AND test_standard_id = ?
+                        AND chosen_method = ?
+                        AND status NOT IN ('rejected_by_checker', 'rejected_by_approver')
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                    ");
+                    $checkStmt->bind_param('sis', $refPattern, $testStandardId, $method);
+                    $checkStmt->execute();
+                    $checkResult = $checkStmt->get_result();
+                    
+                    if ($checkRow = $checkResult->fetch_assoc()) {
+                        $found = true;
+                        error_log("QC Reference Status: Found (LIKE match) for ref='$ref', report='{$checkRow['report_number']}', stored_ref='{$checkRow['sample_reference_id']}'");
+                    }
+                    $checkStmt->close();
+                }
+                
+                // Strategy 3: If still not found, try reverse LIKE (stored ref is shorter than query ref)
+                if (!$found) {
+                    // Extract base reference (without suffix) and try matching
+                    $baseRef = $ref;
+                    if (preg_match('/^(.+?)-R?(\d{1,2})/', $ref, $baseMatches)) {
+                        $baseRef = $baseMatches[1] . (strpos($ref, '-R') !== false ? '-R' . str_pad($baseMatches[2], 2, '0', STR_PAD_LEFT) : '-' . $baseMatches[2]);
+                    }
+                    
+                    $basePattern = $baseRef . '%';
+                    $checkStmt = $conn->prepare("
+                        SELECT id, report_number, created_at, status, sample_reference_id
+                        FROM qc_test_orders
+                        WHERE sample_reference_id LIKE ?
+                        AND test_standard_id = ?
+                        AND chosen_method = ?
+                        AND status NOT IN ('rejected_by_checker', 'rejected_by_approver')
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                    ");
+                    $checkStmt->bind_param('sis', $basePattern, $testStandardId, $method);
+                    $checkStmt->execute();
+                    $checkResult = $checkStmt->get_result();
+                    
+                    if ($checkRow = $checkResult->fetch_assoc()) {
+                        $storedRef = $checkRow['sample_reference_id'];
+                        // Verify the stored reference matches our query reference (handle suffix variations)
+                        if ($storedRef === $ref || 
+                            strpos($storedRef, $baseRef) === 0 || 
+                            strpos($ref, $baseRef) === 0) {
+                            $found = true;
+                            error_log("QC Reference Status: Found (base pattern match) for ref='$ref', report='{$checkRow['report_number']}', stored_ref='$storedRef'");
+                        }
+                    }
+                    $checkStmt->close();
+                }
+                
+                // Strategy 4: Try case-insensitive exact match (MySQL default, but be explicit)
+                if (!$found) {
+                    $checkStmt = $conn->prepare("
+                        SELECT id, report_number, created_at, status, sample_reference_id
+                        FROM qc_test_orders
+                        WHERE LOWER(TRIM(sample_reference_id)) = LOWER(TRIM(?))
+                        AND test_standard_id = ?
+                        AND chosen_method = ?
+                        AND status NOT IN ('rejected_by_checker', 'rejected_by_approver')
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                    ");
+                    $checkStmt->bind_param('sis', $ref, $testStandardId, $method);
+                    $checkStmt->execute();
+                    $checkResult = $checkStmt->get_result();
+                    
+                    if ($checkRow = $checkResult->fetch_assoc()) {
+                        $found = true;
+                        error_log("QC Reference Status: Found (case-insensitive match) for ref='$ref', report='{$checkRow['report_number']}', stored_ref='{$checkRow['sample_reference_id']}'");
+                    }
+                    $checkStmt->close();
+                }
+                
+                if ($found && $checkRow) {
+                    $status = 'submitted';
+                    $submittedDate = $checkRow['created_at'];
+                    $reportNumber = $checkRow['report_number'];
+                    $reportId = $checkRow['id'];
+                } else {
+                    // Log when not found for debugging
+                    error_log("QC Reference Status: No submitted test found for ref='$ref', test_standard_id=$testStandardId, method='$method' (tried exact, LIKE, base pattern, and case-insensitive)");
+                }
+            } else {
+                error_log("QC Reference Status: testStandardId is null for ref='$ref', test_name='$testName', method='$method'");
+            }
+            
+            $results[] = [
+                'reference' => $ref,
+                'status' => $status,
+                'submitted_date' => $submittedDate,
+                'report_number' => $reportNumber,
+                'report_id' => $reportId,
+                'can_submit' => ($status === 'pending')
+            ];
+        }
+        
+        // Log for debugging
+        error_log("QC Reference Status API: Returning " . count($results) . " reference results for test: " . $testName . " (" . $method . ")");
+        
+        // Clean any output buffer and send JSON
+        ob_clean();
+        header('Content-Type: application/json');
+        echo json_encode([
+            'success' => true,
+            'test_name' => $testName,
+            'method' => $method,
+            'references' => $results,
+            'debug' => [
+                'from_ref' => $fromRef,
+                'to_ref' => $toRef,
+                'generated_refs' => $references,
+                'test_standard_id' => $testStandardId
+            ]
+        ]);
+        exit();
+        
+    } catch (Exception $e) {
+        // Handle any errors gracefully
+        ob_clean();
+        header('Content-Type: application/json');
+        echo json_encode([
+            'success' => false,
+            'error' => 'Server error: ' . $e->getMessage(),
+            'debug' => [
+                'file' => $e->getFile(),
+                'line' => $e->getLine()
+            ]
+        ]);
+        error_log("QC Reference Status API Error: " . $e->getMessage());
+        exit();
+    } catch (Error $e) {
+        // Handle fatal errors
+        ob_clean();
+        header('Content-Type: application/json');
+        echo json_encode([
+            'success' => false,
+            'error' => 'Fatal error: ' . $e->getMessage(),
+            'debug' => [
+                'file' => $e->getFile(),
+                'line' => $e->getLine()
+            ]
+        ]);
+        error_log("QC Reference Status API Fatal Error: " . $e->getMessage());
+        exit();
+    }
+}
+
 // Include auto-reload AFTER AJAX endpoint to prevent it from contaminating JSON response
 $devReload = __DIR__ . '/../dev/auto_reload.php';
 if (file_exists($devReload)) {
@@ -440,6 +774,82 @@ $bundleReferences = []; // Store bundle references separately
 $checkCol = $conn->query("SHOW COLUMNS FROM roll_entry LIKE 'number_of_rolls'");
 $hasNumberOfRolls = ($checkCol && $checkCol->num_rows > 0);
 
+// Check if roll_destination column exists in qc_test_orders table
+$checkRollDestCol = $conn->query("SHOW COLUMNS FROM qc_test_orders LIKE 'roll_destination'");
+$hasRollDestination = ($checkRollDestCol && $checkRollDestCol->num_rows > 0);
+
+// Helper function to check if a reference has been routed
+$isReferenceRouted = function($conn, $reference, $hasRollDestination) {
+    if (!$hasRollDestination) {
+        return false;
+    }
+    
+    // Check exact match first (most reliable)
+    $stmt = $conn->prepare("
+        SELECT 1 
+        FROM qc_test_orders 
+        WHERE sample_reference_id = ? 
+        AND status = 'approved' 
+        AND roll_destination IS NOT NULL 
+        AND roll_destination != ''
+        LIMIT 1
+    ");
+    if ($stmt) {
+        $stmt->bind_param('s', $reference);
+        $stmt->execute();
+        $result = $stmt->get_result();
+        $routed = ($result && $result->num_rows > 0);
+        $stmt->close();
+        if ($routed) {
+            return true;
+        }
+    }
+    
+    // Also check if the stored reference is a prefix of the query reference
+    // e.g., stored: "2.0L126JAN16-R06" matches query: "2.0L126JAN16-R06-GT0.9.H0.1"
+    $stmt = $conn->prepare("
+        SELECT 1 
+        FROM qc_test_orders 
+        WHERE ? LIKE CONCAT(sample_reference_id, '%')
+        AND status = 'approved' 
+        AND roll_destination IS NOT NULL 
+        AND roll_destination != ''
+        LIMIT 1
+    ");
+    if ($stmt) {
+        $stmt->bind_param('s', $reference);
+        $stmt->execute();
+        $result = $stmt->get_result();
+        $routed = ($result && $result->num_rows > 0);
+        $stmt->close();
+        if ($routed) {
+            return true;
+        }
+    }
+    
+    // Also check if the query reference is a prefix of stored reference
+    // e.g., query: "2.0L126JAN16-R06" matches stored: "2.0L126JAN16-R06-GT0.9.H0.1"
+    $stmt = $conn->prepare("
+        SELECT 1 
+        FROM qc_test_orders 
+        WHERE sample_reference_id LIKE CONCAT(?, '%')
+        AND status = 'approved' 
+        AND roll_destination IS NOT NULL 
+        AND roll_destination != ''
+        LIMIT 1
+    ");
+    if ($stmt) {
+        $stmt->bind_param('s', $reference);
+        $stmt->execute();
+        $result = $stmt->get_result();
+        $routed = ($result && $result->num_rows > 0);
+        $stmt->close();
+        return $routed;
+    }
+    
+    return false;
+};
+
 $refQuery = $conn->query("
     SELECT reference_number, 
            MAX(material_type) as material_type, 
@@ -462,38 +872,68 @@ if ($refQuery) {
             $rollCount = (int)$matches[1];
             $baseRef = preg_replace('/-\d+$/', '', $ref);
             
-            // Store as bundle
-            $bundleReferences[] = [
-                'reference' => $ref,
-                'base_reference' => $baseRef,
-                'roll_count' => $rollCount,
-                'material_type' => $row['material_type'],
-                'weight' => $row['total_weight'],
-                'date' => $row['created_at']
-            ];
+            // Check if the bundle reference itself has been routed
+            $bundleRouted = $isReferenceRouted($conn, $ref, $hasRollDestination);
             
-            // Also add individual roll references for selection
+            // Check how many individual rolls have been routed
+            $routedRollCount = 0;
+            $routedRolls = [];
             for ($i = 1; $i <= $rollCount; $i++) {
                 $individualRef = $baseRef . '-' . $i;
-                $references[] = [
-                    'reference' => $individualRef,
-                    'bundle_reference' => $ref,
-                    'roll_number' => $i,
-                    'is_individual' => true,
+                if ($isReferenceRouted($conn, $individualRef, $hasRollDestination)) {
+                    $routedRollCount++;
+                    $routedRolls[] = $i;
+                }
+            }
+            
+            // Only add bundle if not all rolls are routed and bundle itself is not routed
+            if (!$bundleRouted && $routedRollCount < $rollCount) {
+                // Store as bundle (only if it has at least one non-routed roll)
+                $bundleReferences[] = [
+                    'reference' => $ref,
+                    'base_reference' => $baseRef,
+                    'roll_count' => $rollCount,
                     'material_type' => $row['material_type'],
-                    'weight' => $row['total_weight'] / $rollCount, // Approximate weight per roll
+                    'weight' => $row['total_weight'],
                     'date' => $row['created_at']
                 ];
+                
+                // Add individual roll references for selection (only if not routed)
+                for ($i = 1; $i <= $rollCount; $i++) {
+                    $individualRef = $baseRef . '-' . $i;
+                    
+                    // Check if this individual roll reference has been routed
+                    $isRouted = $isReferenceRouted($conn, $individualRef, $hasRollDestination);
+                    
+                    // Only add if not routed
+                    if (!$isRouted) {
+                        $references[] = [
+                            'reference' => $individualRef,
+                            'bundle_reference' => $ref,
+                            'roll_number' => $i,
+                            'is_individual' => true,
+                            'material_type' => $row['material_type'],
+                            'weight' => $row['total_weight'] / $rollCount, // Approximate weight per roll
+                            'date' => $row['created_at']
+                        ];
+                    }
+                }
             }
         } else {
             // Single roll reference (not a bundle)
-            $references[] = [
-                'reference' => $ref,
-                'material_type' => $row['material_type'],
-                'weight' => $row['total_weight'],
-                'date' => $row['created_at'],
-                'is_individual' => false
-            ];
+            // Check if this reference has been routed
+            $isRouted = $isReferenceRouted($conn, $ref, $hasRollDestination);
+            
+            // Only add if not routed
+            if (!$isRouted) {
+                $references[] = [
+                    'reference' => $ref,
+                    'material_type' => $row['material_type'],
+                    'weight' => $row['total_weight'],
+                    'date' => $row['created_at'],
+                    'is_individual' => false
+                ];
+            }
         }
     }
 }
@@ -1153,6 +1593,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_order'])) {
         $rolls_to_process = !empty($bulk_rolls) ? $bulk_rolls : [null]; // null means process single reference
         $original_user_ref = $user_reference;
         
+        // Track submission results for bulk references
+        $bulk_submission_results = [
+            'submitted' => [],
+            'skipped' => [],
+            'errors' => []
+        ];
+        
         foreach ($rolls_to_process as $bulk_roll_ref) {
             // If processing bulk, temporarily set the individual roll reference
             $original_individual_ref = $_POST['individual_roll_reference'] ?? '';
@@ -1661,6 +2108,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_order'])) {
                         AND ts.test_name = ?
                         AND ts.standard_code = ?
                         AND qto.id != ?
+                        AND qto.status NOT IN ('rejected_by_checker', 'rejected_by_approver')
                         LIMIT 1
                     ");
                     $check_id = $is_editing ? $edit_id_post : 0;
@@ -1668,15 +2116,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_order'])) {
                     $check_duplicate->execute();
                     $duplicate_result = $check_duplicate->get_result();
                     
+                    // Check if this is a bulk submission (multiple references in range)
+                    $is_bulk_submission = !empty($bulk_rolls) && count($bulk_rolls) > 1;
+                    $already_submitted = false;
+                    
                     if ($duplicate_result && $duplicate_row = $duplicate_result->fetch_assoc()) {
-                        // Duplicate found - show error and skip this test
-                        $check_duplicate->close();
-                        $conn->rollback();
-                        $_SESSION['error_message'] = "❌ Test has already been submitted for reference: " . htmlspecialchars($final_reference) . " with test: " . htmlspecialchars($selected['test_name']) . " (" . htmlspecialchars($selected['method']) . "). Report Number: " . htmlspecialchars($duplicate_row['report_number']);
-                        header("Location: " . $_SERVER['PHP_SELF'] . ($is_editing && $edit_id_post > 0 ? "?edit_id=" . $edit_id_post : ""));
-                        exit;
+                        $already_submitted = true;
+                        
+                        if ($is_bulk_submission) {
+                            // For bulk submissions: skip this reference but continue with others
+                            $check_duplicate->close();
+                            error_log("QC Test Order: Skipping reference $final_reference - test already submitted (Report: " . $duplicate_row['report_number'] . ")");
+                            $bulk_submission_results['skipped'][] = [
+                                'reference' => $final_reference,
+                                'reason' => 'Already submitted',
+                                'report_number' => $duplicate_row['report_number'],
+                                'date' => $duplicate_row['status']
+                            ];
+                            continue; // Skip to next reference in bulk
+                        } else {
+                            // For single reference: show error and stop
+                            $check_duplicate->close();
+                            $conn->rollback();
+                            $_SESSION['error_message'] = "❌ Test has already been submitted for reference: " . htmlspecialchars($final_reference) . " with test: " . htmlspecialchars($selected['test_name']) . " (" . htmlspecialchars($selected['method']) . "). Report Number: " . htmlspecialchars($duplicate_row['report_number']);
+                            header("Location: " . $_SERVER['PHP_SELF'] . ($is_editing && $edit_id_post > 0 ? "?edit_id=" . $edit_id_post : ""));
+                            exit;
+                        }
                     }
                     $check_duplicate->close();
+                    
+                    // Skip insertion if already submitted (for bulk submissions)
+                    if ($already_submitted) {
+                        continue; // Skip to next reference
+                    }
                     
                     // Insert with appropriate status - EXPLICITLY set status to avoid database defaults
                     // Ensure status is set before binding
@@ -1749,6 +2221,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_order'])) {
                     }
                 } else {
                     $inserted_count++;
+                    // Track successful submission for bulk references
+                    if ($is_bulk_submission && $bulk_roll_ref) {
+                        $bulk_submission_results['submitted'][] = [
+                            'reference' => $final_reference,
+                            'report_number' => $report_number
+                        ];
+                    }
                     // Verify the status was saved correctly
                     $verify_stmt = $conn->prepare("SELECT status FROM qc_test_orders WHERE report_number = ?");
                     $verify_stmt->bind_param("s", $report_number);
@@ -1929,7 +2408,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_order'])) {
                     : "Pending Admin/AGM Approval (Checker review not required)";
             }
             
-            $message = "Successfully submitted {$inserted_count} test(s): {$test_list} | Report No: {$report_number} | Status: {$status_msg}";
+            // Build message with bulk submission details if applicable
+            $is_bulk = !empty($bulk_rolls) && count($bulk_rolls) > 1;
+            if ($is_bulk && !empty($bulk_submission_results)) {
+                $submittedCount = count($bulk_submission_results['submitted']);
+                $skippedCount = count($bulk_submission_results['skipped']);
+                $totalCount = $submittedCount + $skippedCount;
+                
+                $message = "Bulk Submission Complete: {$submittedCount} reference(s) submitted, {$skippedCount} skipped (already submitted)";
+                if ($submittedCount > 0) {
+                    $message .= " | Test: {$test_list} | Status: {$status_msg}";
+                }
+                if ($skippedCount > 0) {
+                    $skippedRefs = array_column($bulk_submission_results['skipped'], 'reference');
+                    $message .= " | Skipped: " . implode(', ', array_slice($skippedRefs, 0, 5)) . ($skippedCount > 5 ? " (+" . ($skippedCount - 5) . " more)" : "");
+                }
+            } else {
+                $message = "Successfully submitted {$inserted_count} test(s): {$test_list} | Report No: {$report_number} | Status: {$status_msg}";
+            }
             
             // Redirect to reload page with fresh data (auto-refresh preferences)
             $_SESSION['qc_success_message'] = $message;
@@ -3635,6 +4131,24 @@ function generateExternalReference() {
                   </div>
                 </div>
               </div>
+              
+              <!-- Per-Reference Test Status Display (shown when Apply is clicked with bulk range) -->
+              <div id="reference_test_status_container" style="display:none; margin-top:20px; padding:0; background:#ffffff; border:2px solid #e0e0e0; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,0.1);">
+                <div style="padding:20px; background:linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius:12px 12px 0 0; color:white;">
+                  <div style="display:flex; align-items:center; gap:12px;">
+                    <i class="fas fa-list-check" style="font-size:24px;"></i>
+                    <h4 style="margin:0; font-size:18px; font-weight:600;" id="reference_status_title">
+                      Reference-Level Test Status
+                    </h4>
+                  </div>
+                </div>
+                <div id="reference_test_status_list" style="padding:20px; max-height:600px; overflow-y:auto;">
+                  <!-- Per-reference status will be populated here -->
+                </div>
+                <div id="reference_status_summary" style="padding:15px; background:#f8f9fa; border-top:1px solid #e0e0e0; border-radius:0 0 12px 12px; font-size:14px; color:#495057;">
+                  <!-- Summary will be shown here -->
+                </div>
+              </div>
               <!-- Hidden input to store the selected product_reference when line-based selection is used -->
               <input type="hidden" id="line_based_product_reference" name="product_reference" value="">
             </div>
@@ -4258,6 +4772,9 @@ function generateExternalReference() {
                     }
                     
                     // Prevent checking disabled checkboxes - add to all checkboxes
+                    // Use a flag per checkbox to prevent multiple toasts
+                    const checkboxToastFlags = new WeakMap();
+                    
                     document.querySelectorAll('.test-checkbox').forEach(checkbox => {
                         // Prevent click on disabled checkboxes
                         checkbox.addEventListener('click', function(e) {
@@ -4266,12 +4783,19 @@ function generateExternalReference() {
                                 e.stopPropagation();
                                 e.stopImmediatePropagation();
                                 this.checked = false;
-                                showToast('This test has already been submitted for the selected reference and cannot be selected again.', 'warning', 4000);
+                                
+                                // Only show toast if not already shown recently for this checkbox
+                                const lastToastTime = checkboxToastFlags.get(this) || 0;
+                                const now = Date.now();
+                                if (now - lastToastTime > 1000) { // 1 second cooldown
+                                    checkboxToastFlags.set(this, now);
+                                    showToast('This test has already been submitted for the selected reference and cannot be selected again.', 'warning', 4000);
+                                }
                                 return false;
                             }
                         }, true); // Use capture phase
                         
-                        // Prevent change on disabled checkboxes
+                        // Prevent change on disabled checkboxes (no toast on change, only on click)
                         checkbox.addEventListener('change', function(e) {
                             if (this.disabled || this.hasAttribute('data-already-submitted')) {
                                 e.preventDefault();
@@ -4338,6 +4862,21 @@ function generateExternalReference() {
         console.warn('⚠️ NO PREFERENCES LOADED - You may need to submit a QC test order first');
         console.warn('This will happen on your first submission or if the database table is missing');
         <?php endif; ?>
+        
+        // Make test methods available to JavaScript for reference status checking
+        window.AVAILABLE_TESTS = <?php 
+            $jsTests = [];
+            foreach ($display_test_methods as $test_name => $methods) {
+                foreach ($methods as $method) {
+                    $jsTests[] = [
+                        'testName' => $test_name,
+                        'method' => $method
+                    ];
+                }
+            }
+            echo json_encode($jsTests);
+        ?>;
+        console.log('Available tests loaded:', window.AVAILABLE_TESTS.length);
 // Load fiber reference data when reference is selected
 function loadFiberReferenceData(reference) {
     const errorDiv = document.getElementById('fiber_reference_error');
@@ -4766,6 +5305,18 @@ function updateReferenceRange(autoSelect = true) {
 
 // Handle From/To reference selection change - check submitted tests
 function handleFromToReferenceChange() {
+            // Check reference-level status for any selected tests
+            const selectedTests = document.querySelectorAll('.test-checkbox:checked');
+            selectedTests.forEach(checkbox => {
+                if (!checkbox.disabled && !checkbox.hasAttribute('data-already-submitted')) {
+                    checkReferenceLevelTestStatus(checkbox);
+                }
+            });
+            
+            // If no tests selected, hide status display
+            if (selectedTests.length === 0) {
+                hideReferenceTestStatus();
+            }
     const fromRefSelect = document.getElementById('from_reference');
     const toRefSelect = document.getElementById('to_reference');
     const notificationDiv = document.getElementById('submitted_tests_notification');
@@ -4906,19 +5457,35 @@ function checkAndDisableSubmittedTestsForRange(fromRef, toRef) {
                         checkbox.removeAttribute('onchange');
                         
                         // Add multiple layers of event prevention
+                        // Use a flag to prevent multiple toasts from showing
+                        // Store flag on the checkbox element itself to share between handlers
+                        let toastShown = false;
+                        let toastTimeout = null;
+                        
                         const preventInteraction = function(e) {
                             e.preventDefault();
                             e.stopPropagation();
                             e.stopImmediatePropagation();
                             this.checked = false;
                             
-                            const testName = this.getAttribute('data-test-name') || 'Unknown';
-                            const method = this.getAttribute('data-method') || 'Unknown';
-                            showToast(
-                                `⚠️ "${testName} (${method})" has already been submitted for this reference range and cannot be selected again. Please select a different test method.`,
-                                'warning',
-                                5000
-                            );
+                            // Only show toast on click event, and only if not already shown
+                            // Skip if this was triggered by a label click (label will show its own toast)
+                            if (e.type === 'click' && !toastShown && !e._fromLabel) {
+                                toastShown = true;
+                                const testName = this.getAttribute('data-test-name') || 'Unknown';
+                                const method = this.getAttribute('data-method') || 'Unknown';
+                                showToast(
+                                    `⚠️ "${testName} (${method})" has already been submitted for this reference range and cannot be selected again. Please select a different test method.`,
+                                    'warning',
+                                    5000
+                                );
+                                
+                                // Reset flag after 1 second to allow showing again if user clicks again later
+                                if (toastTimeout) clearTimeout(toastTimeout);
+                                toastTimeout = setTimeout(() => {
+                                    toastShown = false;
+                                }, 1000);
+                            }
                             
                             return false;
                         };
@@ -4940,7 +5507,7 @@ function checkAndDisableSubmittedTestsForRange(fromRef, toRef) {
                         oldCheckbox.parentNode.replaceChild(newCheckbox, oldCheckbox);
                         checkbox = newCheckbox;
                         
-                        // Add event listeners with capture phase
+                        // Add event listeners with capture phase - only show toast on click
                         ['click', 'change', 'mousedown', 'mouseup', 'keydown', 'keyup'].forEach(eventType => {
                             checkbox.addEventListener(eventType, preventInteraction, true);
                         });
@@ -4969,10 +5536,17 @@ function checkAndDisableSubmittedTestsForRange(fromRef, toRef) {
                             label.removeAttribute('for');
                             
                             // Prevent label from activating checkbox - use capture phase
+                            // Use a flag to prevent multiple toasts from showing
+                            // Share the same flag with checkbox to prevent duplicate toasts
                             const preventLabelClick = function(e) {
                                 e.preventDefault();
                                 e.stopPropagation();
                                 e.stopImmediatePropagation();
+                                
+                                // Mark this event as coming from label to prevent checkbox handler from also showing toast
+                                if (e.type === 'click') {
+                                    e._fromLabel = true;
+                                }
                                 
                                 // Find the checkbox (it might have been replaced)
                                 const currentCheckbox = this.querySelector('.test-checkbox') || document.getElementById(checkbox.id);
@@ -4991,13 +5565,23 @@ function checkAndDisableSubmittedTestsForRange(fromRef, toRef) {
                                         }
                                     }
                                     
-                                    const testName = currentCheckbox.getAttribute('data-test-name') || 'Unknown';
-                                    const method = currentCheckbox.getAttribute('data-method') || 'Unknown';
-                                    showToast(
-                                        `⚠️ "${testName} (${method})" has already been submitted for this reference range and cannot be selected again. Please select a different test method.`,
-                                        'warning',
-                                        5000
-                                    );
+                                    // Only show toast once per interaction (on click event) and only if not already shown
+                                    if (e.type === 'click' && !toastShown) {
+                                        toastShown = true;
+                                        const testName = currentCheckbox.getAttribute('data-test-name') || 'Unknown';
+                                        const method = currentCheckbox.getAttribute('data-method') || 'Unknown';
+                                        showToast(
+                                            `⚠️ "${testName} (${method})" has already been submitted for this reference range and cannot be selected again. Please select a different test method.`,
+                                            'warning',
+                                            5000
+                                        );
+                                        
+                                        // Reset flag after 1 second to allow showing again if user clicks again later
+                                        if (toastTimeout) clearTimeout(toastTimeout);
+                                        toastTimeout = setTimeout(() => {
+                                            toastShown = false;
+                                        }, 1000);
+                                    }
                                 }
                                 
                                 return false;
@@ -5154,6 +5738,9 @@ function applyBulkReferenceSelection() {
     
     // Check for submitted tests in the reference range
     checkAndDisableSubmittedTestsForRange(fromValue, toValue);
+    
+    // Show reference-level status for all tests
+    showAllTestsReferenceStatus(fromValue, toValue);
     
     // Get all references between From and To
     const allRefs = Array.from(fromRefSelect.options).map(opt => opt.value).filter(v => v);
@@ -5375,6 +5962,9 @@ function clearBulkReferenceSelection() {
     if (notificationDiv) {
         notificationDiv.style.display = 'none';
     }
+    
+    // Hide reference status display
+    hideReferenceTestStatus();
     
     // Re-enable all tests
     checkAndDisableSubmittedTests('');
@@ -7389,9 +7979,18 @@ function updateSampleReferenceId() {
             }
             // Only show test parameters for testers, not AGM
             // Check again before showing parameters to prevent already-submitted tests
+            console.log('About to show test parameters. Checkbox state:', {
+                disabled: checkbox.disabled,
+                hasDataAlreadySubmitted: checkbox.hasAttribute('data-already-submitted'),
+                readOnly: checkbox.readOnly,
+                checked: checkbox.checked
+            });
+            
             if (!checkbox.disabled && !checkbox.hasAttribute('data-already-submitted') && !checkbox.readOnly) {
-            showTestParameters(checkbox);
+                console.log('Calling showTestParameters for:', checkbox.getAttribute('data-test-name'), checkbox.getAttribute('data-method'));
+                showTestParameters(checkbox);
             } else {
+                console.warn('NOT showing test parameters because checkbox is disabled/already-submitted/readOnly');
                 // If somehow the checkbox is checked but disabled, uncheck it and hide parameters
                 checkbox.checked = false;
                 const testItem = checkbox.closest('.test-item');
@@ -7403,6 +8002,420 @@ function updateSampleReferenceId() {
             toggleOtherInfoForGsmOnly();
             toggleGeneralInfoVisibility();
             updateSelectionCount();
+            
+            // Check reference-level test status if bulk range is selected
+            if (checkbox.checked) {
+                checkReferenceLevelTestStatus(checkbox);
+            } else {
+                // Hide status display when test is unchecked
+                hideReferenceTestStatus();
+            }
+        }
+        
+        // Check reference-level test status for bulk range
+        function checkReferenceLevelTestStatus(checkbox) {
+            const fromRef = document.getElementById('from_reference')?.value;
+            const toRef = document.getElementById('to_reference')?.value;
+            const testName = checkbox.getAttribute('data-test-name');
+            const method = checkbox.getAttribute('data-method');
+            
+            // Only check if bulk range is selected
+            if (!fromRef || !toRef || !testName || !method) {
+                hideReferenceTestStatus();
+                return;
+            }
+            
+            // Show loading state
+            const container = document.getElementById('reference_test_status_container');
+            const statusList = document.getElementById('reference_test_status_list');
+            if (container && statusList) {
+                container.style.display = 'block';
+                statusList.innerHTML = '<div style="padding:20px; text-align:center; color:#666;"><i class="fas fa-spinner fa-spin"></i> Checking reference status...</div>';
+            }
+            
+            // Fetch reference-level status
+            const url = `?action=check_reference_test_status&from_reference=${encodeURIComponent(fromRef)}&to_reference=${encodeURIComponent(toRef)}&test_name=${encodeURIComponent(testName)}&method=${encodeURIComponent(method)}`;
+            
+            fetch(url)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success && data.references) {
+                        displayReferenceTestStatus(data);
+                    } else {
+                        console.error('Error checking reference status:', data.error);
+                        hideReferenceTestStatus();
+                    }
+                })
+                .catch(error => {
+                    console.error('Error fetching reference status:', error);
+                    hideReferenceTestStatus();
+                });
+        }
+        
+        // Display reference-level test status
+        function displayReferenceTestStatus(data) {
+            const container = document.getElementById('reference_test_status_container');
+            const statusList = document.getElementById('reference_test_status_list');
+            const statusTitle = document.getElementById('reference_status_title');
+            const statusSummary = document.getElementById('reference_status_summary');
+            
+            if (!container || !statusList) return;
+            
+            // Update title
+            if (statusTitle) {
+                statusTitle.textContent = `${data.test_name} (${data.method}) - Reference Status`;
+            }
+            
+            // Build status list
+            let html = '';
+            let pendingCount = 0;
+            let submittedCount = 0;
+            
+            data.references.forEach(ref => {
+                if (ref.status === 'submitted') {
+                    submittedCount++;
+                    const dateStr = ref.submitted_date ? new Date(ref.submitted_date).toLocaleDateString('en-US', { year: 'numeric', month: '2-digit', day: '2-digit' }) : 'N/A';
+                    html += `
+                        <div style="padding:12px; margin-bottom:8px; background:#d4edda; border-left:4px solid #28a745; border-radius:4px;">
+                            <strong style="color:#155724;">${ref.reference}</strong>
+                            <div style="font-size:12px; color:#6c757d; margin-top:4px;">
+                                <i class="fas fa-check-circle" style="color:#28a745;"></i> Already Submitted (${dateStr})
+                            </div>
+                            ${ref.report_number ? `<div style="font-size:11px; color:#6c757d; margin-top:2px;">Report: ${ref.report_number}</div>` : ''}
+                        </div>
+                    `;
+                } else {
+                    pendingCount++;
+                    html += `
+                        <div style="padding:12px; margin-bottom:8px; background:#fff3cd; border-left:4px solid #ffc107; border-radius:4px;">
+                            <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;">
+                                <div style="flex:1;">
+                                    <strong style="color:#856404;">${ref.reference}</strong>
+                                    <div style="font-size:12px; color:#856404; margin-top:4px;">
+                                        <i class="fas fa-clock" style="color:#ffc107;"></i> Pending - Not Yet Submitted
+                                    </div>
+                                </div>
+                                <div style="font-size:12px; color:#856404;">
+                                    <span style="padding:4px 8px; background:#ffc107; color:#856404; border-radius:4px; font-size:11px; font-weight:600;">
+                                        Will Submit
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }
+            });
+            
+            statusList.innerHTML = html;
+            
+            // Update summary
+            if (statusSummary) {
+                const total = data.references.length;
+                statusSummary.innerHTML = `
+                    <div style="display:flex; align-items:center; gap:15px; flex-wrap:wrap;">
+                        <div><strong>Total References:</strong> ${total}</div>
+                        <div style="color:#28a745;"><strong>Submitted:</strong> ${submittedCount}</div>
+                        <div style="color:#ffc107;"><strong>Pending:</strong> ${pendingCount}</div>
+                        ${pendingCount > 0 ? '<div style="color:#2196F3;"><strong>Action:</strong> Will submit for ${pendingCount} pending reference(s) only</div>' : '<div style="color:#dc3545;"><strong>Note:</strong> All references already have this test submitted</div>'}
+                    </div>
+                `;
+            }
+        }
+        
+        // Hide reference test status display
+        function hideReferenceTestStatus() {
+            const container = document.getElementById('reference_test_status_container');
+            if (container) {
+                container.style.display = 'none';
+            }
+        }
+        
+        // View report function
+        function viewReport(reportId) {
+            if (reportId) {
+                window.open(`?edit=${reportId}`, '_blank');
+            }
+        }
+        
+        // Show reference-level status for ALL tests when Apply is clicked
+        function showAllTestsReferenceStatus(fromRef, toRef) {
+            if (!fromRef || !toRef) {
+                hideReferenceTestStatus();
+                return;
+            }
+            
+            console.log('showAllTestsReferenceStatus called with:', fromRef, toRef);
+            
+            const container = document.getElementById('reference_test_status_container');
+            const statusList = document.getElementById('reference_test_status_list');
+            const statusTitle = document.getElementById('reference_status_title');
+            const statusSummary = document.getElementById('reference_status_summary');
+            
+            if (!container || !statusList) {
+                console.error('Reference status container elements not found!');
+                return;
+            }
+            
+            // Show container with loading state
+            container.style.display = 'block';
+            if (statusTitle) statusTitle.textContent = 'Reference-Level Test Status';
+            statusList.innerHTML = '<div style="padding:40px; text-align:center; color:#666;"><i class="fas fa-spinner fa-spin" style="font-size:24px;"></i><div style="margin-top:10px;">Loading test status for all references...</div></div>';
+            if (statusSummary) statusSummary.innerHTML = '';
+            
+            // Wait a bit to ensure DOM is ready, then get all test checkboxes
+            setTimeout(() => {
+                let testsToCheck = [];
+                const seenKeys = new Set();
+                
+                // First, try to use the PHP-generated test list (most reliable)
+                if (window.AVAILABLE_TESTS && window.AVAILABLE_TESTS.length > 0) {
+                    console.log('Using PHP-generated test list:', window.AVAILABLE_TESTS.length);
+                    window.AVAILABLE_TESTS.forEach(test => {
+                        const key = `${test.testName}|||${test.method}`;
+                        if (!seenKeys.has(key)) {
+                            seenKeys.add(key);
+                            testsToCheck.push({
+                                testName: test.testName,
+                                method: test.method,
+                                key: key
+                            });
+                        }
+                    });
+                } else {
+                    // Fallback: Try to find tests from DOM
+                    console.log('PHP test list not available, searching DOM...');
+                    let allTestCheckboxes = document.querySelectorAll('.test-checkbox');
+                    console.log('Found checkboxes:', allTestCheckboxes.length);
+                    
+                    // If no checkboxes found, try finding test items
+                    if (allTestCheckboxes.length === 0) {
+                        const testItems = document.querySelectorAll('.test-item');
+                        console.log('Found test items:', testItems.length);
+                        testItems.forEach(item => {
+                            const checkboxes = item.querySelectorAll('input[type="checkbox"][data-test-name]');
+                            allTestCheckboxes = Array.from(allTestCheckboxes).concat(Array.from(checkboxes));
+                        });
+                    }
+                    
+                    allTestCheckboxes.forEach(cb => {
+                        const testName = cb.getAttribute('data-test-name');
+                        const method = cb.getAttribute('data-method');
+                        if (testName && method) {
+                            const key = `${testName}|||${method}`;
+                            if (!seenKeys.has(key)) {
+                                seenKeys.add(key);
+                                testsToCheck.push({
+                                    testName: testName,
+                                    method: method,
+                                    key: key
+                                });
+                            }
+                        }
+                    });
+                }
+                
+                console.log('Tests to check:', testsToCheck.length, testsToCheck);
+                
+                if (testsToCheck.length === 0) {
+                    statusList.innerHTML = '<div style="padding:20px; text-align:center; color:#999;"><i class="fas fa-exclamation-triangle"></i> No tests found. Please ensure test checkboxes are visible on the page.</div>';
+                    return;
+                }
+                
+                // Check status for all tests
+                let completedChecks = 0;
+                const allResults = [];
+                
+                testsToCheck.forEach((test, index) => {
+                    const url = `?action=check_reference_test_status&from_reference=${encodeURIComponent(fromRef)}&to_reference=${encodeURIComponent(toRef)}&test_name=${encodeURIComponent(test.testName)}&method=${encodeURIComponent(test.method)}`;
+                    console.log(`Checking test ${index + 1}/${testsToCheck.length}:`, test.testName, test.method);
+                    
+                    fetch(url)
+                        .then(response => {
+                            if (!response.ok) {
+                                throw new Error(`HTTP error! status: ${response.status}`);
+                            }
+                            return response.json();
+                        })
+                        .then(data => {
+                            console.log(`Result for ${test.testName} (${test.method}):`, data);
+                            if (data.success && data.references) {
+                                // Always add results, even if empty (to show pending status)
+                                allResults.push({
+                                    testName: test.testName,
+                                    method: test.method,
+                                    references: data.references
+                                });
+                                console.log(`Added ${data.references.length} references for ${test.testName}`);
+                            } else {
+                                console.error(`API error for ${test.testName}:`, data.error || 'Unknown error', data);
+                            }
+                            
+                            completedChecks++;
+                            if (completedChecks === testsToCheck.length) {
+                                console.log('All checks completed. Total results:', allResults.length, allResults);
+                                displayAllTestsReferenceStatus(allResults, fromRef, toRef);
+                            }
+                        })
+                        .catch(error => {
+                            console.error(`Fetch error for ${test.testName}:`, error);
+                            completedChecks++;
+                            if (completedChecks === testsToCheck.length) {
+                                console.log('All checks completed (with errors). Total results:', allResults.length);
+                                displayAllTestsReferenceStatus(allResults, fromRef, toRef);
+                            }
+                        });
+                });
+            }, 100); // Small delay to ensure DOM is ready
+        }
+        
+        // Display all tests reference status in modern UI
+        function displayAllTestsReferenceStatus(allResults, fromRef, toRef) {
+            const statusList = document.getElementById('reference_test_status_list');
+            const statusSummary = document.getElementById('reference_status_summary');
+            
+            if (!statusList) {
+                console.error('Status list element not found!');
+                return;
+            }
+            
+            console.log('Displaying results:', allResults.length, allResults);
+            
+            if (allResults.length === 0) {
+                statusList.innerHTML = `
+                    <div style="padding:30px; text-align:center; color:#999;">
+                        <i class="fas fa-exclamation-triangle" style="font-size:32px; color:#ffc107; margin-bottom:15px;"></i>
+                        <div style="font-size:16px; font-weight:600; margin-bottom:10px;">No test data available</div>
+                        <div style="font-size:14px; color:#666;">
+                            This may mean:<br>
+                            • No tests have been checked yet<br>
+                            • There was an error fetching the data<br>
+                            • Please check the browser console (F12) for details
+                        </div>
+                        <div style="margin-top:15px; font-size:12px; color:#999;">
+                            From: ${fromRef}<br>
+                            To: ${toRef}
+                        </div>
+                    </div>
+                `;
+                if (statusSummary) statusSummary.innerHTML = '';
+                return;
+            }
+            
+            // Filter to only show tests that have at least one submitted reference
+            const filteredResults = allResults.filter(testResult => {
+                return testResult.references && testResult.references.some(ref => ref.status === 'submitted');
+            });
+            
+            console.log('Filtered results (only tests with submitted references):', filteredResults.length, filteredResults);
+            
+            if (filteredResults.length === 0) {
+                statusList.innerHTML = `
+                    <div style="padding:30px; text-align:center; color:#999;">
+                        <i class="fas fa-info-circle" style="font-size:32px; color:#2196F3; margin-bottom:15px;"></i>
+                        <div style="font-size:16px; font-weight:600; margin-bottom:10px;">No Submitted Tests Found</div>
+                        <div style="font-size:14px; color:#666;">
+                            No tests have been submitted for the selected reference range yet.<br>
+                            All tests are pending submission.
+                        </div>
+                        <div style="margin-top:15px; font-size:12px; color:#999;">
+                            From: ${fromRef}<br>
+                            To: ${toRef}
+                        </div>
+                    </div>
+                `;
+                if (statusSummary) statusSummary.innerHTML = '';
+                return;
+            }
+            
+            let html = '';
+            let totalPending = 0;
+            let totalSubmitted = 0;
+            
+            filteredResults.forEach((testResult, testIndex) => {
+                const { testName, method, references } = testResult;
+                let testPending = 0;
+                let testSubmitted = 0;
+                
+                // Test header
+                html += `
+                    <div style="margin-bottom:25px; border:1px solid #e0e0e0; border-radius:8px; overflow:hidden; background:#fff;">
+                        <div style="padding:15px; background:linear-gradient(135deg, #667eea 0%, #764ba2 100%); color:white;">
+                            <div style="display:flex; align-items:center; gap:10px;">
+                                <i class="fas fa-flask" style="font-size:18px;"></i>
+                                <strong style="font-size:16px;">${testName}</strong>
+                                <span style="font-size:14px; opacity:0.9;">(${method})</span>
+                            </div>
+                        </div>
+                        <div style="padding:15px;">
+                `;
+                
+                // Reference statuses
+                references.forEach(ref => {
+                    if (ref.status === 'submitted') {
+                        testSubmitted++;
+                        totalSubmitted++;
+                        const dateStr = ref.submitted_date ? new Date(ref.submitted_date).toLocaleDateString('en-US', { year: 'numeric', month: '2-digit', day: '2-digit' }) : 'N/A';
+                        html += `
+                            <div style="padding:15px; margin-bottom:10px; background:#f0f9ff; border-left:4px solid #28a745; border-radius:6px;">
+                                <div style="display:flex; align-items:center; gap:10px; margin-bottom:5px;">
+                                    <i class="fas fa-check-circle" style="color:#28a745; font-size:18px;"></i>
+                                    <strong style="color:#155724; font-size:15px;">${ref.reference}</strong>
+                                </div>
+                                <div style="color:#6c757d; font-size:13px; margin-left:28px;">
+                                    <span style="color:#28a745; font-weight:600;">✓ Already Submitted</span> (${dateStr})
+                                    ${ref.report_number ? ` • Report: ${ref.report_number}` : ''}
+                                </div>
+                            </div>
+                        `;
+                    } else {
+                        testPending++;
+                        totalPending++;
+                        html += `
+                            <div style="padding:15px; margin-bottom:10px; background:#fffbf0; border-left:4px solid #ffc107; border-radius:6px; display:flex; align-items:center; justify-content:space-between; gap:15px;">
+                                <div style="flex:1;">
+                                    <div style="display:flex; align-items:center; gap:10px; margin-bottom:5px;">
+                                        <i class="fas fa-clock" style="color:#ffc107; font-size:18px;"></i>
+                                        <strong style="color:#856404; font-size:15px;">${ref.reference}</strong>
+                                    </div>
+                                    <div style="color:#856404; font-size:13px; margin-left:28px;">
+                                        <span style="color:#ffc107; font-weight:600;">⏳ Pending</span> - Not Yet Submitted
+                                    </div>
+                                </div>
+                                <div>
+                                    <span style="padding:8px 16px; background:#ffc107; color:#856404; border-radius:6px; font-size:13px; font-weight:600;">
+                                        ✅ Will Submit
+                                    </span>
+                                </div>
+                            </div>
+                        `;
+                    }
+                });
+                
+                // Test summary
+                html += `
+                        </div>
+                        <div style="padding:10px 15px; background:#f8f9fa; border-top:1px solid #e0e0e0; font-size:13px; color:#495057;">
+                            <strong>Summary:</strong> ${testSubmitted} submitted, ${testPending} pending
+                        </div>
+                    </div>
+                `;
+            });
+            
+            statusList.innerHTML = html;
+            
+            // Overall summary
+            if (statusSummary) {
+                const totalRefs = filteredResults[0]?.references?.length || 0;
+                statusSummary.innerHTML = `
+                    <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:15px;">
+                        <div><strong style="color:#495057;">Tests with Submitted References:</strong> <span style="color:#2196F3; font-weight:600;">${filteredResults.length}</span></div>
+                        <div><strong style="color:#495057;">Total References:</strong> <span style="color:#2196F3; font-weight:600;">${totalRefs}</span></div>
+                        <div><strong style="color:#28a745;">Submitted:</strong> <span style="color:#28a745; font-weight:600;">${totalSubmitted}</span></div>
+                        <div><strong style="color:#ffc107;">Pending:</strong> <span style="color:#ffc107; font-weight:600;">${totalPending}</span></div>
+                        ${totalPending > 0 ? '<div style="color:#2196F3; font-weight:600;"><i class="fas fa-info-circle"></i> Only pending references will be submitted</div>' : '<div style="color:#dc3545; font-weight:600;"><i class="fas fa-exclamation-triangle"></i> All references already have tests submitted</div>'}
+                    </div>
+                `;
+            }
         }
         
         // Existing tests data (reference => [methods])
@@ -7623,14 +8636,45 @@ function updateSampleReferenceId() {
             
             // Find the correct params div using a simpler approach
             const testItem = checkbox.closest('.test-item');
+            if (!testItem) {
+                console.error('Test item not found for checkbox');
+                return;
+            }
             const paramsDiv = testItem.querySelector('.test-parameters');
-            if (!paramsDiv) return; // No params div for AGM
-            const paramsContent = testItem.querySelector('.test-parameters div:last-child');
+            if (!paramsDiv) {
+                console.error('Params div not found for test:', testName);
+                return; // No params div for AGM
+            }
+            
+            // Find paramsContent div - PHP generates it with md5 hash of test name
+            // The structure is: <div class="test-parameters" id="params_<md5>">
+            //                    <div id="params_content_<md5>"></div>
+            // Find the first div inside paramsDiv (which should be params_content)
+            let paramsContent = paramsDiv.querySelector('div[id^="params_content"]') || 
+                                paramsDiv.querySelector('div:first-child') ||
+                                paramsDiv.querySelector('div');
+            
+            // If still not found, use paramsDiv itself (fallback)
+            if (!paramsContent || paramsContent === paramsDiv) {
+                // Look for any child element
+                paramsContent = paramsDiv.firstElementChild || paramsDiv;
+            }
+            
+            console.log('Params div found:', !!paramsDiv, 'Params content found:', !!paramsContent);
+            console.log('Params div ID:', paramsDiv.id);
+            if (paramsContent) {
+                console.log('Params content ID:', paramsContent.id, 'Tag:', paramsContent.tagName);
+            }
             
             if (checkbox.checked) {
                 // Show parameters for this test
+                console.log('Checking testParameters:', testParameters);
+                console.log('testParameters[testName]:', testParameters[testName]);
+                console.log('testParameters[testName][method]:', testParameters[testName]?.[method]);
+                
                 if (testParameters[testName] && testParameters[testName][method]) {
                     const testConfig = testParameters[testName][method];
+                    console.log('Test config found:', testConfig);
                     
                     if (testConfig.type === 'table') {
                         // Generate table for thickness test
@@ -7890,10 +8934,21 @@ function updateSampleReferenceId() {
 
                         paramsContent.innerHTML = html;
                         paramsDiv.style.display = 'block';
+                        console.log('GSM table HTML set, paramsDiv display:', paramsDiv.style.display);
+                        
+                        // Force display in case it was hidden
+                        paramsDiv.style.display = 'block';
+                        paramsDiv.style.visibility = 'visible';
+                        
                         if (typeof initGsmGrouped === 'function') {
+                            console.log('Calling initGsmGrouped with suffixId:', suffixId);
                             initGsmGrouped(suffixId);
+                        } else {
+                            console.warn('initGsmGrouped function not found!');
                         }
-                        if (typeof applyLastGeneralInfo === 'function') { applyLastGeneralInfo(suffixId); }
+                        if (typeof applyLastGeneralInfo === 'function') { 
+                            applyLastGeneralInfo(suffixId); 
+                        }
                     } else if (testConfig.type === 'table_thickness_grouped') {
                         const suffixId = `${method.replace(/\s+/g,'_').toLowerCase()}`;
                         let html = `

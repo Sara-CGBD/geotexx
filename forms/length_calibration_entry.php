@@ -102,7 +102,7 @@ if ($hasLcRoll) {
     }
 }
 
-// Fetch roll numbers from gsm_roll_entry (primary source) and fiber_to_roll_entry (fallback)
+// Fetch roll numbers from gsm_roll_entry (GSM and roll input data table)
 $rollNumbers = [];
 
 // First, try to fetch from gsm_roll_entry table
@@ -113,54 +113,109 @@ if ($tableCheck && $tableCheck->num_rows > 0) {
 }
 
 if ($tableExists) {
+    // Check if length_calibrations table exists before using it in NOT EXISTS clause
+    $lcTableCheck = $conn->query("SHOW TABLES LIKE 'length_calibrations'");
+    $lcTableExists = ($lcTableCheck && $lcTableCheck->num_rows > 0);
+    
+    // Build the exclusion clause only if length_calibrations table exists
+    // IMPORTANT: Always match by BOTH roll_no AND reference_number (entire reference)
+    // This allows the same roll number with different reference/GSM to appear in dropdown
+    $exclusionClause = "";
+    if ($lcTableExists && $hasLcRoll) {
+        // Re-check status column existence
+        $statusColCheck = $conn->query("SHOW COLUMNS FROM length_calibrations LIKE 'status'");
+        $statusColExists = ($statusColCheck && $statusColCheck->num_rows > 0);
+        
+        // Re-check reference_number column existence
+        $refColCheck = $conn->query("SHOW COLUMNS FROM length_calibrations LIKE 'reference_number'");
+        $hasLcRefCol = ($refColCheck && $refColCheck->num_rows > 0);
+        
+        if ($statusColExists && $hasLcRefCol) {
+            // Exclude only if BOTH roll_no AND reference_number match exactly
+            // This ensures Roll 3 with reference "REF-A" doesn't exclude Roll 3 with reference "REF-B"
+            $exclusionClause = "AND NOT EXISTS (
+                SELECT 1 FROM length_calibrations lc 
+                WHERE CAST(lc.roll_no AS CHAR) = CAST(g.roll_no AS CHAR)
+                AND (
+                    -- Both have reference numbers and they match
+                    (lc.reference_number IS NOT NULL AND lc.reference_number != '' 
+                     AND g.reference IS NOT NULL AND g.reference != ''
+                     AND TRIM(lc.reference_number) COLLATE {$collation} = TRIM(g.reference) COLLATE {$collation})
+                    OR
+                    -- Both are NULL or empty (treat as match)
+                    ((lc.reference_number IS NULL OR TRIM(lc.reference_number) = '') 
+                     AND (g.reference IS NULL OR TRIM(g.reference) = ''))
+                )
+                AND lc.status != 'rejected'
+            )";
+        } else if ($hasLcRefCol) {
+            // If status column doesn't exist, exclude all submitted rolls matching both roll_no and reference
+            $exclusionClause = "AND NOT EXISTS (
+                SELECT 1 FROM length_calibrations lc 
+                WHERE CAST(lc.roll_no AS CHAR) = CAST(g.roll_no AS CHAR)
+                AND (
+                    -- Both have reference numbers and they match
+                    (lc.reference_number IS NOT NULL AND lc.reference_number != '' 
+                     AND g.reference IS NOT NULL AND g.reference != ''
+                     AND TRIM(lc.reference_number) COLLATE {$collation} = TRIM(g.reference) COLLATE {$collation})
+                    OR
+                    -- Both are NULL or empty (treat as match)
+                    ((lc.reference_number IS NULL OR TRIM(lc.reference_number) = '') 
+                     AND (g.reference IS NULL OR TRIM(g.reference) = ''))
+                )
+            )";
+        } else if ($statusColExists) {
+            // If reference_number column doesn't exist, fall back to roll_no only (backward compatibility)
+            $exclusionClause = "AND NOT EXISTS (
+                SELECT 1 FROM length_calibrations lc 
+                WHERE CAST(lc.roll_no AS CHAR) = CAST(g.roll_no AS CHAR)
+                AND lc.status != 'rejected'
+            )";
+        } else {
+            // If neither column exists, exclude by roll_no only (backward compatibility)
+            $exclusionClause = "AND NOT EXISTS (
+                SELECT 1 FROM length_calibrations lc 
+                WHERE CAST(lc.roll_no AS CHAR) = CAST(g.roll_no AS CHAR)
+            )";
+        }
+    }
+    
     // Fetch from gsm_roll_entry
+    // Include GSM in the query for display purposes
     $rollQuery = $conn->query("
-        SELECT g.reference, g.roll_no, g.line_number as line_no
+        SELECT g.reference, g.roll_no, g.line_number as line_no, g.gsm
         FROM gsm_roll_entry g
-        WHERE g.reference IS NOT NULL 
-        AND g.reference != ''
-        AND g.roll_no IS NOT NULL
-        AND NOT EXISTS (
-            SELECT 1 FROM length_calibrations lc 
-            WHERE lc.roll_no = g.roll_no
-            {$lcStatusFilter}
-        )
+        WHERE g.roll_no IS NOT NULL
+        AND g.roll_no != 0
+        {$exclusionClause}
         ORDER BY g.created_at DESC 
         LIMIT 100
     ");
     if ($rollQuery) {
         while ($row = $rollQuery->fetch_assoc()) {
+            $rollNo = (string)$row['roll_no']; // Convert to string for consistency
+            $reference = $row['reference'] ?? '';
+            $lineNo = $row['line_no'] ?? '';
+            $gsm = $row['gsm'] ?? '';
+            // Convert line_no to "Line X" format if it's numeric
+            if (!empty($lineNo) && is_numeric($lineNo)) {
+                $lineNo = "Line " . $lineNo;
+            }
+            // Display format: "Roll X - GSM: Y" if GSM exists, otherwise just "Roll X"
+            $displayText = !empty($gsm) ? "Roll $rollNo - GSM: $gsm" : "Roll $rollNo";
             $rollNumbers[] = [
-                'roll_no' => $row['roll_no'],
-                'reference' => $row['reference'],
-                'line_no' => $row['line_no'],
-                'display' => "Roll {$row['roll_no']}"
+                'roll_no' => $rollNo,
+                'reference' => $reference,
+                'line_no' => $lineNo,
+                'gsm' => $gsm,
+                'display' => $displayText
             ];
         }
     }
 }
 
-// If no results from gsm_roll_entry, fallback to fiber_to_roll_entry
-if (empty($rollNumbers)) {
-    $rollQuery = $conn->query("
-        SELECT f.roll_no, f.reference_number, f.line_no 
-        FROM fiber_to_roll_entry f
-        WHERE f.roll_no IS NOT NULL 
-        {$lcExistsClause}
-        ORDER BY f.created_at DESC 
-        LIMIT 100
-    ");
-    if ($rollQuery) {
-        while ($row = $rollQuery->fetch_assoc()) {
-            $rollNumbers[] = [
-                'roll_no' => $row['roll_no'],
-                'reference' => $row['reference_number'],
-                'line_no' => $row['line_no'],
-                'display' => "Roll {$row['roll_no']}"
-            ];
-        }
-    }
-}
+// Note: Only using gsm_roll_entry as the source (no fallback to fiber_to_roll_entry)
+// If gsm_roll_entry doesn't exist or has no data, $rollNumbers will remain empty
 
 // No need to fetch submitted rolls separately - already excluded in main query above
 
@@ -491,15 +546,31 @@ function autoSelectLineFromRoll(rowId) {
     refField.value = reference || '';
   }
   
-  if (lineNo && !document.getElementById("line_number").value) {
-    // Auto-select the line number button
-    const lineText = `Line ${lineNo}`;
-    document.getElementById("line_number").value = lineText;
+  // Always auto-select the line number if available
+  if (lineNo) {
+    // Extract numeric part if lineNo is in "Line X" format, otherwise use as-is
+    let lineText = lineNo;
+    if (lineNo.startsWith('Line ')) {
+      lineText = lineNo; // Already in correct format
+    } else {
+      // Extract number from lineNo (could be "1", "2", "Line 1", etc.)
+      const match = lineNo.match(/\d+/);
+      if (match) {
+        lineText = `Line ${match[0]}`;
+      }
+    }
+    
+    // Set the hidden field value
+    const lineNumberField = document.getElementById("line_number");
+    if (lineNumberField) {
+      lineNumberField.value = lineText;
+    }
     
     // Highlight the corresponding button
     const lineButtons = document.querySelectorAll('.btn-group .btn');
     lineButtons.forEach(btn => {
       btn.classList.remove('selected');
+      // Match by button text (e.g., "Line 1" or "Line 2")
       if (btn.textContent.trim() === lineText) {
         btn.classList.add('selected');
       }
@@ -526,7 +597,9 @@ function addRow() {
   rollNumbers.forEach(roll => {
     // Only show roll if it hasn't been used
     if (!usedRolls.has(roll.roll_no)) {
-      rollOptionsHTML += `<option value="${roll.roll_no}" data-ref="${roll.reference}" data-line="${roll.line_no}">Roll ${roll.roll_no}</option>`;
+      // Use the display text which includes GSM if available (e.g., "Roll 1 - GSM: 120")
+      const displayText = roll.display || `Roll ${roll.roll_no}`;
+      rollOptionsHTML += `<option value="${roll.roll_no}" data-ref="${roll.reference || ''}" data-line="${roll.line_no || ''}" data-gsm="${roll.gsm || ''}">${displayText}</option>`;
     }
   });
   

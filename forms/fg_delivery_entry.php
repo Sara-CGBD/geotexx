@@ -985,11 +985,11 @@ if ($hasRollTransfer) {
       <input type="text" id="challan_no_manual" placeholder="Enter lighthouse challan number manually" style="margin-top: 10px; display: none;">
     </div>
 
-    <!-- Unit Price (auto-filled from BOM or manual for custom bags) -->
+    <!-- Unit Price -->
     <div class="form-group">
       <label>Unit Price (৳ per pcs):</label>
       <input type="number" id="unit_price" name="unit_price" step="1" min="0" required>
-      <small style="color: #7f8c8d; font-size: 0.9em;" id="price_hint">Auto-filled from BOM</small>
+      <small style="color: #7f8c8d; font-size: 0.9em;" id="price_hint"></small>
     </div>
 
     <!-- Remarks -->
@@ -2187,8 +2187,8 @@ function updateFromCNCBatch() {
       unitPriceField.value = bomPrices[bagSize];
       unitPriceField.readOnly = true;
       unitPriceField.style.backgroundColor = '#f0f0f0';
-      priceHint.textContent = 'Auto-filled from BOM';
-      priceHint.style.color = '#27ae60';
+      priceHint.textContent = '';
+      priceHint.style.color = '#7f8c8d';
     } else {
       unitPriceField.value = '';
       unitPriceField.readOnly = false;
@@ -2236,7 +2236,7 @@ function updateCNCBatchFromRef() {
       unitPriceField.style.backgroundColor = "white";
     }
     if (priceHint) {
-      priceHint.textContent = "Auto-filled from BOM";
+      priceHint.textContent = "";
       priceHint.style.color = "#7f8c8d";
     }
     updateSummary();
@@ -2337,8 +2337,8 @@ function updateCNCBatchFromRef() {
       unitPriceField.value = bomPrices[bagSize];
       unitPriceField.readOnly = true;
       unitPriceField.style.backgroundColor = "#f0f0f0";
-      priceHint.textContent = "Auto-filled from BOM";
-      priceHint.style.color = "#27ae60";
+      priceHint.textContent = "";
+      priceHint.style.color = "#7f8c8d";
     } else {
       // Custom bag size - allow manual price entry
       unitPriceField.value = "";

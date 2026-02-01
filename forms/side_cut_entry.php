@@ -40,50 +40,72 @@ $currentDate = date('Y-m-d');
 $currentHour = (int)date('H');
 $currentShift = ($currentHour >= 8 && $currentHour <= 19) ? 'Day' : 'Night';
 
-// Fetch reference numbers from fiber_to_roll_entry excluding already recorded ones for current shift
+// Fetch reference numbers from gsm_roll_entry (generated in GSM and Roll Entry form) excluding already recorded ones
 $sheetReferences = [];
-$sheetQuery = "SELECT DISTINCT ftr.reference_number 
-               FROM fiber_to_roll_entry ftr
-               LEFT JOIN side_cut_scrap scs ON scs.reference_number = ftr.reference_number 
-                   AND scs.entry_date = ? 
-                   AND scs.shift = ? 
-                   AND scs.category = 'Sheet Production'
-               WHERE ftr.reference_number IS NOT NULL 
-                   AND scs.id IS NULL
-               ORDER BY ftr.date_time DESC 
-               LIMIT 50";
-$sheetStmt = $conn->prepare($sheetQuery);
-if ($sheetStmt) {
-    $sheetStmt->bind_param('ss', $currentDate, $currentShift);
-    $sheetStmt->execute();
-    $sheetResult = $sheetStmt->get_result();
-    while ($row = $sheetResult->fetch_assoc()) {
-        $sheetReferences[] = $row['reference_number'];
+$gsmTableExists = $conn->query("SHOW TABLES LIKE 'gsm_roll_entry'")->num_rows > 0;
+if ($gsmTableExists) {
+    $sheetQuery = "SELECT DISTINCT g.reference AS reference_number 
+                   FROM gsm_roll_entry g
+                   LEFT JOIN side_cut_scrap scs ON scs.reference_number = g.reference 
+                       AND scs.entry_date = ? 
+                       AND scs.shift = ? 
+                       AND scs.category = 'Sheet Production'
+                   WHERE g.reference IS NOT NULL 
+                       AND g.reference != ''
+                       AND scs.id IS NULL
+                   ORDER BY COALESCE(g.date_time, g.created_at) DESC 
+                   LIMIT 50";
+    $sheetStmt = $conn->prepare($sheetQuery);
+    if ($sheetStmt) {
+        $sheetStmt->bind_param('ss', $currentDate, $currentShift);
+        $sheetStmt->execute();
+        $sheetResult = $sheetStmt->get_result();
+        while ($row = $sheetResult->fetch_assoc()) {
+            $sheetReferences[] = $row['reference_number'];
+        }
+        $sheetStmt->close();
     }
-    $sheetStmt->close();
 }
 
-// Fetch CNC cutting batches from cnc_entries excluding already recorded ones for current shift
+// Fetch CNC cutting batches with date and bag size from sewing_machine_entry (Sewing Machine Entry form) excluding already recorded ones
+// Fallback to swing_machine_entry for backward compatibility
 $cncBatches = [];
-$cncQuery = "SELECT DISTINCT ce.cnc_cutting_batch 
-             FROM cnc_entries ce
-             LEFT JOIN side_cut_scrap scs ON scs.cutting_batch_no = ce.cnc_cutting_batch 
-                 AND scs.entry_date = ? 
-                 AND scs.shift = ? 
-                 AND scs.category = 'Swing Production'
-             WHERE ce.cnc_cutting_batch IS NOT NULL 
-                 AND scs.id IS NULL
-             ORDER BY ce.date_time DESC 
-             LIMIT 50";
-$cncStmt = $conn->prepare($cncQuery);
-if ($cncStmt) {
-    $cncStmt->bind_param('ss', $currentDate, $currentShift);
-    $cncStmt->execute();
-    $cncResult = $cncStmt->get_result();
-    while ($row = $cncResult->fetch_assoc()) {
-        $cncBatches[] = $row['cnc_cutting_batch'];
+$sewingTableCheck = $conn->query("SHOW TABLES LIKE 'sewing_machine_entry'");
+$sewingTableExists = $sewingTableCheck && $sewingTableCheck->num_rows > 0;
+$swingTableCheck = $conn->query("SHOW TABLES LIKE 'swing_machine_entry'");
+$swingTableExists = $swingTableCheck && $swingTableCheck->num_rows > 0;
+$sewingTable = $sewingTableExists ? 'sewing_machine_entry' : ($swingTableExists ? 'swing_machine_entry' : null);
+
+if ($sewingTable) {
+    $hasDate = $conn->query("SHOW COLUMNS FROM {$sewingTable} LIKE 'date_time'")->num_rows > 0;
+    $hasBagSize = $conn->query("SHOW COLUMNS FROM {$sewingTable} LIKE 'bag_size'")->num_rows > 0;
+    $bagExpr = $hasBagSize ? "TRIM(COALESCE(sme.bag_size,''))" : "''";
+    $cncQuery = "SELECT sme.cnc_cutting_batch, MAX(sme.date_time) AS date_time, {$bagExpr} AS bag_size
+                 FROM {$sewingTable} sme
+                 LEFT JOIN side_cut_scrap scs ON scs.cutting_batch_no = sme.cnc_cutting_batch
+                     AND scs.entry_date = ?
+                     AND scs.shift = ?
+                     AND scs.category = 'Sewing Production'
+                 WHERE sme.cnc_cutting_batch IS NOT NULL
+                     AND sme.cnc_cutting_batch != ''
+                     AND scs.id IS NULL
+                 GROUP BY sme.cnc_cutting_batch, DATE(sme.date_time), {$bagExpr}
+                 ORDER BY MAX(sme.date_time) DESC
+                 LIMIT 50";
+    $cncStmt = $conn->prepare($cncQuery);
+    if ($cncStmt) {
+        $cncStmt->bind_param('ss', $currentDate, $currentShift);
+        $cncStmt->execute();
+        $cncResult = $cncStmt->get_result();
+        while ($row = $cncResult->fetch_assoc()) {
+            $cncBatches[] = [
+                'batch' => $row['cnc_cutting_batch'],
+                'date_time' => $row['date_time'] ?? null,
+                'bag_size' => isset($row['bag_size']) ? trim($row['bag_size']) : '',
+            ];
+        }
+        $cncStmt->close();
     }
-    $cncStmt->close();
 }
 
 // Generate Entry ID (resets at 8 AM daily)
@@ -248,7 +270,7 @@ $reporter_name = $_SESSION['full_name'] ?? $_SESSION['username'] ?? 'Unknown';
       <label>Production Category: </label>
       <div class="btn-group" id="categoryGroup">
         <button type="button" class="btn" data-value="Sheet Production" onclick="selectCategory(this)">Sheet Production</button>
-        <button type="button" class="btn" data-value="Swing Production" onclick="selectCategory(this)">Swing Production</button>
+        <button type="button" class="btn" data-value="Sewing Production" onclick="selectCategory(this)">Sewing Production</button>
       </div>
       <input type="hidden" id="category" name="category" value="">
     </div>
@@ -264,13 +286,19 @@ $reporter_name = $_SESSION['full_name'] ?? $_SESSION['username'] ?? 'Unknown';
       </select>
     </div>
 
-    <!-- Cutting Batch (Only for Swing Production) -->
+    <!-- Cutting Batch (Only for Sewing Production) -->
     <div class="form-group" id="cuttingBatchSection" style="display:none;">
       <label>CNC Cutting Batch: </label>
       <select id="cutting_batch_no" name="cutting_batch_no">
         <option value="">-- Select CNC Cutting Batch --</option>
-        <?php foreach($cncBatches as $batch): ?>
-          <option value="<?php echo htmlspecialchars($batch); ?>"><?php echo htmlspecialchars($batch); ?></option>
+        <?php foreach ($cncBatches as $item): ?>
+          <?php
+            $batchVal = $item['batch'];
+            $dateStr = !empty($item['date_time']) ? date('Y-m-d', strtotime($item['date_time'])) : '';
+            $bagStr = !empty($item['bag_size']) ? ' [' . $item['bag_size'] . ']' : '';
+            $label = $batchVal . ($dateStr ? ' - ' . $dateStr : '') . $bagStr;
+          ?>
+          <option value="<?php echo htmlspecialchars($batchVal); ?>"><?php echo htmlspecialchars($label); ?></option>
         <?php endforeach; ?>
       </select>
     </div>
@@ -336,7 +364,7 @@ function selectCategory(btn) {
     document.getElementById('referenceSection').style.display = 'block';
     document.getElementById('cuttingBatchSection').style.display = 'none';
     document.getElementById('cutting_batch_no').value = '';
-  } else if (btn.dataset.value === 'Swing Production') {
+  } else if (btn.dataset.value === 'Sewing Production') {
     document.getElementById('cuttingBatchSection').style.display = 'block';
     document.getElementById('referenceSection').style.display = 'none';
     document.getElementById('reference_number').value = '';
@@ -381,9 +409,9 @@ function validateForm() {
     return false;
   }
   
-  if (document.getElementById('category').value === 'Swing Production' && 
+  if (document.getElementById('category').value === 'Sewing Production' && 
       !document.getElementById('cutting_batch_no').value) {
-    alert('Please select a CNC Cutting Batch for Swing Production.');
+    alert('Please select a CNC Cutting Batch for Sewing Production.');
     return false;
   }
   

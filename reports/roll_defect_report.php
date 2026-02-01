@@ -59,16 +59,27 @@ if (!$hasDateFilter) {
     $dateFrom = date('Y-m-d', strtotime('-30 days'));
 }
 
+// Check if gsm_roll_entry table exists
+$tableCheck = $conn->query("SHOW TABLES LIKE 'gsm_roll_entry'");
+$gsmTableExists = ($tableCheck && $tableCheck->num_rows > 0);
+
+// Check if gsm_roll_entry has project_id column
+$hasProjectId = false;
+if ($gsmTableExists) {
+    $colCheck = $conn->query("SHOW COLUMNS FROM gsm_roll_entry LIKE 'project_id'");
+    $hasProjectId = ($colCheck && $colCheck->num_rows > 0);
+}
+
 $query = "
     SELECT 
         rqr.*,
-        COALESCE(ftr.roll_no, rqr.roll_no) AS roll_no_final,
-        COALESCE(ftr.line_no, rqr.line_number) AS line_no_final,
-        COALESCE(ftr.total_weight, 0) AS total_weight,
-        p.project_name
+        COALESCE(g.roll_no, rqr.roll_no) AS roll_no_final,
+        COALESCE(g.line_number, rqr.line_number) AS line_no_final,
+        COALESCE(g.total_weight, 0) AS total_weight,
+        " . ($hasProjectId ? "p.project_name" : "NULL AS project_name") . "
     FROM roll_qc_reports rqr
-    LEFT JOIN fiber_to_roll_entry ftr ON rqr.reference_number = ftr.reference_number
-    LEFT JOIN projects p ON ftr.project_id = p.id
+    " . ($gsmTableExists ? "LEFT JOIN gsm_roll_entry g ON rqr.reference_number = g.reference" : "") . "
+    " . ($hasProjectId ? "LEFT JOIN projects p ON g.project_id = p.id" : "") . "
     WHERE 1=1
 ";
 

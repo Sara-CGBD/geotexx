@@ -107,6 +107,18 @@ foreach ($deliveries as $delivery) {
     $groupedDeliveries[$groupKey]['count']++;
 }
 
+// Split into bag and roll deliveries (different fields for each type)
+$bagDeliveries = [];
+$rollDeliveries = [];
+foreach ($groupedDeliveries as $groupKey => $group) {
+    $productType = strtolower(trim($group['delivery']['delivery_product_type'] ?? 'bag'));
+    if ($productType === 'roll') {
+        $rollDeliveries[$groupKey] = $group;
+    } else {
+        $bagDeliveries[$groupKey] = $group;
+    }
+}
+
 // Format reference numbers as "from to" range
 function formatReferenceRange($references) {
     if (empty($references)) {
@@ -129,16 +141,23 @@ $totalDeliveries = count($groupedDeliveries);
 $totalQuantity = array_sum(array_column($groupedDeliveries, 'total_quantity'));
 $totalValue = array_sum(array_column($groupedDeliveries, 'total_value'));
 
-// Group by client for chart
-$byClient = [];
+// Group by client for charts - separate for bag and roll
+$byClientBag = [];
+$byClientRoll = [];
 foreach ($groupedDeliveries as $group) {
     $client = $group['delivery']['client_name'] ?? 'Unknown';
-    if (!isset($byClient[$client])) {
-        $byClient[$client] = ['count' => 0, 'qty' => 0, 'value' => 0];
+    $productType = strtolower(trim($group['delivery']['delivery_product_type'] ?? 'bag'));
+    if ($productType === 'roll') {
+        if (!isset($byClientRoll[$client])) $byClientRoll[$client] = ['count' => 0, 'qty' => 0, 'value' => 0];
+        $byClientRoll[$client]['count'] += $group['count'];
+        $byClientRoll[$client]['qty'] += $group['total_quantity'];
+        $byClientRoll[$client]['value'] += $group['total_value'];
+    } else {
+        if (!isset($byClientBag[$client])) $byClientBag[$client] = ['count' => 0, 'qty' => 0, 'value' => 0];
+        $byClientBag[$client]['count'] += $group['count'];
+        $byClientBag[$client]['qty'] += $group['total_quantity'];
+        $byClientBag[$client]['value'] += $group['total_value'];
     }
-    $byClient[$client]['count'] += $group['count'];
-    $byClient[$client]['qty'] += $group['total_quantity'];
-    $byClient[$client]['value'] += $group['total_value'];
 }
 
 // Performance: Defer filter options - load asynchronously after page render
@@ -363,7 +382,7 @@ $referenceNumbers = [];
             <div class="stat-label">Total Value</div>
         </div>
         <div class="stat-card amber">
-            <div class="stat-value"><?php echo count($byClient); ?></div>
+            <div class="stat-value"><?php echo count(array_unique(array_merge(array_keys($byClientBag), array_keys($byClientRoll)))); ?></div>
             <div class="stat-label">Unique Clients</div>
         </div>
     </div>
@@ -414,32 +433,41 @@ $referenceNumbers = [];
     <button onclick="window.print()" class="export-btn"><i class="fas fa-print"></i> Print</button>
     <button onclick="exportToCSV()" class="export-btn" style="background: #e67e22;"><i class="fas fa-file-csv"></i> Export CSV</button>
     
-    <?php if (count($byClient) > 0): ?>
-    <div class="chart-card">
-        <div class="chart-title">Deliveries by Client</div>
+    <?php if (count($byClientBag) > 0): ?>
+    <div class="chart-card" style="border-left: 4px solid #3498db;">
+        <div class="chart-title"><i class="fas fa-shopping-bag" style="margin-right: 8px;"></i>Bag Deliveries by Client</div>
         <div class="chart-container">
-            <canvas id="clientChart"></canvas>
+            <canvas id="bagClientChart"></canvas>
+        </div>
+    </div>
+    <?php endif; ?>
+    
+    <?php if (count($byClientRoll) > 0): ?>
+    <div class="chart-card" style="border-left: 4px solid #e67e22; margin-top: 25px;">
+        <div class="chart-title"><i class="fas fa-scroll" style="margin-right: 8px;"></i>Roll Deliveries by Client</div>
+        <div class="chart-container">
+            <canvas id="rollClientChart"></canvas>
         </div>
     </div>
     <?php endif; ?>
     
     <?php if (count($groupedDeliveries) > 0): ?>
-    <h2 style="font-size: 1.3em; color: #34495e; margin-bottom: 15px; padding-bottom: 10px; border-bottom: 3px solid #3498db;">
-        <i class="fas fa-list"></i> Delivery Records
+    
+    <?php if (count($bagDeliveries) > 0): ?>
+    <h2 style="font-size: 1.3em; color: #34495e; margin-bottom: 15px; margin-top: 25px; padding-bottom: 10px; border-bottom: 3px solid #3498db;">
+        <i class="fas fa-shopping-bag"></i> Bag Delivery Records
     </h2>
     <div class="table-wrapper">
-    <table id="deliveryTable">
+    <table id="bagDeliveryTable" class="delivery-table">
         <thead>
             <tr>
                 <th>#</th>
                 <th>Delivery ID</th>
                 <th>Date</th>
                 <th>Shift</th>
-                <th>Reference No.</th>
                 <th>CNC Cutting Batch</th>
-                <th>Client</th>
                 <th>Bag Size</th>
-                <th>Roll Size</th>
+                <th>Client</th>
                 <th>Quantity</th>
                 <th>Unit Price</th>
                 <th>Total Value</th>
@@ -449,94 +477,107 @@ $referenceNumbers = [];
             </tr>
         </thead>
         <tbody>
-            <?php 
-            $counter = 1;
-            foreach ($groupedDeliveries as $group): 
+            <?php $bagCounter = 1; foreach ($bagDeliveries as $group): 
                 $delivery = $group['delivery'];
-                $referenceDisplay = formatReferenceRange($group['references']);
                 $unitPrice = $delivery['unit_price'] ?? 0;
-                $deliveryUnit = $delivery['delivery_quantity_unit'] ?? '';
-                if (empty($deliveryUnit)) {
-                    $deliveryUnit = ($delivery['delivery_product_type'] ?? 'bag') === 'roll' ? 'kg' : 'pcs';
-                }
-                $unitLabel = in_array($deliveryUnit, ['kg', 'sqm'], true) ? $deliveryUnit : 'pcs';
-                $unitPriceLabel = $unitLabel === 'pcs' ? 'pc' : $unitLabel;
-                $isBagDelivery = !empty($delivery['cnc_cutting_batch']) && (($delivery['delivery_product_type'] ?? 'bag') !== 'roll');
-                $displayUnit = $isBagDelivery ? 'pcs' : $unitLabel;
-                $displayUnitPriceLabel = $isBagDelivery ? 'pc' : $unitPriceLabel;
-                
-                // Use first delivery's ID for challan button
                 $firstDeliveryId = $delivery['id'];
             ?>
                 <tr>
-                    <td><?php echo $counter++; ?></td>
+                    <td><?php echo $bagCounter++; ?></td>
                     <td><strong><?php echo htmlspecialchars($delivery['delivery_id'] ?? 'N/A'); ?></strong></td>
                     <td><?php 
-                        // Use actual_delivery_datetime which has the full datetime with time
                         $deliveryDateTime = $delivery['actual_delivery_datetime'] ?? null;
-                        
                         if (!empty($deliveryDateTime) && $deliveryDateTime != '0000-00-00' && $deliveryDateTime != '0000-00-00 00:00:00' && strtotime($deliveryDateTime)) {
                             echo date('M d, Y g:i A', strtotime($deliveryDateTime));
                         } else {
-                            // Fallback: try delivered_at or created_at
                             $fallbackDateTime = $delivery['delivered_at'] ?? $delivery['created_at'] ?? null;
-                            if (!empty($fallbackDateTime) && strtotime($fallbackDateTime)) {
-                                echo date('M d, Y g:i A', strtotime($fallbackDateTime));
-                            } else {
-                                echo 'N/A';
-                            }
+                            echo (!empty($fallbackDateTime) && strtotime($fallbackDateTime)) ? date('M d, Y g:i A', strtotime($fallbackDateTime)) : 'N/A';
                         }
                     ?></td>
                     <td><span class="badge" style="background: <?php echo ($delivery['shift'] == 'Day') ? '#d5f4e6' : '#e3f2fd'; ?>; color: <?php echo ($delivery['shift'] == 'Day') ? '#27ae60' : '#2980b9'; ?>;"><?php echo htmlspecialchars($delivery['shift'] ?? 'N/A'); ?></span></td>
-                    <td><?php echo htmlspecialchars($referenceDisplay); ?></td>
                     <td><?php echo htmlspecialchars($delivery['cnc_cutting_batch'] ?? 'N/A'); ?></td>
+                    <td><?php echo htmlspecialchars($delivery['bag_size'] ?: $delivery['fg_bag_size'] ?: 'N/A'); ?></td>
                     <td><strong><?php 
-                        $clientName = $delivery['client_name'] ?? '';
-                        echo htmlspecialchars((!empty($clientName) && $clientName != '0') ? $clientName : 'Unknown'); 
+                        $cn = $delivery['client_name'] ?? '';
+                        echo htmlspecialchars((!empty($cn) && $cn != '0') ? $cn : 'Unknown'); 
                     ?></strong></td>
-                    <td><?php 
-                        // Show bag size for bag deliveries, N/A for roll deliveries
-                        $hasReference = !empty($delivery['reference_number']);
-                        $noCncBatch = empty($delivery['cnc_cutting_batch']);
-                        $isRollDelivery = ($hasReference && $noCncBatch) || (isset($delivery['delivery_product_type']) && $delivery['delivery_product_type'] === 'roll');
-                        if ($isRollDelivery) {
-                            echo 'N/A';
-                        } else {
-                            echo htmlspecialchars($delivery['bag_size'] ?: $delivery['fg_bag_size'] ?: 'N/A');
-                        }
-                    ?></td>
-                    <td><?php 
-                        // Show roll size for roll deliveries, N/A for bag deliveries
-                        $hasReference = !empty($delivery['reference_number']);
-                        $noCncBatch = empty($delivery['cnc_cutting_batch']);
-                        $isRollDelivery = ($hasReference && $noCncBatch) || (isset($delivery['delivery_product_type']) && $delivery['delivery_product_type'] === 'roll');
-                        if ($isRollDelivery) {
-                            $rollSizeValue = $delivery['roll_size'] ?? $delivery['fg_bag_size'] ?? $delivery['bag_size'] ?? '';
-                            $rollSizeValue = trim($rollSizeValue);
-                            echo htmlspecialchars($rollSizeValue !== '' ? $rollSizeValue : 'N/A');
-                        } else {
-                            echo 'N/A';
-                        }
-                    ?></td>
-                    <td>
-                        <span class="badge badge-delivered">
-                            <?php echo number_format($group['total_quantity'], 2) . ' ' . $displayUnit; ?>
-                        </span>
-                    </td>
-                    <td>৳<?php echo number_format($unitPrice, 2); ?> / <?php echo htmlspecialchars($displayUnitPriceLabel); ?></td>
+                    <td><span class="badge badge-delivered"><?php echo number_format($group['total_quantity'], 2); ?> pcs</span></td>
+                    <td>৳<?php echo number_format($unitPrice, 2); ?> / pc</td>
                     <td><strong>৳<?php echo number_format($group['total_value'], 2); ?></strong></td>
                     <td><?php echo htmlspecialchars($delivery['challan_no'] ?? 'N/A'); ?></td>
                     <td><?php echo htmlspecialchars($delivery['truck_no'] ?? 'N/A'); ?></td>
-                    <td>
-                        <button class="challan-btn" onclick="printChallan(<?php echo $firstDeliveryId; ?>)">
-                            <i class="fas fa-file-invoice"></i> Challan
-                        </button>
-                    </td>
+                    <td><button class="challan-btn" onclick="printChallan(<?php echo $firstDeliveryId; ?>)"><i class="fas fa-file-invoice"></i> Challan</button></td>
                 </tr>
             <?php endforeach; ?>
         </tbody>
     </table>
     </div>
+    <?php endif; ?>
+    
+    <?php if (count($rollDeliveries) > 0): ?>
+    <h2 style="font-size: 1.3em; color: #34495e; margin-bottom: 15px; margin-top: 25px; padding-bottom: 10px; border-bottom: 3px solid #e67e22;">
+        <i class="fas fa-scroll"></i> Roll Delivery Records
+    </h2>
+    <div class="table-wrapper">
+    <table id="rollDeliveryTable" class="delivery-table">
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>Delivery ID</th>
+                <th>Date</th>
+                <th>Shift</th>
+                <th>Reference No.</th>
+                <th>Roll Size</th>
+                <th>Client</th>
+                <th>Quantity</th>
+                <th>Unit Price</th>
+                <th>Total Value</th>
+                <th>Lighthouse Challan No.</th>
+                <th>Truck No.</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody>
+            <?php $rollCounter = 1; foreach ($rollDeliveries as $group): 
+                $delivery = $group['delivery'];
+                $referenceDisplay = formatReferenceRange($group['references']);
+                $unitPrice = $delivery['unit_price'] ?? 0;
+                $unitLabel = in_array($delivery['delivery_quantity_unit'] ?? '', ['kg', 'sqm'], true) ? ($delivery['delivery_quantity_unit'] ?? 'kg') : 'kg';
+                $unitPriceLabel = $unitLabel === 'pcs' ? 'pc' : $unitLabel;
+                $rollSizeValue = trim($delivery['roll_size'] ?? $delivery['fg_bag_size'] ?? $delivery['bag_size'] ?? '');
+                $firstDeliveryId = $delivery['id'];
+            ?>
+                <tr>
+                    <td><?php echo $rollCounter++; ?></td>
+                    <td><strong><?php echo htmlspecialchars($delivery['delivery_id'] ?? 'N/A'); ?></strong></td>
+                    <td><?php 
+                        $deliveryDateTime = $delivery['actual_delivery_datetime'] ?? null;
+                        if (!empty($deliveryDateTime) && $deliveryDateTime != '0000-00-00' && $deliveryDateTime != '0000-00-00 00:00:00' && strtotime($deliveryDateTime)) {
+                            echo date('M d, Y g:i A', strtotime($deliveryDateTime));
+                        } else {
+                            $fallbackDateTime = $delivery['delivered_at'] ?? $delivery['created_at'] ?? null;
+                            echo (!empty($fallbackDateTime) && strtotime($fallbackDateTime)) ? date('M d, Y g:i A', strtotime($fallbackDateTime)) : 'N/A';
+                        }
+                    ?></td>
+                    <td><span class="badge" style="background: <?php echo ($delivery['shift'] == 'Day') ? '#d5f4e6' : '#e3f2fd'; ?>; color: <?php echo ($delivery['shift'] == 'Day') ? '#27ae60' : '#2980b9'; ?>;"><?php echo htmlspecialchars($delivery['shift'] ?? 'N/A'); ?></span></td>
+                    <td><?php echo htmlspecialchars($referenceDisplay); ?></td>
+                    <td><?php echo htmlspecialchars($rollSizeValue !== '' ? $rollSizeValue : 'N/A'); ?></td>
+                    <td><strong><?php 
+                        $cn = $delivery['client_name'] ?? '';
+                        echo htmlspecialchars((!empty($cn) && $cn != '0') ? $cn : 'Unknown'); 
+                    ?></strong></td>
+                    <td><span class="badge badge-delivered"><?php echo number_format($group['total_quantity'], 2); ?> <?php echo $unitLabel; ?></span></td>
+                    <td>৳<?php echo number_format($unitPrice, 2); ?> / <?php echo htmlspecialchars($unitPriceLabel); ?></td>
+                    <td><strong>৳<?php echo number_format($group['total_value'], 2); ?></strong></td>
+                    <td><?php echo htmlspecialchars($delivery['challan_no'] ?? 'N/A'); ?></td>
+                    <td><?php echo htmlspecialchars($delivery['truck_no'] ?? 'N/A'); ?></td>
+                    <td><button class="challan-btn" onclick="printChallan(<?php echo $firstDeliveryId; ?>)"><i class="fas fa-file-invoice"></i> Challan</button></td>
+                </tr>
+            <?php endforeach; ?>
+        </tbody>
+    </table>
+    </div>
+    <?php endif; ?>
     <?php else: ?>
     <div style="text-align: center; padding: 60px; color: #95a5a6;">
         <i class="fas fa-truck-loading" style="font-size: 4em; margin-bottom: 20px;"></i>
@@ -546,28 +587,55 @@ $referenceNumbers = [];
 </div>
 
 <script>
-<?php if (count($byClient) > 0): ?>
-const clientCtx = document.getElementById('clientChart');
-new Chart(clientCtx, {
-    type: 'bar',
-    data: {
-        labels: <?php echo json_encode(array_keys($byClient)); ?>,
-        datasets: [{
-            label: 'Deliveries',
-            data: <?php echo json_encode(array_column($byClient, 'count')); ?>,
-            backgroundColor: 'rgba(52, 152, 219, 0.7)',
-            borderColor: '#3498db',
-            borderWidth: 2
-        }]
-    },
-    options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        indexAxis: 'y',
-        plugins: { legend: { display: false } },
-        scales: { x: { beginAtZero: true } }
-    }
-});
+<?php if (count($byClientBag) > 0): ?>
+const bagClientCtx = document.getElementById('bagClientChart');
+if (bagClientCtx) {
+    new Chart(bagClientCtx, {
+        type: 'bar',
+        data: {
+            labels: <?php echo json_encode(array_keys($byClientBag)); ?>,
+            datasets: [{
+                label: 'Bag Deliveries',
+                data: <?php echo json_encode(array_column($byClientBag, 'count')); ?>,
+                backgroundColor: 'rgba(52, 152, 219, 0.7)',
+                borderColor: '#3498db',
+                borderWidth: 2
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            indexAxis: 'y',
+            plugins: { legend: { display: false } },
+            scales: { x: { beginAtZero: true } }
+        }
+    });
+}
+<?php endif; ?>
+<?php if (count($byClientRoll) > 0): ?>
+const rollClientCtx = document.getElementById('rollClientChart');
+if (rollClientCtx) {
+    new Chart(rollClientCtx, {
+        type: 'bar',
+        data: {
+            labels: <?php echo json_encode(array_keys($byClientRoll)); ?>,
+            datasets: [{
+                label: 'Roll Deliveries',
+                data: <?php echo json_encode(array_column($byClientRoll, 'count')); ?>,
+                backgroundColor: 'rgba(230, 126, 34, 0.7)',
+                borderColor: '#e67e22',
+                borderWidth: 2
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            indexAxis: 'y',
+            plugins: { legend: { display: false } },
+            scales: { x: { beginAtZero: true } }
+        }
+    });
+}
 <?php endif; ?>
 
 function printChallan(deliveryId) {
@@ -578,10 +646,25 @@ function printChallan(deliveryId) {
     }
 }
 
+function exportTableToCSV(tableId, sectionLabel) {
+    const table = document.getElementById(tableId);
+    if (!table) return [];
+    const rows = [];
+    const headers = Array.from(table.querySelectorAll('thead th')).slice(0, -1).map(th => th.textContent);
+    rows.push([sectionLabel]);
+    rows.push(headers.join(','));
+    table.querySelectorAll('tbody tr').forEach(row => {
+        const cols = Array.from(row.querySelectorAll('td')).slice(0, -1).map(td => {
+            let text = td.textContent.trim();
+            if (text.includes(',') || text.includes('"')) text = '"' + text.replace(/"/g, '""') + '"';
+            return text;
+        });
+        rows.push(cols.join(','));
+    });
+    return rows;
+}
+
 function exportToCSV() {
-    const table = document.getElementById('deliveryTable');
-    if (!table) return;
-    
     let csv = [];
     csv.push(['FG Delivery Report']);
     csv.push(['Generated: ' + new Date().toLocaleString()]);
@@ -589,26 +672,16 @@ function exportToCSV() {
     csv.push(['Total Quantity (mixed units): <?php echo $totalQuantity; ?>']);
     csv.push([]);
     
-    const headers = Array.from(table.querySelectorAll('thead th')).slice(0, -1).map(th => th.textContent);
-    csv.push(headers.join(','));
+    const bagRows = exportTableToCSV('bagDeliveryTable', 'Bag Deliveries');
+    if (bagRows.length > 0) { csv = csv.concat(bagRows); csv.push([]); }
     
-    const rows = table.querySelectorAll('tbody tr');
-    rows.forEach(row => {
-        const cols = Array.from(row.querySelectorAll('td')).slice(0, -1).map(td => {
-            let text = td.textContent.trim();
-            if (text.includes(',') || text.includes('"')) {
-                text = '"' + text.replace(/"/g, '""') + '"';
-            }
-            return text;
-        });
-        csv.push(cols.join(','));
-    });
+    const rollRows = exportTableToCSV('rollDeliveryTable', 'Roll Deliveries');
+    if (rollRows.length > 0) { csv = csv.concat(rollRows); }
     
     const csvContent = csv.join('\n');
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
-    const url = URL.createObjectURL(blob);
-    link.setAttribute('href', url);
+    link.setAttribute('href', URL.createObjectURL(blob));
     link.setAttribute('download', 'fg_delivery_report_' + new Date().toISOString().slice(0,10) + '.csv');
     link.style.visibility = 'hidden';
     document.body.appendChild(link);

@@ -60,10 +60,8 @@ try {
         $approvedCondition = "AND rqc.overall_status IN ('approved', 'Done')";
     }
     
-    // Get product_amount from roll_qc_reports for this reference
+    // Get product_amount from roll_qc_reports for this reference - using prepared statements for security
     // For bundles, we need to check each individual reference in the bundle
-    $referenceEscaped = $conn->real_escape_string($reference);
-    
     // Check if this is a bundle (contains range like "REF-1-4")
     $isBundle = preg_match('/^(.+)-(\d+)-(\d+)$/', $reference, $bundleMatches);
     
@@ -75,25 +73,45 @@ try {
         $startNum = (int)$bundleMatches[2];
         $endNum = (int)$bundleMatches[3];
         
-        // Get max quantity for each roll in the bundle
+        // Get max quantity for each roll in the bundle - using prepared statement
         for ($rollNum = $startNum; $rollNum <= $endNum; $rollNum++) {
             $individualRef = $baseRef . '-' . $rollNum;
-            $individualRefEscaped = $conn->real_escape_string($individualRef);
             
-            // Get product_amount from roll_qc_reports
-            $rollNoCondition = $hasRollNo ? "AND (rqc.roll_no = '$rollNum' OR rqc.roll_no IS NULL)" : "";
-            $qtyQuery = "SELECT COALESCE(rqc.product_amount, 0) as product_amount
-                        FROM roll_qc_reports rqc
-                        WHERE rqc.reference_number = '$individualRefEscaped'
-                        $rollNoCondition
-                        $approvedCondition
-                        ORDER BY rqc.created_at DESC
-                        LIMIT 1";
-            
-            $qtyResult = $conn->query($qtyQuery);
+            // Get product_amount from roll_qc_reports - using prepared statement
             $productAmount = 0;
-            if ($qtyResult && $qtyRow = $qtyResult->fetch_assoc()) {
-                $productAmount = (float)$qtyRow['product_amount'];
+            if ($hasRollNo) {
+                $qtyStmt = $conn->prepare("SELECT COALESCE(rqc.product_amount, 0) as product_amount
+                            FROM roll_qc_reports rqc
+                            WHERE rqc.reference_number = ?
+                            AND (rqc.roll_no = ? OR rqc.roll_no IS NULL)
+                            $approvedCondition
+                            ORDER BY rqc.created_at DESC
+                            LIMIT 1");
+                if ($qtyStmt) {
+                    $qtyStmt->bind_param("si", $individualRef, $rollNum);
+                    $qtyStmt->execute();
+                    $qtyResult = $qtyStmt->get_result();
+                    if ($qtyResult && $qtyRow = $qtyResult->fetch_assoc()) {
+                        $productAmount = (float)$qtyRow['product_amount'];
+                    }
+                    $qtyStmt->close();
+                }
+            } else {
+                $qtyStmt = $conn->prepare("SELECT COALESCE(rqc.product_amount, 0) as product_amount
+                            FROM roll_qc_reports rqc
+                            WHERE rqc.reference_number = ?
+                            $approvedCondition
+                            ORDER BY rqc.created_at DESC
+                            LIMIT 1");
+                if ($qtyStmt) {
+                    $qtyStmt->bind_param("s", $individualRef);
+                    $qtyStmt->execute();
+                    $qtyResult = $qtyStmt->get_result();
+                    if ($qtyResult && $qtyRow = $qtyResult->fetch_assoc()) {
+                        $productAmount = (float)$qtyRow['product_amount'];
+                    }
+                    $qtyStmt->close();
+                }
             }
             
             // Calculate used quantity from cnc_entries
@@ -198,10 +216,13 @@ try {
                     LIMIT 1";
         
         $qtyResult = $conn->query($qtyQuery);
-        $productAmount = 0;
-        if ($qtyResult && $qtyRow = $qtyResult->fetch_assoc()) {
-            $productAmount = (float)$qtyRow['product_amount'];
-        }
+            $productAmount = 0;
+            if ($qtyResult && $qtyRow = $qtyResult->fetch_assoc()) {
+                $productAmount = (float)$qtyRow['product_amount'];
+            }
+            if (isset($qtyStmt)) {
+                $qtyStmt->close();
+            }
         
         // Calculate used quantity from cnc_entries
         // First check if reference_quantities column exists

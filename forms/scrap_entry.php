@@ -61,29 +61,33 @@ $currentDate = date('Y-m-d');
 $currentHour = (int)date('H');
 $currentShift = ($currentHour >= 8 && $currentHour <= 19) ? 'Day' : 'Night';
 
-// Fetch reference numbers from fiber_to_roll_entry excluding already recorded ones for current shift
+// Fetch reference numbers from gsm_roll_entry (generated in GSM and Roll Entry form) excluding already recorded ones
 // BUT include the current entry's reference if in edit mode
 $sheetReferences = [];
 $excludeId = ($editMode && $editEntry) ? $editEntry['id'] : 0;
-$sheetQuery = "SELECT DISTINCT ftr.reference_number 
-               FROM fiber_to_roll_entry ftr
-               LEFT JOIN scrap s ON s.reference_number = ftr.reference_number 
-                   AND DATE(s.date_time) = ? 
-                   AND s.scrap_category = 'Sheet Production Scrap'
-                   AND s.id != ?
-               WHERE ftr.reference_number IS NOT NULL 
-                   AND s.id IS NULL
-               ORDER BY ftr.date_time DESC 
-               LIMIT 50";
-$sheetStmt = $conn->prepare($sheetQuery);
-if ($sheetStmt) {
-    $sheetStmt->bind_param('si', $currentDate, $excludeId);
-    $sheetStmt->execute();
-    $sheetResult = $sheetStmt->get_result();
-    while ($row = $sheetResult->fetch_assoc()) {
-        $sheetReferences[] = $row['reference_number'];
+$gsmTableExists = $conn->query("SHOW TABLES LIKE 'gsm_roll_entry'")->num_rows > 0;
+if ($gsmTableExists) {
+    $sheetQuery = "SELECT DISTINCT g.reference AS reference_number 
+                   FROM gsm_roll_entry g
+                   LEFT JOIN scrap s ON s.reference_number = g.reference 
+                       AND DATE(s.date_time) = ? 
+                       AND s.scrap_category = 'Sheet Production Scrap'
+                       AND s.id != ?
+                   WHERE g.reference IS NOT NULL 
+                       AND g.reference != ''
+                       AND s.id IS NULL
+                   ORDER BY COALESCE(g.date_time, g.created_at) DESC 
+                   LIMIT 50";
+    $sheetStmt = $conn->prepare($sheetQuery);
+    if ($sheetStmt) {
+        $sheetStmt->bind_param('si', $currentDate, $excludeId);
+        $sheetStmt->execute();
+        $sheetResult = $sheetStmt->get_result();
+        while ($row = $sheetResult->fetch_assoc()) {
+            $sheetReferences[] = $row['reference_number'];
+        }
+        $sheetStmt->close();
     }
-    $sheetStmt->close();
 }
 
 // In edit mode, ensure the current reference is in the list
@@ -91,22 +95,30 @@ if ($editMode && $editEntry && !empty($editEntry['reference_number']) && !in_arr
     array_unshift($sheetReferences, $editEntry['reference_number']);
 }
 
-// Fetch CNC cutting batches from swing_machine_entry excluding already recorded ones for current shift
-// BUT include the current entry's batch if in edit mode
+// Fetch CNC cutting batches with date and bag size from sewing_machine_entry (Sewing Machine Entry form) excluding already recorded ones
+// Same logic as Side Cut Entry. Fallback to swing_machine_entry for backward compatibility.
 $cncBatches = [];
+$sewingTableCheck = $conn->query("SHOW TABLES LIKE 'sewing_machine_entry'");
+$sewingTableExists = $sewingTableCheck && $sewingTableCheck->num_rows > 0;
 $swingTableCheck = $conn->query("SHOW TABLES LIKE 'swing_machine_entry'");
-$hasSwingTable = $swingTableCheck && $swingTableCheck->num_rows > 0;
+$swingTableExists = $swingTableCheck && $swingTableCheck->num_rows > 0;
+$sewingTable = $sewingTableExists ? 'sewing_machine_entry' : ($swingTableExists ? 'swing_machine_entry' : null);
 
-if ($hasSwingTable) {
-    $cncQuery = "SELECT DISTINCT sme.cnc_cutting_batch 
-                 FROM swing_machine_entry sme
-                 LEFT JOIN scrap s ON s.cutting_batch = sme.cnc_cutting_batch 
-                     AND DATE(s.date_time) = ? 
-                     AND s.scrap_category = 'Swing Scrap'
+if ($sewingTable) {
+    $hasDate = $conn->query("SHOW COLUMNS FROM {$sewingTable} LIKE 'date_time'")->num_rows > 0;
+    $hasBagSize = $conn->query("SHOW COLUMNS FROM {$sewingTable} LIKE 'bag_size'")->num_rows > 0;
+    $bagExpr = $hasBagSize ? "TRIM(COALESCE(sme.bag_size,''))" : "''";
+    $cncQuery = "SELECT sme.cnc_cutting_batch, MAX(sme.date_time) AS date_time, {$bagExpr} AS bag_size
+                 FROM {$sewingTable} sme
+                 LEFT JOIN scrap s ON s.cutting_batch = sme.cnc_cutting_batch
+                     AND DATE(s.date_time) = ?
+                     AND s.scrap_category = 'Sewing Scrap'
                      AND s.id != ?
-                 WHERE sme.cnc_cutting_batch IS NOT NULL 
+                 WHERE sme.cnc_cutting_batch IS NOT NULL
+                     AND sme.cnc_cutting_batch != ''
                      AND s.id IS NULL
-                 ORDER BY sme.date_time DESC 
+                 GROUP BY sme.cnc_cutting_batch, DATE(sme.date_time), {$bagExpr}
+                 ORDER BY MAX(sme.date_time) DESC
                  LIMIT 50";
     $cncStmt = $conn->prepare($cncQuery);
     if ($cncStmt) {
@@ -114,15 +126,26 @@ if ($hasSwingTable) {
         $cncStmt->execute();
         $cncResult = $cncStmt->get_result();
         while ($row = $cncResult->fetch_assoc()) {
-            $cncBatches[] = $row['cnc_cutting_batch'];
+            $cncBatches[] = [
+                'batch' => $row['cnc_cutting_batch'],
+                'date_time' => $row['date_time'] ?? null,
+                'bag_size' => isset($row['bag_size']) ? trim($row['bag_size']) : '',
+            ];
         }
         $cncStmt->close();
     }
 }
 
 // In edit mode, ensure the current batch is in the list
-if ($editMode && $editEntry && !empty($editEntry['cutting_batch']) && !in_array($editEntry['cutting_batch'], $cncBatches)) {
-    array_unshift($cncBatches, $editEntry['cutting_batch']);
+$editBatch = $editMode && $editEntry && !empty($editEntry['cutting_batch']) ? $editEntry['cutting_batch'] : '';
+if ($editBatch) {
+    $found = false;
+    foreach ($cncBatches as $item) {
+        if (isset($item['batch']) && $item['batch'] === $editBatch) { $found = true; break; }
+    }
+    if (!$found) {
+        array_unshift($cncBatches, ['batch' => $editBatch, 'date_time' => null, 'bag_size' => '']);
+    }
 }
 
 // Generate Scrap ID (server-side, daily reset like CNC: SC-YYYYMMDD-XXX)
@@ -138,11 +161,18 @@ if ($conn) {
   if ($tbl && $tbl->num_rows > 0) {
     $col = $conn->query("SHOW COLUMNS FROM scrap LIKE 'scrap_id'");
     if ($col && $col->num_rows > 0) {
-      $seq = $conn->query("SELECT MAX(CAST(SUBSTRING(scrap_id, -3) AS UNSIGNED)) AS last_num FROM scrap WHERE DATE(date_time) = '$today'");
-      if ($seq && $row = $seq->fetch_assoc()) {
-        $next = (!empty($row['last_num']) ? ((int)$row['last_num']) + 1 : 1);
-        $scrap_id = 'SC-' . date('Ymd') . '-' . str_pad($next, 3, '0', STR_PAD_LEFT);
+      // Use prepared statement for date query
+      $seqStmt = $conn->prepare("SELECT MAX(CAST(SUBSTRING(scrap_id, -3) AS UNSIGNED)) AS last_num FROM scrap WHERE DATE(date_time) = ?");
+      if ($seqStmt) {
+          $seqStmt->bind_param("s", $today);
+          $seqStmt->execute();
+          $seq = $seqStmt->get_result();
+          if ($seq && $row = $seq->fetch_assoc()) {
+              $next = (!empty($row['last_num']) ? ((int)$row['last_num']) + 1 : 1);
+              $scrap_id = 'SC-' . date('Ymd') . '-' . str_pad($next, 3, '0', STR_PAD_LEFT);
           }
+          $seqStmt->close();
+      }
       }
     }
   }
@@ -251,7 +281,7 @@ if ($conn) {
       <label>Scrap Category: </label>
       <div class="btn-group" id="scrapCategoryGroup">
         <button type="button" class="btn" data-value="Sheet Production Scrap" onclick="selectSource(this)">Sheet Production Scrap</button>
-        <button type="button" class="btn" data-value="Swing Scrap" onclick="selectSource(this)">Swing Scrap</button>
+        <button type="button" class="btn" data-value="Sewing Scrap" onclick="selectSource(this)">Sewing Scrap</button>
       </div>
       <input type="hidden" id="scrap_category" name="scrap_category" value="">
     </div>
@@ -302,8 +332,14 @@ if ($conn) {
         <label>CNC Cutting Batch: </label>
         <select id="swing_cutting_batch" name="swing_cutting_batch">
           <option value="">-- Select CNC Cutting Batch --</option>
-          <?php foreach($cncBatches as $batch): ?>
-            <option value="<?php echo htmlspecialchars($batch); ?>"><?php echo htmlspecialchars($batch); ?></option>
+          <?php foreach ($cncBatches as $item): ?>
+            <?php
+              $batchVal = is_array($item) ? $item['batch'] : $item;
+              $dateStr = !empty($item['date_time']) ? date('Y-m-d', strtotime($item['date_time'])) : '';
+              $bagStr = !empty($item['bag_size']) ? ' [' . $item['bag_size'] . ']' : '';
+              $label = $batchVal . ($dateStr ? ' - ' . $dateStr : '') . $bagStr;
+            ?>
+            <option value="<?php echo htmlspecialchars($batchVal); ?>"><?php echo htmlspecialchars($label); ?></option>
           <?php endforeach; ?>
         </select>
       </div>
@@ -403,8 +439,8 @@ function updateSummary(){
       if (qty) s += ` | Qty: ${qty} kg`;
     }
     
-    // Swing Scrap fields
-    if (source === 'Swing Scrap') {
+    // Sewing Scrap fields
+    if (source === 'Sewing Scrap') {
       const batch = document.getElementById('swing_cutting_batch').value;
       const product = document.getElementById('swing_product').value;
       const type = document.getElementById('swing_type').value;
@@ -451,7 +487,7 @@ function validateForm(){
     }
   }
   
-  if (source === 'Swing Scrap') {
+  if (source === 'Sewing Scrap') {
     if (!document.getElementById("swing_cutting_batch").value) {
       alert("Please select CNC cutting batch.");
       return false;
@@ -523,7 +559,7 @@ function selectSource(btn) {
       sheetProductBtn.classList.add('selected');
       document.getElementById('sheet_product').value = 'Raw Material';
     }
-  } else if (btn.dataset.value === 'Swing Scrap') {
+  } else if (btn.dataset.value === 'Sewing Scrap') {
     document.getElementById('swingScrapFields').style.display = 'block';
     document.getElementById('sheetScrapFields').style.display = 'none';
     // Clear sheet fields
@@ -533,7 +569,7 @@ function selectSource(btn) {
     document.getElementById('sheet_qty').value = '';
     document.querySelectorAll('#sheetProductGroup .btn, #sheetTypeGroup .btn').forEach(b => b.classList.remove('selected'));
     
-    // Auto-select Raw Material for swing scrap
+    // Auto-select Raw Material for sewing scrap
     const swingProductBtn = document.querySelector('#swingProductGroup .btn[data-value="Raw Material"]');
     if (swingProductBtn) {
       swingProductBtn.classList.add('selected');
@@ -571,7 +607,7 @@ document.addEventListener('DOMContentLoaded', function() {
           const sheetTypeBtn = document.querySelector('#sheetTypeGroup .btn[data-value="<?php echo htmlspecialchars($editEntry['scrap_type']); ?>"]');
           if (sheetTypeBtn) sheetTypeBtn.click();
           document.getElementById('sheet_qty').value = '<?php echo $editEntry['qty']; ?>';
-        <?php elseif ($editEntry['scrap_category'] === 'Swing Scrap'): ?>
+        <?php elseif ($editEntry['scrap_category'] === 'Sewing Scrap'): ?>
           document.getElementById('swing_cutting_batch').value = '<?php echo htmlspecialchars($editEntry['cutting_batch']); ?>';
           const swingProductBtn = document.querySelector('#swingProductGroup .btn[data-value="<?php echo htmlspecialchars($editEntry['scrap_product']); ?>"]');
           if (swingProductBtn) swingProductBtn.click();

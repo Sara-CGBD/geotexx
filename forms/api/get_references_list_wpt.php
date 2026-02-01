@@ -19,15 +19,87 @@ if (!isset($_SESSION['user_id']) || !isset($_SESSION['username'])) {
 try {
     $conn = SecurityConfig::getConnection();
     
+    // Check if routed table exists
+    $routedTableExists = $conn->query("SHOW TABLES LIKE 'routed'")->num_rows > 0;
+    
+    // Helper function to check if a reference has been routed (check routed table)
+    $isReferenceRouted = function($conn, $reference, $routedTableExists) {
+        if (!$routedTableExists) {
+            return false;
+        }
+        
+        // Check exact match first (most reliable)
+        $stmt = $conn->prepare("
+            SELECT 1 
+            FROM routed 
+            WHERE reference_number = ? 
+            LIMIT 1
+        ");
+        if ($stmt) {
+            $stmt->bind_param('s', $reference);
+            $stmt->execute();
+            $result = $stmt->get_result();
+            $routed = ($result && $result->num_rows > 0);
+            $stmt->close();
+            if ($routed) {
+                return true;
+            }
+        }
+        
+        // Also check if the stored reference is a prefix of the query reference
+        // e.g., stored: "2.0L126JAN16-R06" matches query: "2.0L126JAN16-R06-GT0.9.H0.1"
+        $stmt = $conn->prepare("
+            SELECT 1 
+            FROM routed 
+            WHERE ? LIKE CONCAT(reference_number, '%')
+            LIMIT 1
+        ");
+        if ($stmt) {
+            $stmt->bind_param('s', $reference);
+            $stmt->execute();
+            $result = $stmt->get_result();
+            $routed = ($result && $result->num_rows > 0);
+            $stmt->close();
+            if ($routed) {
+                return true;
+            }
+        }
+        
+        // Also check if the query reference is a prefix of stored reference
+        // e.g., query: "2.0L126JAN16-R06" matches stored: "2.0L126JAN16-R06-GT0.9.H0.1"
+        $stmt = $conn->prepare("
+            SELECT 1 
+            FROM routed 
+            WHERE reference_number LIKE CONCAT(?, '%')
+            LIMIT 1
+        ");
+        if ($stmt) {
+            $stmt->bind_param('s', $reference);
+            $stmt->execute();
+            $result = $stmt->get_result();
+            $routed = ($result && $result->num_rows > 0);
+            $stmt->close();
+            return $routed;
+        }
+        
+        return false;
+    };
+    
     // Fetch reference numbers from roll_entry - support bundles
     // Tests are done AFTER roll entry submission
     $references = [];
     $bundleReferences = [];
     
+    // Check if number_of_rolls column exists
+    $checkCol = $conn->query("SHOW COLUMNS FROM roll_entry LIKE 'number_of_rolls'");
+    $hasNumberOfRolls = ($checkCol && $checkCol->num_rows > 0);
+    
     // Fetch references from roll_entry that have NOT been submitted for water permeability tests
     // Exclude references that already exist in water_permeability_tests table
-    $result = $conn->query("
-        SELECT DISTINCT re.reference_number, MAX(re.date_time) as created_at
+    $refQuery = $conn->query("
+        SELECT DISTINCT re.reference_number, 
+               MAX(re.date_time) as created_at" . 
+               ($hasNumberOfRolls ? ", MAX(re.number_of_rolls) as number_of_rolls" : "") . "
         FROM roll_entry re
         LEFT JOIN water_permeability_tests wpt ON (
             re.reference_number = wpt.reference_number 
@@ -39,29 +111,33 @@ try {
           AND wpt.reference_number IS NULL
         GROUP BY re.reference_number
         ORDER BY created_at DESC 
-        LIMIT 100
+        LIMIT 200
     ");
     
     // If query failed, log error and try simpler query
-    if (!$result) {
+    if (!$refQuery) {
         error_log("WPT API Query Error: " . $conn->error);
         // Fallback to just roll_entry without exclusion
-        $result = $conn->query("
-            SELECT DISTINCT re.reference_number, MAX(re.date_time) as created_at
+        $refQuery = $conn->query("
+            SELECT DISTINCT re.reference_number, 
+                   MAX(re.date_time) as created_at" . 
+                   ($hasNumberOfRolls ? ", MAX(re.number_of_rolls) as number_of_rolls" : "") . "
             FROM roll_entry re
             WHERE re.reference_number IS NOT NULL 
               AND re.reference_number != ''
             GROUP BY re.reference_number
             ORDER BY created_at DESC 
-            LIMIT 100
+            LIMIT 200
         ");
     }
     
+    // Fetch all individual roll references from roll_entry
+    // Show each roll separately if it hasn't been routed by AGM
     $totalFetched = 0;
     $skippedInvalid = 0;
     
-    if ($result) {
-        while ($row = $result->fetch_assoc()) {
+    if ($refQuery) {
+        while ($row = $refQuery->fetch_assoc()) {
             $ref = $row['reference_number'];
             $totalFetched++;
             
@@ -79,24 +155,30 @@ try {
                 $lineIndicator = 'L2';
             }
             
-            // Check if this is a bundle reference (ends with -N pattern)
-            if (preg_match('/-(\d+)$/', $ref, $matches)) {
-                $rollCount = (int)$matches[1];
-                $baseRef = preg_replace('/-\d+$/', '', $ref);
-                
-                $bundleReferences[] = [
-                    'reference' => $ref,
-                    'base_reference' => $baseRef,
-                    'roll_count' => $rollCount,
-                    'line' => $lineIndicator,
-                    'date' => $row['created_at']
-                ];
-            } else {
-                $references[] = [
-                    'reference' => $ref,
-                    'line' => $lineIndicator,
-                    'date' => $row['created_at']
-                ];
+            // Check if this reference has been routed by AGM
+            $isRouted = $isReferenceRouted($conn, $ref, $routedTableExists);
+            
+            // Only add if not routed
+            if (!$isRouted) {
+                // Check if this is a bundle reference (ends with -N pattern)
+                if (preg_match('/-(\d+)$/', $ref, $matches)) {
+                    $rollCount = (int)$matches[1];
+                    $baseRef = preg_replace('/-\d+$/', '', $ref);
+                    
+                    // This is an individual roll from a bundle - add it
+                    $references[] = [
+                        'reference' => $ref,
+                        'line' => $lineIndicator,
+                        'date' => $row['created_at']
+                    ];
+                } else {
+                    // Single roll reference (not a bundle)
+                    $references[] = [
+                        'reference' => $ref,
+                        'line' => $lineIndicator,
+                        'date' => $row['created_at']
+                    ];
+                }
             }
         }
     }

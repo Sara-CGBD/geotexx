@@ -60,11 +60,23 @@ try {
     // Drop columns if exist: batch_number, qc_inspector
     $cols = ['batch_number','qc_inspector'];
     foreach ($cols as $col) {
-        $check = $conn->query("SHOW COLUMNS FROM fg_entry LIKE '" . $conn->real_escape_string($col) . "'");
-        if ($check && $check->num_rows > 0) {
-            if (!$conn->query("ALTER TABLE fg_entry DROP COLUMN `{$col}`")) {
-                throw new Exception('Failed to drop column ' . $col . ': ' . $conn->error);
+        // Validate column name
+        if (!preg_match('/^[A-Za-z0-9_]+$/', $col)) continue;
+        
+        // Use prepared statement for column check
+        $checkStmt = $conn->prepare("SHOW COLUMNS FROM fg_entry LIKE ?");
+        if ($checkStmt) {
+            $checkStmt->bind_param("s", $col);
+            $checkStmt->execute();
+            $check = $checkStmt->get_result();
+            if ($check && $check->num_rows > 0) {
+                // Column name is validated, safe to use directly
+                if (!$conn->query("ALTER TABLE fg_entry DROP COLUMN `{$col}`")) {
+                    $checkStmt->close();
+                    throw new Exception('Failed to drop column ' . $col . ': ' . $conn->error);
+                }
             }
+            $checkStmt->close();
         }
     }
 

@@ -1,0 +1,120 @@
+=== QC Test Order Debug ===
+Test: Mass Per Unit Area (GSM) - ASTM D5261
+Test Standard ID: 2
+product_reference: 
+fiber_reference_no: 
+user_reference: 2.0L126JAN16-R06-GT0.9.H0.1-1
+Saved individual_roll_reference: 2.0L126JAN16-R06-GT0.9.H0.1-1
+Saved bulk reference: 2.0L126JAN16-R06-GT0.9.H0.1 to 2.0L126JAN16-R06-GT0.9.H0.1 (1 references)
+=== QC Test Order Debug ===
+Test: Thickness (Under 2kPa Pressure) - ASTM D5199
+Test Standard ID: 1
+product_reference: 
+fiber_reference_no: 
+user_reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-1
+Saved individual_roll_reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-1
+Saved bulk reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-1 to 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-4 (4 references)
+=== QC Test Order Debug ===
+Test: Thickness (Under 2kPa Pressure) - ASTM D5199
+Test Standard ID: 1
+product_reference: 
+fiber_reference_no: 
+user_reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-2
+Saved individual_roll_reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-2
+Saved bulk reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-1 to 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-4 (4 references)
+=== QC Test Order Debug ===
+Test: Thickness (Under 2kPa Pressure) - ASTM D5199
+Test Standard ID: 1
+product_reference: 
+fiber_reference_no: 
+user_reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-3
+Saved individual_roll_reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-3
+Saved bulk reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-1 to 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-4 (4 references)
+=== QC Test Order Debug ===
+Test: Thickness (Under 2kPa Pressure) - ASTM D5199
+Test Standard ID: 1
+product_reference: 
+fiber_reference_no: 
+user_reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-4
+Saved individual_roll_reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-4
+Saved bulk reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-1 to 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-4 (4 references)
+=== QC Test Order Debug ===
+Test: Mass Per Unit Area (GSM) - ASTM D5261
+Test Standard ID: 2
+product_reference: 
+fiber_reference_no: 
+user_reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-1
+Saved individual_roll_reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-1
+Saved bulk reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-1 to 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-4 (4 references)
+=== QC Test Order Debug ===
+Test: Mass Per Unit Area (GSM) - ASTM D5261
+Test Standard ID: 2
+product_reference: 
+fiber_reference_no: 
+user_reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-2
+Saved individual_roll_reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-2
+Saved bulk reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-1 to 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-4 (4 references)
+=== QC Test Order Debug ===
+Test: Mass Per Unit Area (GSM) - ASTM D5261
+Test Standard ID: 2
+product_reference: 
+fiber_reference_no: 
+user_reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-3
+Saved individual_roll_reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-3
+Saved bulk reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-1 to 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-4 (4 references)
+=== QC Test Order Debug ===
+Test: Mass Per Unit Area (GSM) - ASTM D5261
+Test Standard ID: 2
+product_reference: 
+fiber_reference_no: 
+user_reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-4
+Saved individual_roll_reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-4
+Saved bulk reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-1 to 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-4 (4 references)
+=== QC Test Order Debug ===
+Test: Thickness (Under 2kPa Pressure) - ASTM D5199
+Test Standard ID: 1
+product_reference: 
+fiber_reference_no: 
+user_reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-1
+Saved individual_roll_reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-1
+Saved bulk reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-1 to 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-4 (4 references)
+=== QC Test Order Debug ===
+Test: Thickness (Under 2kPa Pressure) - ASTM D5199
+Test Standard ID: 1
+product_reference: 
+fiber_reference_no: 
+user_reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-2
+Saved individual_roll_reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-2
+Saved bulk reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-1 to 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-4 (4 references)
+=== QC Test Order Debug ===
+Test: Thickness (Under 2kPa Pressure) - ASTM D5199
+Test Standard ID: 1
+product_reference: 
+fiber_reference_no: 
+user_reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-3
+Saved individual_roll_reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-3
+Saved bulk reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-1 to 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-4 (4 references)
+=== QC Test Order Debug ===
+Test: Thickness (Under 2kPa Pressure) - ASTM D5199
+Test Standard ID: 1
+product_reference: 
+fiber_reference_no: 
+user_reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-4
+Saved individual_roll_reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-4
+Saved bulk reference: 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-1 to 3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-4 (4 references)
+=== QC Test Order Debug ===
+Test: Thickness (Under 2kPa Pressure) - ASTM D5199
+Test Standard ID: 1
+product_reference: 
+fiber_reference_no: 
+user_reference: 3.3L126JAN31- R03- GT0.9H0.1- H.3% J.20%-1
+Saved individual_roll_reference: 3.3L126JAN31- R03- GT0.9H0.1- H.3% J.20%-1
+Saved bulk reference: 3.3L126JAN31- R03- GT0.9H0.1- H.3% J.20% to 3.3L126JAN31- R03- GT0.9H0.1- H.3% J.20% (1 references)
+=== QC Test Order Debug ===
+Test: Mass Per Unit Area (GSM) - ASTM D5261
+Test Standard ID: 2
+product_reference: 
+fiber_reference_no: 
+user_reference: 3.3L126JAN31- R03- GT0.9H0.1- H.3% J.20%-1
+Saved individual_roll_reference: 3.3L126JAN31- R03- GT0.9H0.1- H.3% J.20%-1
+Saved bulk reference: 3.3L126JAN31- R03- GT0.9H0.1- H.3% J.20% to 3.3L126JAN31- R03- GT0.9H0.1- H.3% J.20% (1 references)

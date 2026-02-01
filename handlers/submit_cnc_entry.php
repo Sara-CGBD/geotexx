@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 session_start();
 require_once '../config/security_config.php';
 
@@ -79,15 +79,23 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
         $check_stmt->execute();
         $result = $check_stmt->get_result();
         if ($result->num_rows > 0) {
-            // ID already exists, generate a new one
+            // ID already exists, generate a new one - using prepared statement
             $current_date = date('Y-m-d');
-            $last_cnc = $conn->query("SELECT MAX(CAST(SUBSTRING(cnc_id, -3) AS UNSIGNED)) as last_num FROM cnc_entries WHERE DATE(date_time) = '$current_date'");
-            $next_cnc_number = 1;
-            if ($last_cnc && $last_cnc->num_rows > 0) {
-                $row = $last_cnc->fetch_assoc();
-                if ($row['last_num']) {
-                    $next_cnc_number = $row['last_num'] + 1;
+            $last_cnc_stmt = $conn->prepare("SELECT MAX(CAST(SUBSTRING(cnc_id, -3) AS UNSIGNED)) as last_num FROM cnc_entries WHERE DATE(date_time) = ?");
+            if ($last_cnc_stmt) {
+                $last_cnc_stmt->bind_param("s", $current_date);
+                $last_cnc_stmt->execute();
+                $last_cnc_result = $last_cnc_stmt->get_result();
+                $next_cnc_number = 1;
+                if ($last_cnc_result && $last_cnc_result->num_rows > 0) {
+                    $row = $last_cnc_result->fetch_assoc();
+                    if ($row['last_num']) {
+                        $next_cnc_number = $row['last_num'] + 1;
+                    }
                 }
+                $last_cnc_stmt->close();
+            } else {
+                $next_cnc_number = 1;
             }
             $cnc_id = "CNC" . date('Ymd') . str_pad($next_cnc_number, 3, '0', STR_PAD_LEFT);
         }

@@ -35,30 +35,44 @@ try {
     $gsmCount = 0;
     $lcCount = 0;
     
-    // Auto-approve GSM checks
+    // Auto-approve GSM checks - using prepared statement for security
     if ($testType === 'gsm' || $testType === 'both') {
-        $gsmResult = $conn->query("
+        $gsmStmt = $conn->prepare("
             UPDATE daily_gsm_checks 
             SET status = 'approved', 
-                approved_by = '" . $conn->real_escape_string($approvedBy) . "', 
-                approved_at = '" . $approvedAt . "', 
+                approved_by = ?, 
+                approved_at = ?, 
                 auto_approved = 1 
             WHERE status = 'pending' AND (auto_approved = 0 OR auto_approved IS NULL)
         ");
-        $gsmCount = $conn->affected_rows;
+        if ($gsmStmt) {
+            $gsmStmt->bind_param("ss", $approvedBy, $approvedAt);
+            $gsmStmt->execute();
+            $gsmCount = $conn->affected_rows;
+            $gsmStmt->close();
+        } else {
+            $gsmCount = 0;
+        }
     }
     
-    // Auto-approve length calibrations
+    // Auto-approve length calibrations - using prepared statement for security
     if ($testType === 'length_calibration' || $testType === 'both') {
-        $lcResult = $conn->query("
+        $lcStmt = $conn->prepare("
             UPDATE length_calibrations 
             SET status = 'approved', 
-                approved_by = '" . $conn->real_escape_string($approvedBy) . "', 
-                approved_at = '" . $approvedAt . "', 
+                approved_by = ?, 
+                approved_at = ?, 
                 auto_approved = 1 
             WHERE status = 'pending' AND (auto_approved = 0 OR auto_approved IS NULL)
         ");
-        $lcCount = $conn->affected_rows;
+        if ($lcStmt) {
+            $lcStmt->bind_param("ss", $approvedBy, $approvedAt);
+            $lcStmt->execute();
+            $lcCount = $conn->affected_rows;
+            $lcStmt->close();
+        } else {
+            $lcCount = 0;
+        }
     }
     
     echo json_encode([

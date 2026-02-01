@@ -95,10 +95,16 @@ try {
         }
     }
     
-    // CNC cutting batch is only for bags, not for rolls
+    // CNC cutting batch is only for bags, not for rolls (store as string, never cast to int)
     $cncCuttingBatch = '';
+    $cncCuttingBatchForLookup = ''; // batch part only, e.g. CW-01 — fg_received_entry stores this
     if ($deliveryProductType === 'bag') {
-        $cncCuttingBatch = trim($_POST['cnc_cutting_batch'] ?? '');
+        $cncRaw = trim($_POST['cnc_cutting_batch'] ?? '');
+        $cncCuttingBatch = $cncRaw;
+        $cncCuttingBatchForLookup = (strpos($cncRaw, '||') !== false) ? trim(explode('||', $cncRaw)[0]) : $cncRaw;
+        if ($cncCuttingBatchForLookup === '0') {
+            $cncCuttingBatchForLookup = '';
+        }
         // Fetch bag_size from fg_entry table only (same as FG Entry form)
         if ($cncCuttingBatch !== '') {
             $feCol = $conn->query("SHOW COLUMNS FROM fg_entry LIKE 'bag_size'");
@@ -196,64 +202,70 @@ try {
     $rollReferencesData = [];
     
     if ($deliveryProductType === 'bag') {
-        // For bags, calculate remaining quantity from branding entries
-        // Check if is_deleted column exists in branding_entries
-        $isDeletedCheck = $conn->query("SHOW COLUMNS FROM branding_entries LIKE 'is_deleted'");
-        $hasIsDeleted = ($isDeletedCheck && $isDeletedCheck->num_rows > 0);
-        
-        // Get total print_qty from branding entries for this CNC batch
-        $query = "SELECT 
-                    SUM(COALESCE(print_qty, 0)) as total_print_qty
-                  FROM branding_entries
-                  WHERE cnc_cutting_batch = ?";
-        
-        if ($hasIsDeleted) {
-            $query .= " AND (is_deleted = 0 OR is_deleted IS NULL)";
+        // Bags: received and delivered must be per (batch, bag_size) so remaining_quantity is correct
+        // Match by batch part + bag_size (fg_received_entry: cnc_cutting_batch e.g. CW-01, bag_size e.g. 1150mmX900mm)
+        $hasReceivedBagSize = $conn->query("SHOW COLUMNS FROM fg_received_entry LIKE 'bag_size'")->num_rows > 0;
+        $receivedSql = "SELECT COALESCE(SUM(received_quantity), 0) as total_received
+                          FROM fg_received_entry
+                          WHERE product_type = 'bag'
+                            AND TRIM(COALESCE(cnc_cutting_batch,'')) = ?
+                            AND TRIM(COALESCE(cnc_cutting_batch,'')) != ''
+                            AND TRIM(COALESCE(cnc_cutting_batch,'')) != '0'";
+        if ($hasReceivedBagSize) {
+            $receivedSql .= " AND TRIM(COALESCE(bag_size,'')) = ?";
         }
-        
-        $brandingCheck = $conn->prepare($query);
-        $brandingCheck->bind_param('s', $cncCuttingBatch);
-        $brandingCheck->execute();
-        $brandingResult = $brandingCheck->get_result();
-        
-        if ($brandingResult->num_rows === 0) {
-            header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode('No branding entries found for this CNC cutting batch!'));
-            $brandingCheck->close();
-            exit();
+        $receivedCheck = $conn->prepare($receivedSql);
+        if ($hasReceivedBagSize) {
+            $receivedCheck->bind_param('ss', $cncCuttingBatchForLookup, $bagSize);
+        } else {
+            $receivedCheck->bind_param('s', $cncCuttingBatchForLookup);
         }
-        
-        $brandingData = $brandingResult->fetch_assoc();
-        $totalPrintQty = (float)$brandingData['total_print_qty'];
-        $brandingCheck->close();
-        
-        // Get total delivered quantity for this CNC batch
-        $deliveredCheck = $conn->prepare("SELECT 
-                                            SUM(COALESCE(delivery_quantity, 0)) as total_delivered
-                                          FROM fg_deliveries
-                                          WHERE cnc_cutting_batch = ?");
-        $deliveredCheck->bind_param('s', $cncCuttingBatch);
+        $receivedCheck->execute();
+        $receivedResult = $receivedCheck->get_result();
+        $receivedRow = $receivedResult ? $receivedResult->fetch_assoc() : null;
+        $totalReceived = (float)($receivedRow['total_received'] ?? 0);
+        $receivedCheck->close();
+
+        // Delivered so far for this (batch, bag_size) only
+        $hasDeliveredBagSize = $conn->query("SHOW COLUMNS FROM fg_deliveries LIKE 'bag_size'")->num_rows > 0;
+        $deliveredSql = "SELECT COALESCE(SUM(delivery_quantity), 0) as total_delivered
+                          FROM fg_deliveries
+                          WHERE (TRIM(COALESCE(cnc_cutting_batch,'')) = ? OR TRIM(COALESCE(cnc_cutting_batch,'')) LIKE CONCAT(?, '||%'))
+                            AND (delivery_product_type = 'bag' OR delivery_product_type IS NULL OR delivery_product_type = '')";
+        if ($hasDeliveredBagSize) {
+            $deliveredSql .= " AND TRIM(COALESCE(bag_size,'')) = ?";
+        }
+        $deliveredCheck = $conn->prepare($deliveredSql);
+        if ($hasDeliveredBagSize) {
+            $deliveredCheck->bind_param('sss', $cncCuttingBatchForLookup, $cncCuttingBatchForLookup, $bagSize);
+        } else {
+            $deliveredCheck->bind_param('ss', $cncCuttingBatchForLookup, $cncCuttingBatchForLookup);
+        }
         $deliveredCheck->execute();
         $deliveredResult = $deliveredCheck->get_result();
         $deliveredData = $deliveredResult->fetch_assoc();
         $totalDelivered = (float)($deliveredData['total_delivered'] ?? 0);
         $deliveredCheck->close();
-        
-        $remainingQty = $totalPrintQty - $totalDelivered;
-        $passedQty = $totalPrintQty;
+
+        $remainingQty = $totalReceived - $totalDelivered;
+        $passedQty = $totalReceived;
+
+        // If fg_received_entry has no received quantity for this batch, do not allow submit
+        if ($totalReceived <= 0) {
+            $batchDisplay = $cncCuttingBatchForLookup !== '' ? $cncCuttingBatchForLookup : $cncCuttingBatch;
+            header("Location: ../forms/fg_delivery_entry.php?error=" . urlencode('No stock available for delivery!\n\nReason:\n• No FG Received Entry found for this CNC batch with Received Quantity > 0\n\nSolution:\n1. In FG Received Entry form, create an entry for CNC batch: ' . $batchDisplay . ' with Received Quantity > 0\n2. Then try delivery again'));
+            exit();
+        }
+
         $actualWeight = 0;
         $productType = 'bag';
         $deliveredQty = $totalDelivered;
-        $refWeightKg = 0; // Bags don't have weight_kg
-        $refAreaSqm = 0; // Bags don't have area_sqm
-        
-        // Set reference_number to empty for bags (not used)
+        $refWeightKg = 0;
+        $refAreaSqm = 0;
         $referenceNumber = '';
-        
-        // For bags, we don't need fg_entry_id, set to NULL
         if (empty($fgEntryId)) {
             $fgEntryId = null;
         }
-        
     } else {
         // For rolls, expand references first (handles comma-separated and ranges)
         $referenceNumber = trim($referenceNumber);
@@ -418,6 +430,7 @@ try {
         bag_size VARCHAR(50),
         packaging_type VARCHAR(50),
         delivery_quantity DECIMAL(10,2) NOT NULL,
+        remaining_quantity DECIMAL(10,2) DEFAULT NULL,
         weight_kg DECIMAL(10,2) DEFAULT NULL,
         area_sqm DECIMAL(10,2) DEFAULT NULL,
         client_id INT,
@@ -473,14 +486,17 @@ try {
     if (!in_array('delivery_quantity_unit', $existingDeliveryCols)) {
         $conn->query("ALTER TABLE fg_deliveries ADD COLUMN delivery_quantity_unit VARCHAR(10) DEFAULT 'kg' AFTER delivery_quantity");
     }
+    if (!in_array('remaining_quantity', $existingDeliveryCols)) {
+        $conn->query("ALTER TABLE fg_deliveries ADD COLUMN remaining_quantity DECIMAL(10,2) DEFAULT NULL AFTER delivery_quantity");
+    }
     
-    // Prepare INSERT statement
+    // Prepare INSERT statement (remaining_quantity = received - total_delivered, stored in DB)
     $stmt = $conn->prepare("INSERT INTO fg_deliveries 
         (delivery_id, fg_entry_id, reference_number, cnc_cutting_batch, delivery_date, shift, 
-         challan_no, truck_no, destination, bag_size, packaging_type, delivery_quantity, 
+         challan_no, truck_no, destination, bag_size, packaging_type, delivery_quantity, remaining_quantity,
          delivery_quantity_unit, weight_kg, area_sqm, delivery_product_type, delivery_roll_entry_type, client_id, client_name, 
          unit_price, total_cost, remarks, delivered_by, delivered_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
     
     $insertedCount = 0;
     $totalDeliveredQty = 0;
@@ -507,10 +523,12 @@ try {
             
             // Calculate cost for this reference
             $refTotalCost = $refDeliveryQty * $unitPrice;
+            // Remaining quantity (from fg_received_entry - deliveries) stored in DB
+            $refRemainingQty = $refData['remaining_quantity'] - $refDeliveryQty;
             
-            // Bind parameters for this reference (24 params)
+            // Bind parameters for this reference (25 params)
             $stmt->bind_param(
-                'sissssssssssdsddssisddsss',  // 24 chars: s,i,10×s, d,s,d,d, s,s,i,s,d,d,s,s,s
+                'sisssssssssddsddssisddsss',  // 25: s,i,9×s, d,d,s,d,d, s,s,i,s,d,d,s,s,s
                 $currentDeliveryId,        // 1. s - delivery_id
                 $refFgEntryId,             // 2. i - fg_entry_id
                 $refReferenceNumber,       // 3. s - reference_number
@@ -523,18 +541,19 @@ try {
                 $bagSize,                  // 10. s - bag_size (empty for rolls)
                 $packagingType,            // 11. s - packaging_type (empty for rolls)
                 $refDeliveryQty,           // 12. d - delivery_quantity
-                $deliveryQuantityUnit,     // 13. s - delivery_quantity_unit (kg or sqm)
-                $refWeightKg,              // 14. d - weight_kg
-                $refAreaSqm,               // 15. d - area_sqm
-                $deliveryProductType,      // 16. s - delivery_product_type
-                $deliveryRollEntryType,    // 17. s - delivery_roll_entry_type
-                $clientId,                 // 18. i - client_id
-                $clientName,               // 19. s - client_name
-                $unitPrice,                // 20. d - unit_price
-                $refTotalCost,             // 21. d - total_cost
-                $remarks,                  // 22. s - remarks
-                $deliveredBy,              // 23. s - delivered_by
-                $deliveredAt              // 24. s - delivered_at
+                $refRemainingQty,           // 13. d - remaining_quantity (received - total delivered)
+                $deliveryQuantityUnit,     // 14. s - delivery_quantity_unit (kg or sqm)
+                $refWeightKg,              // 15. d - weight_kg
+                $refAreaSqm,               // 16. d - area_sqm
+                $deliveryProductType,      // 17. s - delivery_product_type
+                $deliveryRollEntryType,    // 18. s - delivery_roll_entry_type
+                $clientId,                 // 19. i - client_id
+                $clientName,               // 20. s - client_name
+                $unitPrice,                // 21. d - unit_price
+                $refTotalCost,             // 22. d - total_cost
+                $remarks,                  // 23. s - remarks
+                $deliveredBy,              // 24. s - delivered_by
+                $deliveredAt               // 25. s - delivered_at
             );
             
             if ($stmt->execute()) {
@@ -595,9 +614,11 @@ try {
         // Handle nullable fg_entry_id for bags - use 0 for bags, actual ID for rolls
         $fgEntryIdValue = ($deliveryProductType === 'bag' && (empty($fgEntryId) || $fgEntryId == 0)) ? null : (int)$fgEntryId;
         $fgEntryIdForBind = ($fgEntryIdValue === null) ? 0 : (int)$fgEntryIdValue;
+        // Remaining quantity = received (fg_received_entry) - total delivered (fg_deliveries), stored in DB
+        $bagRemainingQty = $remainingQty - $deliveryQty;
         
         $stmt->bind_param(
-            'sisssssssssdsddssisddsss',
+            'sisssssssssddsddssisddsss',
             $deliveryId,              // 1. s - delivery_id
             $fgEntryIdForBind,        // 2. i - fg_entry_id
             $referenceNumber,         // 3. s - reference_number
@@ -610,18 +631,19 @@ try {
             $bagSize,                 // 10. s - bag_size
             $packagingType,           // 11. s - packaging_type
             $deliveryQty,             // 12. d - delivery_quantity
-            $deliveryQuantityUnit,    // 13. s - delivery_quantity_unit
-            $refWeightKg,             // 14. d - weight_kg
-            $refAreaSqm,              // 15. d - area_sqm
-            $deliveryProductType,     // 16. s - delivery_product_type
-            $deliveryRollEntryType,   // 17. s - delivery_roll_entry_type
-            $clientId,                // 18. i - client_id
-            $clientName,              // 19. s - client_name
-            $unitPrice,               // 20. d - unit_price
-            $totalCost,               // 21. d - total_cost
-            $remarks,                 // 22. s - remarks
-            $deliveredBy,             // 23. s - delivered_by
-            $deliveredAt              // 24. s - delivered_at
+            $bagRemainingQty,         // 13. d - remaining_quantity (received - total delivered)
+            $deliveryQuantityUnit,    // 14. s - delivery_quantity_unit
+            $refWeightKg,             // 15. d - weight_kg
+            $refAreaSqm,              // 16. d - area_sqm
+            $deliveryProductType,     // 17. s - delivery_product_type
+            $deliveryRollEntryType,   // 18. s - delivery_roll_entry_type
+            $clientId,                // 19. i - client_id
+            $clientName,              // 20. s - client_name
+            $unitPrice,               // 21. d - unit_price
+            $totalCost,               // 22. d - total_cost
+            $remarks,                 // 23. s - remarks
+            $deliveredBy,             // 24. s - delivered_by
+            $deliveredAt              // 25. s - delivered_at
         );
         
         if (!$stmt->execute()) {
@@ -631,9 +653,14 @@ try {
         $insertId = $conn->insert_id;
         $stmt->close();
         
-        // If fg_entry_id should be NULL for bags, update it after insert
+        // If fg_entry_id should be NULL for bags, update it after insert - using prepared statement
         if ($fgEntryIdValue === null && $insertId) {
-            $conn->query("UPDATE fg_deliveries SET fg_entry_id = NULL WHERE id = $insertId");
+            $updateStmt = $conn->prepare("UPDATE fg_deliveries SET fg_entry_id = NULL WHERE id = ?");
+            if ($updateStmt) {
+                $updateStmt->bind_param("i", $insertId);
+                $updateStmt->execute();
+                $updateStmt->close();
+            }
         }
         
         // For bags, calculate new remaining

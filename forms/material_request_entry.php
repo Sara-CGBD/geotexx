@@ -247,7 +247,7 @@ $materialTypes = ['PP Stable Fiber','PSF Fiber'];
 
     <div class="form-group">
       <label>Material Required Quantity (KG) <span style="color:red;">*</span></label>
-      <input type="number" name="requiredQuantity" step="0.01" min="0.01" placeholder="Enter required quantity in kg" required>
+      <input type="number" name="requiredQuantity" step="1" min="0.01" placeholder="Enter required quantity in kg (increments of 1)" required>
       <small class="note">Requested quantities can be fulfilled even if store stock is lower.</small>
     </div>
 
@@ -287,7 +287,7 @@ function updateSelectionSummary() {
   const summaryContent = document.getElementById('summaryContent');
   if (manufacturer && materialType && quantity) {
     summaryBox.style.display = 'block';
-    summaryContent.innerHTML = `Manufacturer: <strong>${manufacturer}</strong><br>
+      summaryContent.innerHTML = `Manufacturer: <strong>${manufacturer}</strong><br>
       Material: <strong>${materialType}</strong><br>
       Quantity: <strong>${parseFloat(quantity).toFixed(2)} kg</strong>`;
   } else {

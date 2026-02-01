@@ -188,67 +188,122 @@ if ($hasRqcRef) {
     }
 }
 
-// Performance: Defer reference loading - will load asynchronously after page render
-// Fetch reference numbers from fiber_to_roll_entry with material type and available weight
-// ONLY if BOTH Daily GSM Check AND Length Calibration tests are APPROVED
-// AND Roll QC Report is APPROVED
-// Available weight = product_amount from approved roll_qc_reports - used_in_roll_entry
-$referenceNumbers = [];
-$refRes = $conn->query("
-    SELECT 
-        ftr.id, 
-        ftr.reference_number, 
-        ftr.material_type,
-        ftr.roll_no,
-        ftr.line_no,
-        ftr.total_weight as original_weight,
-        COALESCE((
-            SELECT SUM(re2.total_weight)
-            FROM roll_entry re2
-            WHERE ftr.reference_number COLLATE {$collation} = re2.reference_number COLLATE {$collation}
-               OR re2.reference_number COLLATE {$collation} LIKE CONCAT(ftr.reference_number COLLATE {$collation}, '-%')
-        ), 0) as used_in_roll_entry,
-        COALESCE((
-            SELECT rqc.product_amount
-            FROM roll_qc_reports rqc
-            WHERE rqc.reference_number COLLATE {$collation} = ftr.reference_number COLLATE {$collation}
-              AND (rqc.roll_no = ftr.roll_no OR (rqc.roll_no IS NULL AND ftr.roll_no IS NULL))
-              {$rqcWhereClause}
-            ORDER BY rqc.created_at DESC
-            LIMIT 1
-        ), 0) as qc_approved_amount,
-        (COALESCE((
-            SELECT rqc.product_amount
-            FROM roll_qc_reports rqc
-            WHERE rqc.reference_number COLLATE {$collation} = ftr.reference_number COLLATE {$collation}
-              AND (rqc.roll_no = ftr.roll_no OR (rqc.roll_no IS NULL AND ftr.roll_no IS NULL))
-              {$rqcWhereClause}
-            ORDER BY rqc.created_at DESC
-            LIMIT 1
-        ), 0) - 
-         COALESCE((
-            SELECT SUM(re2.total_weight)
-            FROM roll_entry re2
-            WHERE ftr.reference_number COLLATE {$collation} = re2.reference_number COLLATE {$collation}
-               OR re2.reference_number COLLATE {$collation} LIKE CONCAT(ftr.reference_number COLLATE {$collation}, '-%')
-        ), 0)) as available_weight
-    FROM fiber_to_roll_entry ftr
-    WHERE ftr.reference_number IS NOT NULL
-    {$gsmExistsClause}
-    {$lcExistsClause}
-    {$rqcExistsClause}
-    HAVING available_weight > 0.01
-    ORDER BY ftr.created_at DESC
-");
-if ($refRes) {
-    while ($r = $refRes->fetch_assoc()) $referenceNumbers[] = $r;
+// Reference numbers are fetched from gsm_roll_entry (GSM and roll input data table), not fiber_to_roll_entry
+$gsmTableCheck = $conn->query("SHOW TABLES LIKE 'gsm_roll_entry'");
+$gsmTableExists = ($gsmTableCheck && $gsmTableCheck->num_rows > 0);
+
+// Build EXISTS clauses for gsm_roll_entry alias 'g' (same logic as ftr but using g.reference)
+$gsmExistsClauseG = '';
+$lcExistsClauseG = '';
+$rqcExistsClauseG = '';
+if ($gsmTableExists) {
+    $hasGsmRollG = $colExists($conn, 'daily_gsm_checks', 'roll_no');
+    $hasGsmStatusG = $colExists($conn, 'daily_gsm_checks', 'status');
+    if ($hasGsmRollG && $hasGsmStatusG) {
+        $gsmRefMatchG = $hasGsmRef ? "AND (dgc.reference_number COLLATE {$collation} = g.reference COLLATE {$collation} OR dgc.reference_number IS NULL)" : '';
+        $gsmExistsClauseG = "
+    AND EXISTS (
+        SELECT 1 FROM daily_gsm_checks dgc 
+        WHERE dgc.roll_no = g.roll_no 
+        {$gsmRefMatchG}
+        AND LOWER(TRIM(dgc.status)) = 'approved'
+    )";
+    }
+    $hasLcRollG = $colExists($conn, 'length_calibrations', 'roll_no');
+    $hasLcStatusG = $colExists($conn, 'length_calibrations', 'status');
+    if ($hasLcRollG && $hasLcStatusG) {
+        $lcRefMatchG = $hasLcRef ? "AND (lc.reference_number COLLATE {$collation} = g.reference COLLATE {$collation} OR lc.reference_number IS NULL)" : '';
+        $lcExistsClauseG = "
+    AND EXISTS (
+        SELECT 1 FROM length_calibrations lc 
+        WHERE lc.roll_no = g.roll_no 
+        {$lcRefMatchG}
+        AND LOWER(TRIM(lc.status)) = 'approved'
+    )";
+    }
+    if ($hasRqcRef) {
+        if ($hasRqcApproved && $hasRqcOverallStatus) {
+            $rqcExistsClauseG = "
+        AND EXISTS (
+            SELECT 1 FROM roll_qc_reports rqc 
+            WHERE rqc.reference_number COLLATE {$collation} = g.reference COLLATE {$collation}
+            AND (rqc.approved = 1 OR rqc.overall_status IN ('approved', 'Done'))
+        )";
+        } elseif ($hasRqcApproved) {
+            $rqcExistsClauseG = "
+        AND EXISTS (
+            SELECT 1 FROM roll_qc_reports rqc 
+            WHERE rqc.reference_number COLLATE {$collation} = g.reference COLLATE {$collation}
+            AND rqc.approved = 1
+        )";
+        } elseif ($hasRqcOverallStatus) {
+            $rqcExistsClauseG = "
+        AND EXISTS (
+            SELECT 1 FROM roll_qc_reports rqc 
+            WHERE rqc.reference_number COLLATE {$collation} = g.reference COLLATE {$collation}
+            AND rqc.overall_status IN ('approved', 'Done')
+        )";
+        }
+    }
 }
 
-// Also fetch references from gsm_roll_entry that have approved Roll QC Reports
-// These are references that passed through GSM and Roll Entry and have been QC approved
-$tableCheck = $conn->query("SHOW TABLES LIKE 'gsm_roll_entry'");
-$gsmTableExists = ($tableCheck && $tableCheck->num_rows > 0);
+// Fetch reference numbers from gsm_roll_entry with available weight
+// ONLY if BOTH Daily GSM Check AND Length Calibration tests are APPROVED AND Roll QC Report is APPROVED
+$referenceNumbers = [];
+if ($gsmTableExists) {
+    $refRes = $conn->query("
+        SELECT 
+            g.id, 
+            g.reference as reference_number, 
+            NULL as material_type,
+            g.roll_no,
+            g.line_number as line_no,
+            COALESCE(g.total_weight, 0) as original_weight,
+            COALESCE((
+                SELECT SUM(re2.total_weight)
+                FROM roll_entry re2
+                WHERE g.reference COLLATE {$collation} = re2.reference_number COLLATE {$collation}
+                   OR re2.reference_number COLLATE {$collation} LIKE CONCAT(g.reference COLLATE {$collation}, '-%')
+            ), 0) as used_in_roll_entry,
+            COALESCE((
+                SELECT rqc.product_amount
+                FROM roll_qc_reports rqc
+                WHERE rqc.reference_number COLLATE {$collation} = g.reference COLLATE {$collation}
+                  AND (rqc.roll_no = g.roll_no OR (rqc.roll_no IS NULL AND g.roll_no IS NULL))
+                  {$rqcWhereClause}
+                ORDER BY rqc.created_at DESC
+                LIMIT 1
+            ), 0) as qc_approved_amount,
+            (COALESCE((
+                SELECT rqc.product_amount
+                FROM roll_qc_reports rqc
+                WHERE rqc.reference_number COLLATE {$collation} = g.reference COLLATE {$collation}
+                  AND (rqc.roll_no = g.roll_no OR (rqc.roll_no IS NULL AND g.roll_no IS NULL))
+                  {$rqcWhereClause}
+                ORDER BY rqc.created_at DESC
+                LIMIT 1
+            ), 0) - 
+             COALESCE((
+                SELECT SUM(re2.total_weight)
+                FROM roll_entry re2
+                WHERE g.reference COLLATE {$collation} = re2.reference_number COLLATE {$collation}
+                   OR re2.reference_number COLLATE {$collation} LIKE CONCAT(g.reference COLLATE {$collation}, '-%')
+            ), 0)) as available_weight
+        FROM gsm_roll_entry g
+        WHERE g.reference IS NOT NULL
+        AND g.reference != ''
+        {$gsmExistsClauseG}
+        {$lcExistsClauseG}
+        {$rqcExistsClauseG}
+        HAVING available_weight > 0.01
+        ORDER BY g.created_at DESC
+    ");
+    if ($refRes) {
+        while ($r = $refRes->fetch_assoc()) $referenceNumbers[] = $r;
+    }
+}
 
+// Also fetch references from gsm_roll_entry that have approved Roll QC Reports (no GSM/LC requirement)
 if ($gsmTableExists && $hasRqcRef) {
     // Build WHERE clause for approved Roll QC Reports
     $gsmRqcWhereClause = '';
@@ -316,7 +371,7 @@ if ($gsmTableExists && $hasRqcRef) {
         
         if ($gsmRefRes) {
             while ($r = $gsmRefRes->fetch_assoc()) {
-                // Check if this reference is already in the list (from fiber_to_roll_entry)
+                // Check if this reference is already in the list (from first gsm_roll_entry query)
                 $exists = false;
                 foreach ($referenceNumbers as $existing) {
                     if ($existing['reference_number'] === $r['reference_number']) {
@@ -324,7 +379,7 @@ if ($gsmTableExists && $hasRqcRef) {
                         break;
                     }
                 }
-                // Only add if it doesn't already exist
+                // Only add if it doesn't already exist (from the first gsm_roll_entry query)
                 if (!$exists) {
                     $referenceNumbers[] = $r;
                 }
@@ -337,14 +392,24 @@ if ($gsmTableExists && $hasRqcRef) {
 
 // Generate next Entry ID
 $current_date = date('Y-m-d');
-$last_entry = $conn->query("SELECT MAX(CAST(SUBSTRING(entry_id, 13) AS UNSIGNED)) as last_num FROM roll_entry 
-                            WHERE DATE(date_time) = '$current_date' AND entry_id LIKE 'RE-" . date('Ymd') . "-%'");
+$date_prefix = date('Ymd');
+$entry_pattern = 'RE-' . $date_prefix . '-%';
+
+// Use prepared statement for better reliability
+$stmt = $conn->prepare("SELECT MAX(CAST(SUBSTRING(entry_id, 13) AS UNSIGNED)) as last_num FROM roll_entry 
+                        WHERE DATE(date_time) = ? AND entry_id LIKE ?");
 $next_entry_number = 1;
-if ($last_entry && $last_entry->num_rows > 0) {
-    $l = $last_entry->fetch_assoc();
-    $next_entry_number = ($l['last_num'] ?? 0) + 1;
+if ($stmt) {
+    $stmt->bind_param("ss", $current_date, $entry_pattern);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    if ($result && $result->num_rows > 0) {
+        $l = $result->fetch_assoc();
+        $next_entry_number = ($l['last_num'] ?? 0) + 1;
+    }
+    $stmt->close();
 }
-$next_entry_id = 'RE-' . date('Ymd') . '-' . str_pad($next_entry_number, 4, '0', STR_PAD_LEFT);
+$next_entry_id = 'RE-' . $date_prefix . '-' . str_pad($next_entry_number, 4, '0', STR_PAD_LEFT);
 
 // Operator
 $operator_id = $_SESSION['user_id'];
@@ -687,7 +752,7 @@ $operator_name = $_SESSION['username'];
     <div id="dateTimeDisplay" class="summary-info"></div>
     <div id="shiftBanner" class="summary-info"></div>
 
-    <form id="rollForm" method="post" action="../handlers/submit_roll_entry.php" onsubmit="return validateAndSubmit();">
+    <form id="rollForm" method="post" action="../handlers/submit_roll_entry.php" onsubmit="return validateAndSubmit(event);" novalidate>
 
       <!-- Entry ID auto -->
       <div class="form-group">
@@ -742,8 +807,8 @@ $operator_name = $_SESSION['username'];
 
         <div class="form-group">
           <label>Number of Rolls:</label>
-          <input type="number" step="1" id="number_of_rolls_input" min="2" max="10" value="2" onchange="updateReferenceDisplay()" oninput="updateReferenceDisplay()" placeholder="Enter number of rolls (2-10)">
-          <small style="color: #666; display: block; margin-top: 5px;">How many rolls to create? (e.g., 3 will create -1, -2, -3)</small>
+          <input type="number" step="1" id="number_of_rolls_input" min="2" max="10" value="" onchange="updateReferenceDisplay()" oninput="updateReferenceDisplay()" placeholder="Enter number of rolls (2-10)" required>
+          <small style="color: #666; display: block; margin-top: 5px;">How many rolls to create? (e.g., 5 will create reference ending with -5)</small>
         </div>
 
         <div class="form-group">
@@ -861,8 +926,11 @@ $operator_name = $_SESSION['username'];
       const now = new Date();
       const utc = now.getTime() + (now.getTimezoneOffset()*60000);
       const dhaka = new Date(utc + (6*3600000));
-      document.getElementById("dateTimeDisplay").innerHTML =
-        "Date & Time: " + dhaka.toDateString() + " " + dhaka.toLocaleTimeString();
+      
+      const dateTimeDisplay = document.getElementById("dateTimeDisplay");
+      if (dateTimeDisplay) {
+        dateTimeDisplay.innerHTML = "Date & Time: " + dhaka.toDateString() + " " + dhaka.toLocaleTimeString();
+      }
 
       const yyyy = dhaka.getFullYear();
       const mm = String(dhaka.getMonth()+1).padStart(2,'0');
@@ -870,28 +938,42 @@ $operator_name = $_SESSION['username'];
       const hh = String(dhaka.getHours()).padStart(2,'0');
       const min = String(dhaka.getMinutes()).padStart(2,'0');
       const ss = String(dhaka.getSeconds()).padStart(2,'0');
-      document.getElementById("dateTime").value = `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss}`;
+      
+      const dateTimeField = document.getElementById("dateTime");
+      if (dateTimeField) {
+        dateTimeField.value = `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss}`;
+      }
 
       const h = dhaka.getHours();
-      document.getElementById("shiftBanner").innerText = "Shift: " + ((h>=8&&h<=19)?"Day":"Night");
-      updateEntryIdDisplay();
+      const shiftBanner = document.getElementById("shiftBanner");
+      if (shiftBanner) {
+        shiftBanner.innerText = "Shift: " + ((h>=8&&h<=19)?"Day":"Night");
+      }
+      
+      // Don't update Entry ID here - it's set by PHP and should only change after form submission/reload
+      // updateEntryIdDisplay(); // REMOVED - was overriding PHP-calculated Entry ID
     }
 
+    // Entry ID is now managed by PHP only - no JavaScript updates needed
+    // This function is kept for backward compatibility but should not be called automatically
     function updateEntryIdDisplay() {
-      const rollNumber = document.querySelector('input[name="roll_number"]').value || '0001';
-      const today = new Date();
-      const dateStr = today.getFullYear() + 
-                     String(today.getMonth() + 1).padStart(2, '0') + 
-                     String(today.getDate()).padStart(2, '0');
-      const entryId = 'RE-' + dateStr + '-' + String(rollNumber).padStart(4, '0');
-      document.getElementById("entryIdDisplay").value = entryId;
-      document.getElementById("entryId").value = entryId;
+      // Entry ID is set by PHP on page load and should not be modified by JavaScript
+      // Only update if there's a specific need (e.g., after fetching new ID from server)
+      // For now, do nothing to preserve PHP-calculated value
     }
 
     function updateBatchNumberDisplay() {
-      const gsm = document.getElementById('gsm').value || '';
-      const lineNo = document.getElementById('line_no').value || '';
-      const materialType = document.getElementById('material_type').value || '';
+      const gsmField = document.getElementById('gsm');
+      const lineNoField = document.getElementById('line_no');
+      const materialTypeField = document.getElementById('material_type');
+      const batchNumberDisplay = document.getElementById("batchNumberDisplay");
+      
+      if (!batchNumberDisplay) return; // Exit if batch number display doesn't exist
+      
+      const gsm = gsmField ? gsmField.value || '' : '';
+      const lineNo = lineNoField ? lineNoField.value || '' : '';
+      const materialType = materialTypeField ? materialTypeField.value || '' : '';
+      
       if (gsm && lineNo && materialType) {
         const now = new Date();
         const utc = now.getTime() + now.getTimezoneOffset()*60000;
@@ -904,11 +986,12 @@ $operator_name = $_SESSION['username'];
         const month = monthNames[shiftDate.getMonth()];
         const day = String(shiftDate.getDate()).padStart(2, '0');
         const dateStr = year + month + day;
-        const rollNumber = document.querySelector('input[name="roll_number"]').value || '1';
+        const rollNumberInput = document.querySelector('input[name="roll_number"]');
+        const rollNumber = rollNumberInput ? rollNumberInput.value || '1' : '1';
         const batchPreview = gsm + 'L' + lineNo + materialType + dateStr + rollNumber;
-        document.getElementById("batchNumberDisplay").value = batchPreview;
+        batchNumberDisplay.value = batchPreview;
       } else {
-        document.getElementById("batchNumberDisplay").value = "Auto-generated on submit";
+        batchNumberDisplay.value = "Auto-generated on submit";
       }
     }
 
@@ -970,6 +1053,28 @@ $operator_name = $_SESSION['username'];
     document.getElementById('number_of_rolls').addEventListener('change', updateSummary);
     document.getElementById('number_of_rolls_input').addEventListener('input', updateSummary);
     
+    // Add event listeners for multiple rolls mode
+    const baseRefSelect = document.getElementById('reference_number_base');
+    const numberOfRollsInput = document.getElementById('number_of_rolls_input');
+    if (baseRefSelect) {
+      baseRefSelect.addEventListener('change', updateReferenceDisplay);
+    }
+    if (numberOfRollsInput) {
+      numberOfRollsInput.addEventListener('change', updateReferenceDisplay);
+      numberOfRollsInput.addEventListener('input', updateReferenceDisplay);
+    }
+    
+    // Check if multiple rolls mode is active and update display on page load
+    setTimeout(function() {
+      const multipleRollsMode = document.getElementById('multipleRollsMode');
+      if (multipleRollsMode && multipleRollsMode.style.display !== 'none') {
+        const baseRef = baseRefSelect ? baseRefSelect.value : '';
+        if (baseRef) {
+          updateReferenceDisplay();
+        }
+      }
+    }, 200);
+    
     // Update summary on page load
     updateSummary();
     
@@ -1003,6 +1108,10 @@ $operator_name = $_SESSION['username'];
         document.getElementById('reference_number_single').value = '';
         // Set number_of_rolls to 2 for multiple mode
         document.getElementById('number_of_rolls').value = '2';
+        // Call updateReferenceDisplay if base reference is already selected
+        setTimeout(function() {
+          updateReferenceDisplay();
+        }, 100);
       } else {
         document.getElementById('singleRollMode').style.display = 'block';
         document.getElementById('multipleRollsMode').style.display = 'none';
@@ -1010,7 +1119,7 @@ $operator_name = $_SESSION['username'];
         document.getElementById('reference_number_single').setAttribute('required', 'required');
         // Reset multiple mode
         document.getElementById('reference_number_base').value = '';
-        document.getElementById('number_of_rolls_input').value = '2';
+        document.getElementById('number_of_rolls_input').value = '';
         document.getElementById('reference_number_display').value = '';
         // Set number_of_rolls to 1 for single mode
         document.getElementById('number_of_rolls').value = '1';
@@ -1065,27 +1174,55 @@ $operator_name = $_SESSION['username'];
     // Update reference for multiple rolls mode
     function updateReferenceDisplay() {
       const baseRefSelect = document.getElementById('reference_number_base');
-      const baseRef = baseRefSelect.value;
-      const numberOfRolls = parseInt(document.getElementById('number_of_rolls_input').value) || 2;
+      const refDisplayField = document.getElementById('reference_number_display');
+      const numberOfRollsInput = document.getElementById('number_of_rolls_input');
       
-      if (!baseRef) {
-        document.getElementById('reference_number_display').value = '';
+      if (!baseRefSelect || !refDisplayField || !numberOfRollsInput) {
+        console.error('Required elements not found for updateReferenceDisplay');
+        return;
+      }
+      
+      let baseRef = baseRefSelect.value;
+      const numberOfRolls = parseInt(numberOfRollsInput.value) || 0;
+      
+      if (!baseRef || baseRef === '') {
+        refDisplayField.value = '';
         document.getElementById('reference_number').value = '';
         // Clear material type selection
         const materialTypeGroup = document.querySelectorAll('#materialTypeGroup .btn');
         materialTypeGroup.forEach(btn => btn.classList.remove('selected'));
-        document.getElementById('material_type').value = '';
+        const materialTypeField = document.getElementById('material_type');
+        if (materialTypeField) materialTypeField.value = '';
         // Reset weight tracking
         availableWeight = 0;
-        document.getElementById('available_weight_text').style.display = 'none';
-        document.getElementById('weight_warning').style.display = 'none';
-        document.getElementById('total_weight').value = '';
-        document.getElementById('total_weight').max = '';
-        document.getElementById('total_area').value = '';
-        document.getElementById('actual_gsm').value = '';
+        const availableWeightText = document.getElementById('available_weight_text');
+        if (availableWeightText) availableWeightText.style.display = 'none';
+        const weightWarning = document.getElementById('weight_warning');
+        if (weightWarning) weightWarning.style.display = 'none';
+        const totalWeightField = document.getElementById('total_weight');
+        if (totalWeightField) {
+          totalWeightField.value = '';
+          totalWeightField.max = '';
+        }
+        const totalAreaField = document.getElementById('total_area');
+        if (totalAreaField) totalAreaField.value = '';
+        const actualGsmField = document.getElementById('actual_gsm');
+        if (actualGsmField) actualGsmField.value = '';
         updateSummary();
         return;
       }
+      
+      // If number of rolls is not entered, clear the display
+      if (!numberOfRolls || numberOfRolls < 2) {
+        refDisplayField.value = '';
+        document.getElementById('number_of_rolls').value = '';
+        updateSummary();
+        return;
+      }
+      
+      // Clean base reference: remove " - Available: X kg" if present
+      // The option value should be clean, but handle edge cases
+      baseRef = baseRef.split(' - Available:')[0].trim();
       
       // Get material type and available weight from selected option
       const selectedOption = baseRefSelect.options[baseRefSelect.selectedIndex];
@@ -1110,10 +1247,19 @@ $operator_name = $_SESSION['username'];
       // Update the hidden number_of_rolls field
       document.getElementById('number_of_rolls').value = numberOfRolls;
       
-      // Show display with the LAST roll number
-      // If 3 rolls selected, show reference ending with -3
-      const refWithRollNumber = `${baseRef}-${numberOfRolls}`;
-      document.getElementById('reference_number_display').value = refWithRollNumber;
+      // Generate single reference number with roll count appended
+      // If 5 rolls selected, show: baseRef-5 (not baseRef-1, baseRef-2, etc.)
+      const refDisplay = `${baseRef}-${numberOfRolls}`;
+      
+      // Set the display value
+      refDisplayField.value = refDisplay;
+      
+      // Debug logging (can be removed in production)
+      console.log('updateReferenceDisplay called:', {
+        baseRef: baseRef,
+        numberOfRolls: numberOfRolls,
+        refDisplay: refDisplay
+      });
       
       updateSummary();
     }
@@ -1274,12 +1420,25 @@ $operator_name = $_SESSION['username'];
     }
 
     function clearForm(){
-      document.getElementById("gsm").value = "";
-      document.getElementById("line_no").value = "";
       document.getElementById("material_type").value = "";
       document.getElementById("total_weight").value = "";
       document.getElementById("total_area").value = "";
       document.getElementById("actual_gsm").value = "";
+      
+      // Clear reference number selections
+      document.getElementById("reference_number_single").selectedIndex = 0;
+      document.getElementById("reference_number_base").selectedIndex = 0;
+      document.getElementById("number_of_rolls_input").value = "";
+      document.getElementById("reference_number_display").value = "";
+      document.getElementById("reference_number").value = "";
+      
+      // Clear roll size selection
+      document.querySelectorAll('#rollSizeGroup .btn').forEach(b=>b.classList.remove('selected'));
+      document.getElementById("roll_size").value = "";
+      document.getElementById("roll_size_custom").value = "";
+      document.getElementById("roll_size_custom").style.display = "none";
+      
+      // Reset project selection
       document.querySelectorAll('#projectGroup .btn').forEach(b=>b.classList.remove('selected'));
       const defaultProjectBtn = document.querySelector('#projectGroup .btn');
       if (defaultProjectBtn) {
@@ -1288,20 +1447,92 @@ $operator_name = $_SESSION['username'];
       } else {
         document.getElementById("project_id").value="";
       }
+      
+      // Reset material type selection
       document.querySelectorAll('#materialTypeGroup .btn').forEach(b=>b.classList.remove('selected'));
       document.getElementById("material_type").value="";
-      updateEntryIdDisplay();
+      
+      // Reset multiple rolls selection
+      document.querySelectorAll('#multipleRollsGroup .btn').forEach(b=>b.classList.remove('selected'));
+      document.getElementById("singleRollMode").style.display = "none";
+      document.getElementById("multipleRollsMode").style.display = "none";
+      document.getElementById("number_of_rolls").value = "1";
+      
+      // Reset weight tracking
+      availableWeight = 0;
+      const availableWeightText = document.getElementById('available_weight_text');
+      if (availableWeightText) availableWeightText.style.display = 'none';
+      const weightWarning = document.getElementById('weight_warning');
+      if (weightWarning) weightWarning.style.display = 'none';
+      
+      // Entry ID should not be updated when clearing - it's managed by PHP
+      // updateEntryIdDisplay(); // REMOVED - Entry ID is set by PHP and increments after submission
       updateBatchNumberDisplay();
       updateSummary();
     }
 
-    function validateAndSubmit(){
-      if(!document.getElementById("project_id").value){ alert("Please select a project."); return false; }
-      if(!document.getElementById("gsm").value){ alert("Please enter GSM."); return false; }
-      if(!document.getElementById("line_no").value){ alert("Please enter Line Number."); return false; }
-      if(!document.getElementById("material_type").value){ alert("Please select Material Type."); return false; }
-      if(!document.getElementById("total_weight").value){ alert("Please enter Total Weight."); return false; }
-      if(!document.getElementById("total_area").value){ alert("Please enter Total Area (sqm)."); return false; }
+    function validateAndSubmit(e){
+      console.log('validateAndSubmit called');
+      
+      // Remove required attributes from hidden fields to prevent browser validation errors
+      const singleMode = document.getElementById('singleRollMode').style.display !== 'none';
+      const multipleMode = document.getElementById('multipleRollsMode').style.display !== 'none';
+      
+      if (singleMode) {
+        // In single mode, remove required from multiple mode fields
+        const baseRefSelect = document.getElementById('reference_number_base');
+        const numberOfRollsInput = document.getElementById('number_of_rolls_input');
+        if (baseRefSelect) baseRefSelect.removeAttribute('required');
+        if (numberOfRollsInput) numberOfRollsInput.removeAttribute('required');
+      } else if (multipleMode) {
+        // In multiple mode, remove required from single mode fields
+        const singleRefSelect = document.getElementById('reference_number_single');
+        if (singleRefSelect) singleRefSelect.removeAttribute('required');
+      }
+      
+      if(!document.getElementById("project_id").value){ 
+        alert("Please select a project."); 
+        return false; 
+      }
+      if(!document.getElementById("material_type").value){ 
+        alert("Please select Material Type."); 
+        return false; 
+      }
+      if(!document.getElementById("total_weight").value){ 
+        alert("Please enter Total Weight."); 
+        return false; 
+      }
+      if(!document.getElementById("total_area").value){ 
+        alert("Please enter Total Area (sqm)."); 
+        return false; 
+      }
+      
+      // Check if reference number is selected
+      let referenceNumber = '';
+      if (singleMode) {
+        referenceNumber = document.getElementById('reference_number_single').value;
+      } else if (multipleMode) {
+        referenceNumber = document.getElementById('reference_number_display').value;
+        const numberOfRolls = parseInt(document.getElementById('number_of_rolls_input').value) || 0;
+        if (!numberOfRolls || numberOfRolls < 2) {
+          alert("Please enter Number of Rolls (2-10) for multiple rolls mode.");
+          return false;
+        }
+      } else {
+        alert("Please select Single Roll or Multiple Rolls mode and select a Reference Number.");
+        return false;
+      }
+      
+      if (!referenceNumber || referenceNumber === '') {
+        alert("Please select a Reference Number.");
+        return false;
+      }
+      
+      // Make sure hidden reference_number field is set
+      const hiddenRefField = document.getElementById('reference_number');
+      if (!hiddenRefField.value) {
+        hiddenRefField.value = referenceNumber;
+      }
       
       // Validate weight doesn't exceed available
       const totalWeight = parseFloat(document.getElementById('total_weight').value) || 0;
@@ -1311,12 +1542,41 @@ $operator_name = $_SESSION['username'];
         return false;
       }
       
+      console.log('Validation passed, submitting form');
+      
+      // Ensure form can submit - check if form exists
+      const form = document.getElementById('rollForm');
+      if (!form) {
+        console.error('Form not found!');
+        alert('Error: Form not found. Please refresh the page.');
+        return false;
+      }
+      
+      console.log('Form found, form action:', form.action);
+      console.log('Form method:', form.method);
+      console.log('Allowing form submission...');
+      
+      // Return true to allow form submission
       return true;
     }
     
     // Default material type selection on page load
     window.addEventListener('DOMContentLoaded', function() {
       setMaterialTypeSelection('PP Stable Fiber');
+      
+      // Ensure submit button works - but let form onsubmit handle it
+      // The form's onsubmit="return validateAndSubmit(event)" will handle validation
+      
+      // Ensure clear button works
+      const clearBtn = document.querySelector('.clear-btn');
+      if (clearBtn) {
+        clearBtn.addEventListener('click', function(e) {
+          console.log('Clear button clicked');
+          e.preventDefault();
+          clearForm();
+          return false;
+        });
+      }
     });
   </script>
 

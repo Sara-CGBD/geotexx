@@ -38,8 +38,53 @@ $reporter_name = $_SESSION['username'];
 
 // Fetch reference numbers from roll_entry that don't have UV reports yet - support bundles and line detection
 // Tests are done AFTER roll entry submission
+// Exclude references that have been routed by AGM
 $references = [];
 $bundleReferences = [];
+
+// Helper function to check if a reference has been routed
+$isReferenceRouted = function($conn, $reference) {
+    // Check if routed table exists
+    $routedTableExists = $conn->query("SHOW TABLES LIKE 'routed'")->num_rows > 0;
+    if (!$routedTableExists) {
+        return false;
+    }
+    
+    // Check exact match first
+    $stmt = $conn->prepare("SELECT 1 FROM routed WHERE reference_number = ? LIMIT 1");
+    if ($stmt) {
+        $stmt->bind_param('s', $reference);
+        $stmt->execute();
+        $result = $stmt->get_result();
+        $routed = ($result && $result->num_rows > 0);
+        $stmt->close();
+        if ($routed) return true;
+    }
+    
+    // Check prefix match (stored ref is prefix of query ref)
+    $stmt = $conn->prepare("SELECT 1 FROM routed WHERE ? LIKE CONCAT(reference_number, '%') LIMIT 1");
+    if ($stmt) {
+        $stmt->bind_param('s', $reference);
+        $stmt->execute();
+        $result = $stmt->get_result();
+        $routed = ($result && $result->num_rows > 0);
+        $stmt->close();
+        if ($routed) return true;
+    }
+    
+    // Check prefix match (query ref is prefix of stored ref)
+    $stmt = $conn->prepare("SELECT 1 FROM routed WHERE reference_number LIKE CONCAT(?, '%') LIMIT 1");
+    if ($stmt) {
+        $stmt->bind_param('s', $reference);
+        $stmt->execute();
+        $result = $stmt->get_result();
+        $routed = ($result && $result->num_rows > 0);
+        $stmt->close();
+        return $routed;
+    }
+    
+    return false;
+};
 
 $refQuery = $conn->query("
     SELECT DISTINCT re.reference_number, MAX(re.date_time) as created_at
@@ -57,6 +102,11 @@ $refQuery = $conn->query("
 if ($refQuery) {
     while ($row = $refQuery->fetch_assoc()) {
         $ref = $row['reference_number'];
+        
+        // Check if this reference has been routed by AGM - skip if routed
+        if ($isReferenceRouted($conn, $ref)) {
+            continue;
+        }
         
         // Detect line number (L1 or L2) from reference
         $lineIndicator = '';
@@ -1261,6 +1311,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['wf_action'])) {
               Clear
             </button>
           </div>
+          
+          <!-- Reference Test Status Display (shown when Apply is clicked) -->
+          <div id="uv_reference_test_status_container" style="display:none; margin-top:15px; padding:0; background:#ffffff; border:1px solid #e0e0e0; border-radius:8px; box-shadow:0 1px 4px rgba(0,0,0,0.08); max-width:550px; margin-left:auto; margin-right:auto;">
+            <div style="padding:12px 16px; background:linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius:8px 8px 0 0; color:white;">
+              <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+                <div style="display:flex; align-items:center; gap:8px;">
+                  <i class="fas fa-list-check" style="font-size:16px;"></i>
+                  <h3 style="margin:0; font-size:14px; font-weight:600;" id="uv_reference_status_title">Test Status</h3>
+                </div>
+                <div style="font-size:11px; opacity:0.95; font-weight:500;" id="uv_reference_status_summary"></div>
+              </div>
+            </div>
+            <div id="uv_reference_test_status_list" style="padding:12px; max-height:300px; overflow-y:auto;">
+              <!-- Status will be populated here -->
+            </div>
+          </div>
+          
           <!-- Hidden input to store the selected product_reference when line-based selection is used -->
           <input type="hidden" id="uv_line_based_product_reference" name="product_reference" value="">
         </div>
@@ -1489,6 +1556,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['wf_action'])) {
 // Initialize time display
 document.addEventListener('DOMContentLoaded', function() {
     updateTimeAndShift();
+    loadUVReferencesList();
     
     // Auto-fill received date with current date/time
     const now = new Date();
@@ -1512,6 +1580,50 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
 });
+
+// Load references list from API
+function loadUVReferencesList() {
+    fetch('api/get_uv_references_list.php')
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                const select = document.getElementById('uv_reference');
+                if (!select) return;
+                
+                // Clear existing options except the first placeholder
+                select.innerHTML = '<option value="">-- Select Reference Number --</option>';
+                
+                // Add bundle references
+                if (data.bundleReferences && data.bundleReferences.length > 0) {
+                    data.bundleReferences.forEach(bundle => {
+                        const option = document.createElement('option');
+                        option.value = bundle.reference;
+                        option.setAttribute('data-is-bundle', 'true');
+                        option.setAttribute('data-base-ref', bundle.base_reference);
+                        option.setAttribute('data-roll-count', bundle.roll_count);
+                        option.setAttribute('data-line', bundle.line || '');
+                        option.textContent = bundle.reference + ' (Bundle - ' + bundle.roll_count + ' rolls)';
+                        select.appendChild(option);
+                    });
+                }
+                
+                // Add single roll references
+                if (data.references && data.references.length > 0) {
+                    data.references.forEach(ref => {
+                        const refValue = typeof ref === 'string' ? ref : ref.reference;
+                        const lineIndicator = typeof ref === 'object' ? (ref.line || '') : '';
+                        const option = document.createElement('option');
+                        option.value = refValue;
+                        option.setAttribute('data-is-bundle', 'false');
+                        option.setAttribute('data-line', lineIndicator);
+                        option.textContent = refValue;
+                        select.appendChild(option);
+                    });
+                }
+            }
+        })
+        .catch(err => console.error('Error loading references:', err));
+}
 
 function updateTimeAndShift() {
     const now = new Date();
@@ -1722,9 +1834,13 @@ function populateUVLineReferences(line) {
     
     // Populate both dropdowns
     lineReferences.forEach(ref => {
+        // Check if this reference is part of a bundle (ends with -N pattern)
+        const isPartOfBundle = /-\d+$/.test(ref.value);
+        const displayText = isPartOfBundle ? ref.text + ' (Bundle)' : ref.text;
+        
         const fromOption = document.createElement('option');
         fromOption.value = ref.value;
-        fromOption.textContent = ref.text;
+        fromOption.textContent = displayText;
         fromOption.setAttribute('data-is-bundle', ref.isBundle);
         fromOption.setAttribute('data-base-ref', ref.baseRef);
         fromOption.setAttribute('data-roll-count', ref.rollCount);
@@ -1732,7 +1848,7 @@ function populateUVLineReferences(line) {
         
         const toOption = document.createElement('option');
         toOption.value = ref.value;
-        toOption.textContent = ref.text;
+        toOption.textContent = displayText;
         toOption.setAttribute('data-is-bundle', ref.isBundle);
         toOption.setAttribute('data-base-ref', ref.baseRef);
         toOption.setAttribute('data-roll-count', ref.rollCount);
@@ -1840,8 +1956,44 @@ function updateUVReferenceRange(autoSelect = true) {
         let actualBaseRef = baseRef;
         let actualRollCount = rollCount;
         
+        // Extract base reference from the selected value
+        const rollMatch = fromValue.match(/^(.+)-(\d+)$/);
+        if (rollMatch) {
+            actualBaseRef = rollMatch[1];
+            const selectedRollNum = parseInt(rollMatch[2]);
+            
+            // If first roll (-1) is selected, find the highest roll number for this base reference
+            if (selectedRollNum === 1) {
+                // Find all rolls for this base reference in the To dropdown
+                let highestRoll = 0;
+                let highestRollRef = '';
+                
+                Array.from(toRefSelect.options).forEach(option => {
+                    if (option.value && option.value !== '') {
+                        const optionRollMatch = option.value.match(/^(.+)-(\d+)$/);
+                        if (optionRollMatch) {
+                            const optionBaseRef = optionRollMatch[1];
+                            const optionRollNum = parseInt(optionRollMatch[2]);
+                            
+                            // If it's from the same base reference
+                            if (optionBaseRef === actualBaseRef && optionRollNum > highestRoll) {
+                                highestRoll = optionRollNum;
+                                highestRollRef = option.value;
+                            }
+                        }
+                    }
+                });
+                
+                // Auto-select the highest roll found
+                if (highestRollRef && highestRoll > 1) {
+                    toRefSelect.value = highestRollRef;
+                    return; // Exit early since we've found and selected the last roll
+                }
+            }
+        }
+        
+        // Fallback to original logic for other cases
         if (!actualBaseRef) {
-            const rollMatch = fromValue.match(/^(.+)-(\d+)$/);
             if (rollMatch) {
                 actualBaseRef = rollMatch[1];
             } else {
@@ -1931,6 +2083,161 @@ function applyUVBulkReferenceSelection() {
         }
         productRefSelect.value = rangeOption.value;
     }
+    
+    // Check which references in the range have been submitted
+    checkUVReferenceTestStatus(fromRef, toRef);
+}
+
+// Check which references in range have been submitted for UV Test
+function checkUVReferenceTestStatus(fromRef, toRef) {
+    const container = document.getElementById('uv_reference_test_status_container');
+    const statusList = document.getElementById('uv_reference_test_status_list');
+    const statusTitle = document.getElementById('uv_reference_status_title');
+    const statusSummary = document.getElementById('uv_reference_status_summary');
+    
+    if (!container || !statusList) {
+        console.error('Reference status container elements not found!');
+        return;
+    }
+    
+    // Show container with loading state
+    container.style.display = 'block';
+    if (statusTitle) statusTitle.textContent = 'Test Status';
+    statusList.innerHTML = '<div style="padding:20px; text-align:center; color:#666;"><i class="fas fa-spinner fa-spin" style="font-size:18px;"></i><div style="margin-top:8px; font-size:12px;">Loading...</div></div>';
+    if (statusSummary) statusSummary.innerHTML = '';
+    
+    // Fetch submitted references
+    fetch(`api/check_submitted_tests_range_uv.php?from_reference=${encodeURIComponent(fromRef)}&to_reference=${encodeURIComponent(toRef)}`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                displayUVReferenceStatus(data, fromRef, toRef);
+            } else {
+                statusList.innerHTML = `<div style="padding:12px; text-align:center; color:#dc3545; font-size:12px;"><i class="fas fa-exclamation-triangle"></i> ${data.error || 'Unknown error'}</div>`;
+            }
+        })
+        .catch(error => {
+            console.error('Error checking reference status:', error);
+            statusList.innerHTML = `<div style="padding:12px; text-align:center; color:#dc3545; font-size:12px;"><i class="fas fa-exclamation-triangle"></i> Error loading status</div>`;
+        });
+}
+
+// Display reference status with modern UI (same logic as Characteristics)
+function displayUVReferenceStatus(data, fromRef, toRef) {
+    const statusList = document.getElementById('uv_reference_test_status_list');
+    const statusSummary = document.getElementById('uv_reference_status_summary');
+    
+    if (!statusList) return;
+    
+    const submittedRefs = data.submitted_references || [];
+    const submittedRefSet = new Set(submittedRefs.map(r => r.reference));
+    
+    // Get all references in range
+    const fromSelect = document.getElementById('uv_from_reference');
+    const toSelect = document.getElementById('uv_to_reference');
+    const allRefs = [];
+    
+    if (fromSelect && toSelect) {
+        const fromIndex = Array.from(fromSelect.options).findIndex(opt => opt.value === fromRef);
+        const toIndex = Array.from(toSelect.options).findIndex(opt => opt.value === toRef);
+        
+        if (fromIndex !== -1 && toIndex !== -1) {
+            for (let i = fromIndex; i <= toIndex; i++) {
+                const opt = fromSelect.options[i];
+                if (opt && opt.value) {
+                    allRefs.push(opt.value);
+                }
+            }
+        }
+    }
+    
+    // If we couldn't get refs from dropdown, use submitted refs to infer
+    if (allRefs.length === 0) {
+        const fromMatch = fromRef.match(/^(.+?)-(\d+)$/);
+        const toMatch = toRef.match(/^(.+?)-(\d+)$/);
+        if (fromMatch && toMatch && fromMatch[1] === toMatch[1]) {
+            const base = fromMatch[1];
+            const fromNum = parseInt(fromMatch[2]);
+            const toNum = parseInt(toMatch[2]);
+            for (let i = fromNum; i <= toNum; i++) {
+                allRefs.push(base + '-' + i);
+            }
+        } else {
+            allRefs.push(fromRef, toRef);
+        }
+    }
+    
+    const pendingRefs = allRefs.filter(ref => !submittedRefSet.has(ref));
+    const submittedCount = submittedRefs.length;
+    const pendingCount = pendingRefs.length;
+    
+    // Update summary
+    if (statusSummary) {
+        statusSummary.innerHTML = `Total: ${allRefs.length} references | Submitted: ${submittedCount} | Pending: ${pendingCount}`;
+    }
+    
+    // Build HTML (same as Characteristics)
+    let html = '';
+    
+    if (submittedCount > 0) {
+        html += `
+            <div style="margin-bottom:25px;">
+                <div style="display:flex; align-items:center; gap:8px; margin-bottom:12px; padding:12px; background:#e8f5e9; border-radius:8px;">
+                    <i class="fas fa-check-circle" style="color:#4caf50; font-size:18px;"></i>
+                    <h4 style="margin:0; color:#2e7d32; font-size:16px; font-weight:600;">Already Submitted (${submittedCount})</h4>
+                </div>
+                <div style="display:grid; gap:8px;">
+        `;
+        
+        submittedRefs.forEach(ref => {
+            const statusBadge = ref.status === 'approved' ? '<span style="background:#4caf50; color:white; padding:2px 8px; border-radius:4px; font-size:11px; margin-left:8px;">Approved</span>' :
+                           '<span style="background:#ff9800; color:white; padding:2px 8px; border-radius:4px; font-size:11px; margin-left:8px;">Pending</span>';
+            html += `
+                <div style="padding:10px 12px; background:#f5f5f5; border-left:3px solid #4caf50; border-radius:4px;">
+                    <div style="display:flex; align-items:center; justify-content:space-between;">
+                        <span style="font-weight:500; color:#333;">${ref.reference}</span>
+                        ${statusBadge}
+                    </div>
+                </div>
+            `;
+        });
+        
+        html += `</div></div>`;
+    }
+    
+    if (pendingCount > 0) {
+        html += `
+            <div>
+                <div style="display:flex; align-items:center; gap:8px; margin-bottom:12px; padding:12px; background:#fff3e0; border-radius:8px;">
+                    <i class="fas fa-clock" style="color:#ff9800; font-size:18px;"></i>
+                    <h4 style="margin:0; color:#e65100; font-size:16px; font-weight:600;">Pending Submission (${pendingCount})</h4>
+                </div>
+                <div style="display:grid; gap:8px;">
+        `;
+        
+        pendingRefs.forEach(ref => {
+            html += `
+                <div style="padding:10px 12px; background:#f5f5f5; border-left:3px solid #ff9800; border-radius:4px;">
+                    <span style="font-weight:500; color:#333;">${ref}</span>
+                    <span style="background:#ff9800; color:white; padding:2px 8px; border-radius:4px; font-size:11px; margin-left:8px;">Will Submit</span>
+                </div>
+            `;
+        });
+        
+        html += `</div></div>`;
+    }
+    
+    if (submittedCount === 0 && pendingCount === 0) {
+        html = `
+            <div style="padding:30px; text-align:center; color:#999;">
+                <i class="fas fa-info-circle" style="font-size:32px; color:#2196F3; margin-bottom:15px;"></i>
+                <div style="font-size:16px; font-weight:600; margin-bottom:10px;">No References Found</div>
+                <div style="font-size:14px; color:#666;">Could not determine references in the selected range.</div>
+            </div>
+        `;
+    }
+    
+    statusList.innerHTML = html;
 }
 
 // Clear bulk reference selection

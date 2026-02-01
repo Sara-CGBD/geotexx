@@ -752,9 +752,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_report'])) {
         
         if ($updateStmt->execute()) {
             if (in_array($user_role, ['admin', 'agm ops', 'agm operations'])) {
-                $message = "✅ Fineness of Fiber Report updated and auto-approved! Report Number: " . $editData['report_number'];
+                $message = "Fineness of Fiber Report updated and auto-approved! Report Number: " . $editData['report_number'];
             } else {
-                $message = "✅ Fineness of Fiber Report updated and resubmitted! Report Number: " . $editData['report_number'] . " - Status: Pending Approval";
+                $message = "Fineness of Fiber Report updated and resubmitted! Report Number: " . $editData['report_number'] . " - Status: Pending Approval";
             }
             $_SESSION['success_message'] = $message;
             // Redirect to clear edit mode and refresh the page - this will remove it from rejected list

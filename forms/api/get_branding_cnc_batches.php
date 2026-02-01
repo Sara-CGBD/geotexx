@@ -59,7 +59,15 @@ if ($fgDeliveriesTableCheck && $fgDeliveriesTableCheck->num_rows > 0) {
                 while ($row = $delivered_result->fetch_assoc()) {
                     $b = trim($row['cnc_cutting_batch'] ?? '');
                     $bs = isset($row['bag_size']) ? trim($row['bag_size'] ?? '') : '';
-                    $delivered_quantities[$b . '||' . $bs] = (int)$row['delivered_qty'];
+                    // Normalize key to match fg_received_entry: batch part + '||' + bag_size
+                    // (fg_deliveries may store cnc_cutting_batch as "CW-01||1150mmX900mm")
+                    $batchPart = (strpos($b, '||') !== false) ? trim(explode('||', $b)[0]) : $b;
+                    $bagForKey = ($bs !== '') ? $bs : ((strpos($b, '||') !== false && count(explode('||', $b)) > 1) ? trim(explode('||', $b)[1]) : '');
+                    $key = $batchPart . '||' . $bagForKey;
+                    if (!isset($delivered_quantities[$key])) {
+                        $delivered_quantities[$key] = 0;
+                    }
+                    $delivered_quantities[$key] += (int)$row['delivered_qty'];
                 }
             }
         }
@@ -98,7 +106,8 @@ if ($fgReceivedCheck && $fgReceivedCheck->num_rows > 0) {
         $fgQuery .= "
             FROM fg_received_entry
             WHERE cnc_cutting_batch IS NOT NULL
-              AND cnc_cutting_batch != ''";
+              AND TRIM(cnc_cutting_batch) != ''
+              AND TRIM(cnc_cutting_batch) != '0'";
         if ($hasFgProductType) {
             $fgQuery .= " AND product_type = 'bag'";
         }

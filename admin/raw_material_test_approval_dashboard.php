@@ -1313,9 +1313,73 @@ $fixQuery = $conn->query("
     .checkbox-item { display:flex; align-items:center; gap:8px; padding:6px; border:1px solid #ddd; border-radius:4px; margin-bottom:4px; background:#f8f9fa; }
     .checkbox-item input[type="checkbox"] { transform:scale(1.1); cursor:pointer; }
     .checkbox-item label { cursor:pointer; flex:1; font-size:12px; }
+    #toastContainer {
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        z-index: 3000;
+        pointer-events: none;
+    }
+    .toast {
+        position: relative;
+        padding: 12px 16px;
+        border-radius: 10px;
+        min-width: 260px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+        color: #fff;
+        font-size: 14px;
+        pointer-events: auto;
+        opacity: 0;
+        transform: translateY(-12px) scale(0.98);
+        transition: opacity 0.25s ease, transform 0.25s ease;
+    }
+    .toast.visible {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+    .toast.success {
+        background: linear-gradient(135deg, #27ae60, #229954);
+    }
+    .toast.error {
+        background: linear-gradient(135deg, #e74c3c, #c0392b);
+    }
+    .toast .toast-icon {
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.2);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 700;
+        font-size: 16px;
+    }
+    .toast .toast-message {
+        flex: 1;
+        word-break: break-word;
+    }
+    .toast .toast-close {
+        background: transparent;
+        border: none;
+        color: inherit;
+        font-size: 18px;
+        cursor: pointer;
+        opacity: 0.8;
+        transition: opacity 0.2s ease;
+    }
+    .toast .toast-close:hover {
+        opacity: 1;
+    }
 </style>
 </head>
 <body>
+<div id="toastContainer" aria-live="polite" aria-atomic="true"></div>
 <div class="container">
     <a href="../index.php" style="display:inline-block; margin-bottom:20px; padding:10px 20px; background:#6c757d; color:#fff; text-decoration:none; border-radius:6px; font-size:14px;">
         <i class="fas fa-arrow-left"></i> Back to Dashboard
@@ -1323,14 +1387,6 @@ $fixQuery = $conn->query("
     
     <h1><i class="fas fa-clipboard-check"></i> Raw Material Test Approval Dashboard</h1>
     <p class="subtitle">Review and approve Fiber Test, Fineness of Fiber (ISO 1973), Cut Length of Fiber (ASTM D5103), Tenacity of Fiber (EN ISO 5079), Tenacity of Yarn (ASTM D2256), and Sewing Thread Test reports</p>
-    
-    <?php if ($message): ?>
-    <div class="alert alert-success">✅ <?php echo htmlspecialchars($message); ?></div>
-    <?php endif; ?>
-    
-    <?php if ($error): ?>
-    <div class="alert alert-error">❌ <?php echo htmlspecialchars($error); ?></div>
-    <?php endif; ?>
     
     <!-- Statistics -->
     <div class="stats">
@@ -2370,6 +2426,60 @@ function closeYarnRejectModal() {
     document.getElementById('yarnRejectModal').style.display = 'none';
     document.getElementById('yarnRejectForm').reset();
 }
+
+function showToast(message, type = 'success', duration = 5000) {
+    if (!message) return;
+    const container = document.getElementById('toastContainer');
+    if (!container) return;
+
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+
+    const icon = document.createElement('span');
+    icon.className = 'toast-icon';
+    icon.textContent = type === 'error' ? '!' : '✓';
+
+    const content = document.createElement('div');
+    content.className = 'toast-message';
+    content.textContent = message;
+
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'toast-close';
+    closeBtn.type = 'button';
+    closeBtn.innerHTML = '&times;';
+
+    let autoHide;
+    const removeToast = () => {
+        toast.classList.remove('visible');
+        clearTimeout(autoHide);
+        setTimeout(() => {
+            if (toast.parentNode === container) {
+                container.removeChild(toast);
+            }
+        }, 250);
+    };
+
+    closeBtn.addEventListener('click', removeToast);
+    toast.addEventListener('click', removeToast);
+
+    toast.append(icon, content, closeBtn);
+    container.appendChild(toast);
+
+    requestAnimationFrame(() => toast.classList.add('visible'));
+    autoHide = setTimeout(removeToast, duration);
+}
+
+(function displayServerToasts() {
+    const successMessage = <?php echo json_encode($message ?? '', JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP); ?>;
+    const errorMessage = <?php echo json_encode($error ?? '', JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP); ?>;
+
+    if (successMessage) {
+        showToast(successMessage, 'success');
+    }
+    if (errorMessage) {
+        showToast(errorMessage, 'error');
+    }
+})();
 
 // Close modal when clicking outside
 window.onclick = function(event) {

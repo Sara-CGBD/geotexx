@@ -30,7 +30,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $required = ['transfer_id','date_time','operator_id','from_location','to_location'];
 foreach ($required as $key) {
     if (!isset($_POST[$key]) || $_POST[$key] === '') {
-        header('Location: ../forms/roll_transfer_entry.php?error=' . urlencode('Missing field: ' . $key));
+        $fieldName = ucfirst(str_replace('_', ' ', $key));
+        header('Location: ../forms/roll_transfer_entry.php?error=' . urlencode('Missing required field: ' . $fieldName));
         exit;
     }
 }
@@ -429,16 +430,34 @@ if ($chk && $chk->num_rows > 0) {
     $cols = [];
     $dbRow = $conn->query("SELECT DATABASE() AS d")->fetch_assoc();
     $dbName = $dbRow ? $dbRow['d'] : 'geobagg';
-    $colRes = $conn->query("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='" . $conn->real_escape_string($dbName) . "' AND TABLE_NAME='drivers'");
-    if ($colRes) { while ($cr = $colRes->fetch_assoc()) { $cols[] = $cr['COLUMN_NAME']; } }
+    
+    // Use prepared statement for INFORMATION_SCHEMA query
+    $colResStmt = $conn->prepare("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'drivers'");
+    if ($colResStmt) {
+        $colResStmt->bind_param("s", $dbName);
+        $colResStmt->execute();
+        $colRes = $colResStmt->get_result();
+        if ($colRes) { 
+            while ($cr = $colRes->fetch_assoc()) { 
+                $cols[] = $cr['COLUMN_NAME']; 
+            } 
+        }
+        $colResStmt->close();
+    }
+    
     if (!in_array('driver_name', $cols)) {
         foreach (['name','full_name','driver','driver_full_name'] as $cand) {
             if (in_array($cand, $cols)) { $nameCol = $cand; break; }
         }
     }
-    $dres = $conn->query("SELECT id, `" . $conn->real_escape_string($nameCol) . "` AS driver_name FROM drivers ORDER BY `" . $conn->real_escape_string($nameCol) . "` ASC");
-    if ($dres) {
-        while ($d = $dres->fetch_assoc()) $drivers[] = $d;
+    
+    // Validate column name before using in query (column names can't be parameterized)
+    if (isset($nameCol) && preg_match('/^[A-Za-z0-9_]+$/', $nameCol)) {
+        // Column name is validated, safe to use directly
+        $dres = $conn->query("SELECT id, `{$nameCol}` AS driver_name FROM drivers ORDER BY `{$nameCol}` ASC");
+        if ($dres) {
+            while ($d = $dres->fetch_assoc()) $drivers[] = $d;
+        }
     }
 }
 

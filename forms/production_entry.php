@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 
 
 session_start();
@@ -40,43 +40,67 @@ $next_batch = 1;
 $dbRow = $conn->query("SELECT DATABASE() AS d")->fetch_assoc();
 $dbName = $dbRow ? $dbRow['d'] : 'geobagg';
 
-// Find roll source: prefer roll_entry.roll_number, else production_entry.roll_number/roll_no
+// Find roll source: prefer roll_entry.roll_number, else production_entry.roll_number/roll_no - using prepared statements
 $rollCol = null; $rollTable = null;
-$colRes = $conn->query("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='" . $conn->real_escape_string($dbName) . "' AND TABLE_NAME='roll_entry'");
-if ($colRes) {
-  $cols = [];
-  while ($cr = $colRes->fetch_assoc()) { $cols[] = $cr['COLUMN_NAME']; }
-  if (in_array('roll_number', $cols)) { $rollTable = 'roll_entry'; $rollCol = 'roll_number'; }
+$colResStmt = $conn->prepare("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'roll_entry'");
+if ($colResStmt) {
+    $colResStmt->bind_param("s", $dbName);
+    $colResStmt->execute();
+    $colRes = $colResStmt->get_result();
+    if ($colRes) {
+        $cols = [];
+        while ($cr = $colRes->fetch_assoc()) { $cols[] = $cr['COLUMN_NAME']; }
+        if (in_array('roll_number', $cols)) { $rollTable = 'roll_entry'; $rollCol = 'roll_number'; }
+    }
+    $colResStmt->close();
 }
 if (!$rollCol) {
-  $colRes2 = $conn->query("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='" . $conn->real_escape_string($dbName) . "' AND TABLE_NAME='production_entry'");
-  if ($colRes2) {
-    $cols2 = [];
-    while ($cr = $colRes2->fetch_assoc()) { $cols2[] = $cr['COLUMN_NAME']; }
-    if (in_array('roll_number', $cols2)) { $rollTable = 'production_entry'; $rollCol = 'roll_number'; }
-    elseif (in_array('roll_no', $cols2)) { $rollTable = 'production_entry'; $rollCol = 'roll_no'; }
-  }
+    $colRes2Stmt = $conn->prepare("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'production_entry'");
+    if ($colRes2Stmt) {
+        $colRes2Stmt->bind_param("s", $dbName);
+        $colRes2Stmt->execute();
+        $colRes2 = $colRes2Stmt->get_result();
+        if ($colRes2) {
+            $cols2 = [];
+            while ($cr = $colRes2->fetch_assoc()) { $cols2[] = $cr['COLUMN_NAME']; }
+            if (in_array('roll_number', $cols2)) { $rollTable = 'production_entry'; $rollCol = 'roll_number'; }
+            elseif (in_array('roll_no', $cols2)) { $rollTable = 'production_entry'; $rollCol = 'roll_no'; }
+        }
+        $colRes2Stmt->close();
+    }
 }
-if ($rollCol && $rollTable) {
-  $q = $conn->query("SELECT MAX(`$rollCol`) AS m FROM `$rollTable`");
-  if ($q && ($row = $q->fetch_assoc())) { $next_roll = ((int)($row['m'] ?? 0)) + 1; }
+if ($rollCol && $rollTable && preg_match('/^[A-Za-z0-9_]+$/', $rollCol) && preg_match('/^[A-Za-z0-9_]+$/', $rollTable)) {
+    $q = $conn->query("SELECT MAX(`$rollCol`) AS m FROM `$rollTable`");
+    if ($q && ($row = $q->fetch_assoc())) { $next_roll = ((int)($row['m'] ?? 0)) + 1; }
 }
 
-// Batch number: try roll_entry.batch_number then production_entry.batch_number
+// Batch number: try roll_entry.batch_number then production_entry.batch_number - using prepared statements
 $batchCol = null; $batchTable = null;
-$bColRes = $conn->query("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='" . $conn->real_escape_string($dbName) . "' AND TABLE_NAME='roll_entry'");
-if ($bColRes) {
-  $bcols = [];
-  while ($cr = $bColRes->fetch_assoc()) { $bcols[] = $cr['COLUMN_NAME']; }
-  if (in_array('batch_number', $bcols)) { $batchTable = 'roll_entry'; $batchCol = 'batch_number'; }
+$bColResStmt = $conn->prepare("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'roll_entry'");
+if ($bColResStmt) {
+    $bColResStmt->bind_param("s", $dbName);
+    $bColResStmt->execute();
+    $bColRes = $bColResStmt->get_result();
+    if ($bColRes) {
+        $bcols = [];
+        while ($cr = $bColRes->fetch_assoc()) { $bcols[] = $cr['COLUMN_NAME']; }
+        if (in_array('batch_number', $bcols)) { $batchTable = 'roll_entry'; $batchCol = 'batch_number'; }
+    }
+    $bColResStmt->close();
 }
 if (!$batchCol) {
-  $bColRes2 = $conn->query("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='" . $conn->real_escape_string($dbName) . "' AND TABLE_NAME='production_entry'");
-  if ($bColRes2) {
-    $bcols2 = [];
-    while ($cr = $bColRes2->fetch_assoc()) { $bcols2[] = $cr['COLUMN_NAME']; }
-    if (in_array('batch_number', $bcols2)) { $batchTable = 'production_entry'; $batchCol = 'batch_number'; }
-  }
+    $bColRes2Stmt = $conn->prepare("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'production_entry'");
+    if ($bColRes2Stmt) {
+        $bColRes2Stmt->bind_param("s", $dbName);
+        $bColRes2Stmt->execute();
+        $bColRes2 = $bColRes2Stmt->get_result();
+        if ($bColRes2) {
+            $bcols2 = [];
+            while ($cr = $bColRes2->fetch_assoc()) { $bcols2[] = $cr['COLUMN_NAME']; }
+            if (in_array('batch_number', $bcols2)) { $batchTable = 'production_entry'; $batchCol = 'batch_number'; }
+        }
+        $bColRes2Stmt->close();
+    }
 }
 if ($batchCol && $batchTable) {
   $qb = $conn->query("SELECT MAX(`$batchCol`) AS mb FROM `$batchTable`");

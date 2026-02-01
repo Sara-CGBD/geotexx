@@ -19,8 +19,21 @@ if (!$tableCheck || $tableCheck->num_rows === 0) {
 }
 
 function columnExists($conn, $table, $col) {
-    $r = $conn->query("SHOW COLUMNS FROM `$table` LIKE '" . $conn->real_escape_string($col) . "'");
-    return $r && $r->num_rows > 0;
+    // Validate table and column names
+    if (!preg_match('/^[A-Za-z0-9_]+$/', $table) || !preg_match('/^[A-Za-z0-9_]+$/', $col)) {
+        return false;
+    }
+    // Use prepared statement for security
+    $stmt = $conn->prepare("SHOW COLUMNS FROM `{$table}` LIKE ?");
+    if ($stmt) {
+        $stmt->bind_param("s", $col);
+        $stmt->execute();
+        $r = $stmt->get_result();
+        $exists = $r && $r->num_rows > 0;
+        $stmt->close();
+        return $exists;
+    }
+    return false;
 }
 
 // Add sewing_entry_ids if missing

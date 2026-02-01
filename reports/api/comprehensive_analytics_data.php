@@ -25,14 +25,28 @@ try {
     exit();
 }
 
-// Simple schema helper
+// Simple schema helper - using prepared statement for security
 function apiColExists(mysqli $conn, string $table, string $column): bool {
+    // Validate table name contains only safe characters
     if (!preg_match('/^[A-Za-z0-9_]+$/', $table)) {
         return false;
     }
-    $col = $conn->real_escape_string($column);
-    $res = $conn->query("SHOW COLUMNS FROM `{$table}` LIKE '{$col}'");
-    return $res && $res->num_rows > 0;
+    // Validate column name contains only safe characters
+    if (!preg_match('/^[A-Za-z0-9_]+$/', $column)) {
+        return false;
+    }
+    // Use prepared statement - table name cannot be parameterized, but we validated it
+    // Column name is validated and safe, but we'll use LIKE with parameter
+    $stmt = $conn->prepare("SHOW COLUMNS FROM `{$table}` LIKE ?");
+    if ($stmt) {
+        $stmt->bind_param("s", $column);
+        $stmt->execute();
+        $res = $stmt->get_result();
+        $exists = $res && $res->num_rows > 0;
+        $stmt->close();
+        return $exists;
+    }
+    return false;
 }
 
 try {

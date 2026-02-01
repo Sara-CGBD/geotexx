@@ -46,8 +46,8 @@ if ($scrapCategory === 'Sheet Production Scrap') {
     $qty = (float)$_POST['sheet_qty'];
 }
 
-// Handle Swing Scrap
-if ($scrapCategory === 'Swing Scrap') {
+// Handle Sewing Scrap
+if ($scrapCategory === 'Sewing Scrap') {
     $required = ['swing_cutting_batch', 'swing_product', 'swing_type', 'swing_qty'];
     foreach ($required as $key) {
         if (!isset($_POST[$key]) || $_POST[$key] === '') {
@@ -72,14 +72,23 @@ try {
     $conn->query("ALTER TABLE scrap ADD COLUMN IF NOT EXISTS date_time DATETIME");
 
     // Relax legacy FK to production and allow NULL prod_id so category-based scrap can be saved
-    // Check if FK exists before dropping
-    $dbName = $conn->query("SELECT DATABASE() AS d")->fetch_assoc()['d'];
-    $fkCheck = $conn->query("SELECT CONSTRAINT_NAME FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = '$dbName' AND TABLE_NAME = 'scrap' AND CONSTRAINT_NAME = 'scrap_ibfk_1'");
-    
-    if ($fkCheck && $fkCheck->num_rows > 0) {
-        $conn->query("SET FOREIGN_KEY_CHECKS=0");
-        $conn->query("ALTER TABLE scrap DROP FOREIGN KEY scrap_ibfk_1");
-        $conn->query("SET FOREIGN_KEY_CHECKS=1");
+    // Check if FK exists before dropping - using prepared statement
+    $dbNameResult = $conn->query("SELECT DATABASE() AS d");
+    $dbName = ($dbNameResult) ? $dbNameResult->fetch_assoc()['d'] : '';
+    if ($dbName) {
+        $fkCheckStmt = $conn->prepare("SELECT CONSTRAINT_NAME FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'scrap' AND CONSTRAINT_NAME = 'scrap_ibfk_1'");
+        if ($fkCheckStmt) {
+            $fkCheckStmt->bind_param("s", $dbName);
+            $fkCheckStmt->execute();
+            $fkCheckResult = $fkCheckStmt->get_result();
+            
+            if ($fkCheckResult && $fkCheckResult->num_rows > 0) {
+                $conn->query("SET FOREIGN_KEY_CHECKS=0");
+                $conn->query("ALTER TABLE scrap DROP FOREIGN KEY scrap_ibfk_1");
+                $conn->query("SET FOREIGN_KEY_CHECKS=1");
+            }
+            $fkCheckStmt->close();
+        }
     }
     
     // Allow NULL for prod_id
@@ -87,14 +96,20 @@ try {
 
     // No external FK validation; scrap product/type are categorical
 
-    // If scrap_id not provided, generate one (SC-YYYYMMDD-XXX)
+    // If scrap_id not provided, generate one (SC-YYYYMMDD-XXX) - using prepared statement
     if ($scrapIdFromForm === '') {
         date_default_timezone_set('Asia/Dhaka');
         $today = date('Y-m-d');
         $nextNum = 1;
-        $res = $conn->query("SELECT MAX(CAST(SUBSTRING(scrap_id, -3) AS UNSIGNED)) AS last_num FROM scrap WHERE DATE(COALESCE(date_time, NOW())) = '$today'");
-        if ($res && $row = $res->fetch_assoc()) {
-            if (!empty($row['last_num'])) { $nextNum = ((int)$row['last_num']) + 1; }
+        $resStmt = $conn->prepare("SELECT MAX(CAST(SUBSTRING(scrap_id, -3) AS UNSIGNED)) AS last_num FROM scrap WHERE DATE(COALESCE(date_time, NOW())) = ?");
+        if ($resStmt) {
+            $resStmt->bind_param("s", $today);
+            $resStmt->execute();
+            $resResult = $resStmt->get_result();
+            if ($resResult && $row = $resResult->fetch_assoc()) {
+                if (!empty($row['last_num'])) { $nextNum = ((int)$row['last_num']) + 1; }
+            }
+            $resStmt->close();
         }
         $scrapIdFromForm = 'SC-' . date('Ymd') . '-' . str_pad($nextNum, 3, '0', STR_PAD_LEFT);
     }

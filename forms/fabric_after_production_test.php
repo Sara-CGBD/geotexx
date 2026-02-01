@@ -73,14 +73,64 @@ try {
                 $rollCount = (int)$matches[1];
                 $baseRef = preg_replace('/-\d+$/', '', $ref);
                 
-                // Check if already tested
-                $checkTested = $conn->prepare("SELECT id FROM fabric_after_production_tests WHERE sample_id = ? AND status IN ('pending', 'approved') LIMIT 1");
-                $checkTested->bind_param("s", $ref);
-                $checkTested->execute();
-                $testedResult = $checkTested->get_result();
-                $checkTested->close();
+                // Check if already tested using prepared statements for security
+                // Check: 1. Exact reference match, 2. Part of bundle range, 3. Individual rolls
+                $isTested = false;
                 
-                if ($testedResult->num_rows == 0) {
+                // First check: exact match and LIKE patterns for bundle ranges
+                $checkStmt = $conn->prepare("
+                    SELECT id FROM fabric_after_production_tests 
+                    WHERE status IN ('pending', 'approved')
+                    AND (
+                        sample_id = ?
+                        OR sample_id LIKE CONCAT(?, '|%')
+                        OR sample_id LIKE CONCAT('%|', ?)
+                        OR sample_id LIKE CONCAT('%|', ?, '|%')
+                    )
+                    LIMIT 1
+                ");
+                
+                if ($checkStmt) {
+                    $checkStmt->bind_param("ssss", $ref, $ref, $ref, $ref);
+                    $checkStmt->execute();
+                    $checkResult = $checkStmt->get_result();
+                    if ($checkResult && $checkResult->num_rows > 0) {
+                        $isTested = true;
+                    }
+                    $checkStmt->close();
+                }
+                
+                // Also check if any individual roll in this bundle has been submitted
+                if (!$isTested && $baseRef) {
+                    for ($i = 1; $i <= $rollCount; $i++) {
+                        $individualRef = $baseRef . '-' . $i;
+                        $rollCheckStmt = $conn->prepare("
+                            SELECT id FROM fabric_after_production_tests 
+                            WHERE status IN ('pending', 'approved')
+                            AND (
+                                sample_id = ?
+                                OR sample_id LIKE CONCAT(?, '|%')
+                                OR sample_id LIKE CONCAT('%|', ?)
+                                OR sample_id LIKE CONCAT('%|', ?, '|%')
+                            )
+                            LIMIT 1
+                        ");
+                        
+                        if ($rollCheckStmt) {
+                            $rollCheckStmt->bind_param("ssss", $individualRef, $individualRef, $individualRef, $individualRef);
+                            $rollCheckStmt->execute();
+                            $rollResult = $rollCheckStmt->get_result();
+                            if ($rollResult && $rollResult->num_rows > 0) {
+                                $isTested = true;
+                            }
+                            $rollCheckStmt->close();
+                        }
+                        
+                        if ($isTested) break;
+                    }
+                }
+                
+                if (!$isTested) {
                     $bundleReferences[] = [
                         'reference' => $ref,
                         'base_reference' => $baseRef,
@@ -89,14 +139,32 @@ try {
                     ];
                 }
             } else {
-                // Single roll reference
-                $checkTested = $conn->prepare("SELECT id FROM fabric_after_production_tests WHERE sample_id = ? AND status IN ('pending', 'approved') LIMIT 1");
-                $checkTested->bind_param("s", $ref);
-                $checkTested->execute();
-                $testedResult = $checkTested->get_result();
-                $checkTested->close();
+                // Single roll reference - use prepared statement for security
+                $isTested = false;
                 
-                if ($testedResult->num_rows == 0) {
+                $checkStmt = $conn->prepare("
+                    SELECT id FROM fabric_after_production_tests 
+                    WHERE status IN ('pending', 'approved')
+                    AND (
+                        sample_id = ?
+                        OR sample_id LIKE CONCAT(?, '|%')
+                        OR sample_id LIKE CONCAT('%|', ?)
+                        OR sample_id LIKE CONCAT('%|', ?, '|%')
+                    )
+                    LIMIT 1
+                ");
+                
+                if ($checkStmt) {
+                    $checkStmt->bind_param("ssss", $ref, $ref, $ref, $ref);
+                    $checkStmt->execute();
+                    $checkResult = $checkStmt->get_result();
+                    if ($checkResult && $checkResult->num_rows > 0) {
+                        $isTested = true;
+                    }
+                    $checkStmt->close();
+                }
+                
+                if (!$isTested) {
                     $references[] = [
                         'reference' => $ref,
                         'is_individual' => false
@@ -114,39 +182,75 @@ try {
     $refQuery = $conn->query("
         SELECT DISTINCT f.reference_number 
         FROM fiber_to_roll_entry f
-        LEFT JOIN fabric_after_production_tests fapt ON f.reference_number = fapt.sample_id
-            AND fapt.status IN ('pending', 'approved')
         WHERE f.reference_number IS NOT NULL 
             AND f.reference_number != ''
-            AND fapt.sample_id IS NULL
         ORDER BY f.date_time DESC 
         LIMIT 50
     ");
     if ($refQuery) {
         while ($row = $refQuery->fetch_assoc()) {
             $ref = $row['reference_number'];
-            // Only add if not already in references and not part of a bundle
-            $exists = false;
-            foreach ($references as $r) {
-                if (is_array($r) && $r['reference'] === $ref) {
-                    $exists = true;
-                    break;
-                } elseif (!is_array($r) && $r === $ref) {
-                    $exists = true;
-                    break;
+            
+            // Check if already tested - use prepared statement for security
+            $isTested = false;
+            
+            $checkStmt = $conn->prepare("
+                SELECT id FROM fabric_after_production_tests 
+                WHERE status IN ('pending', 'approved')
+                AND (
+                    sample_id = ?
+                    OR sample_id LIKE CONCAT(?, '|%')
+                    OR sample_id LIKE CONCAT('%|', ?)
+                    OR sample_id LIKE CONCAT('%|', ?, '|%')
+                )
+                LIMIT 1
+            ");
+            
+            if ($checkStmt) {
+                $checkStmt->bind_param("ssss", $ref, $ref, $ref, $ref);
+                $checkStmt->execute();
+                $checkResult = $checkStmt->get_result();
+                if ($checkResult && $checkResult->num_rows > 0) {
+                    $isTested = true;
                 }
+                $checkStmt->close();
             }
-            if (!$exists) {
-                $references[] = [
-                    'reference' => $ref,
-                    'is_individual' => false
-                ];
+            
+            // Only add if not already in references, not part of a bundle, and not tested
+            if (!$isTested) {
+                $exists = false;
+                foreach ($references as $r) {
+                    if (is_array($r) && $r['reference'] === $ref) {
+                        $exists = true;
+                        break;
+                    } elseif (!is_array($r) && $r === $ref) {
+                        $exists = true;
+                        break;
+                    }
+                }
+                if (!$exists) {
+                    $references[] = [
+                        'reference' => $ref,
+                        'is_individual' => false
+                    ];
+                }
             }
         }
     }
 } catch (Exception $e) {
     // Continue
 }
+
+// Sort bundle references: Group by base_reference, then sort by roll_count (1, 2, 3, 4...)
+usort($bundleReferences, function($a, $b) {
+    // First, compare by base_reference
+    $baseCompare = strcmp($a['base_reference'], $b['base_reference']);
+    if ($baseCompare !== 0) {
+        return $baseCompare;
+    }
+    // If same base_reference, sort by roll_count (ascending: 1, 2, 3, 4...)
+    return $a['roll_count'] - $b['roll_count'];
+});
 
 // Check user role for approval permissions
 $user_role = strtolower(trim($_SESSION['role'] ?? ''));
@@ -306,11 +410,17 @@ class FabricAfterProductionTestHandler {
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ");
             
-            // Get sample_id - use individual roll reference if bundle is selected
+            // Get sample_id - handle both single and bundle references
             $sample_id = '';
-            if (isset($data['individual_roll_reference']) && !empty($data['individual_roll_reference'])) {
-                $sample_id = trim($data['individual_roll_reference']);
+            if (isset($data['bundle_reference_range']) && !empty($data['bundle_reference_range'])) {
+                // Bundle mode - use the range (from|to format)
+                $sample_id = trim($data['bundle_reference_range']);
+            } elseif (isset($data['from_reference']) && isset($data['to_reference']) && 
+                      !empty($data['from_reference']) && !empty($data['to_reference'])) {
+                // Bundle mode - use from|to format
+                $sample_id = trim($data['from_reference']) . '|' . trim($data['to_reference']);
             } elseif (isset($data['sample_id']) && !empty($data['sample_id'])) {
+                // Single mode
                 $sample_id = trim($data['sample_id']);
             }
             
@@ -806,18 +916,24 @@ $unit_options = ['g/m²', 'mm', 'kN/m', '%', 'N'];
     </div>
 
     <div class="form-group">
+      <label>Reference Type:</label>
+      <div style="display:flex; gap:10px; margin-bottom:15px;">
+        <button type="button" id="fabric_after_ref_type_single" onclick="setFabricAfterReferenceType('single')" style="padding:8px 20px; background:#e0e0e0; color:#333; border:none; border-radius:6px; cursor:pointer; font-weight:600; font-size:14px;">
+          Single
+        </button>
+        <button type="button" id="fabric_after_ref_type_bundle" onclick="setFabricAfterReferenceType('bundle')" style="padding:8px 20px; background:#e0e0e0; color:#333; border:none; border-radius:6px; cursor:pointer; font-weight:600; font-size:14px;">
+          Bundle
+        </button>
+      </div>
+    </div>
+    
+    <!-- Single Reference Selection (shown when Single is selected) -->
+    <div class="form-group" id="fabric_after_single_reference_group" style="display:none;">
       <label>Reference:</label>
-      <select id="sample_id" name="sample_id" onchange="handleFabricAfterReferenceSelection(this.value)" required>
+      <select id="sample_id" name="sample_id" onchange="handleFabricAfterReferenceSelection(this.value)">
         <option value="">-- Select Reference --</option>
         <?php 
-        // Show bundle references
-        foreach($bundleReferences as $bundle): ?>
-          <option value="<?php echo htmlspecialchars($bundle['reference']); ?>" data-is-bundle="true" data-base-ref="<?php echo htmlspecialchars($bundle['base_reference']); ?>" data-roll-count="<?php echo $bundle['roll_count']; ?>">
-            <?php echo htmlspecialchars($bundle['reference']); ?> (Bundle - <?php echo $bundle['roll_count']; ?> rolls)
-          </option>
-        <?php endforeach; ?>
-        <?php 
-        // Show single roll references (not part of bundles)
+        // Show only single roll references (not part of bundles)
         foreach($references as $ref): 
           $refValue = is_array($ref) ? $ref['reference'] : $ref;
           $isIndividual = is_array($ref) && isset($ref['is_individual']) && $ref['is_individual'];
@@ -829,14 +945,37 @@ $unit_options = ['g/m²', 'mm', 'kN/m', '%', 'N'];
           endif;
         endforeach; ?>
       </select>
-      
-      <!-- Individual Roll Selector (shown when bundle is selected) -->
-      <select name="individual_roll_reference" id="fabric_after_individual_roll_reference" onchange="handleFabricAfterIndividualRollSelection(this.value)" style="display:none; margin-top:10px; padding:10px; border:2px solid #3498db; border-radius:6px; background:#f8f9fa;">
-        <option value="">-- Select Individual Roll for Testing --</option>
-      </select>
-      <div id="fabric_after_bundle_info" style="display:none; margin-top:8px; padding:10px; background:#e3f2fd; border-left:4px solid #2196F3; border-radius:4px; font-size:13px; color:#1565C0;">
-        <i class="fas fa-info-circle"></i> <strong>Bundle Detected:</strong> This reference contains multiple rolls. <strong>Please select the specific roll number</strong> you want to test individually.
+    </div>
+    
+    <!-- Bundle Reference Selection (shown when Bundle is selected) -->
+    <div id="fabric_after_bundle_reference_group" style="display:none; margin-bottom:15px; padding:10px; background:#f8f9fa; border:1px solid #ddd; border-radius:6px;">
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:10px;">
+        <label style="font-weight:600; margin:0;">From Reference:</label>
+        <select id="fabric_after_from_reference" name="from_reference" style="min-width:250px; padding:5px; border:1px solid #ccc; border-radius:4px;" onchange="updateFabricAfterReferenceRange(true);">
+          <option value="">-- Select From Reference --</option>
+          <?php 
+          // Show only bundle references
+          foreach($bundleReferences as $bundle): ?>
+            <option value="<?php echo htmlspecialchars($bundle['reference']); ?>" data-is-bundle="true" data-base-ref="<?php echo htmlspecialchars($bundle['base_reference']); ?>" data-roll-count="<?php echo $bundle['roll_count']; ?>">
+              <?php echo htmlspecialchars($bundle['reference']); ?> (Bundle - <?php echo $bundle['roll_count']; ?> rolls)
+            </option>
+          <?php endforeach; ?>
+        </select>
+        <label style="font-weight:600; margin:0;">To Reference:</label>
+        <select id="fabric_after_to_reference" name="to_reference" style="min-width:250px; padding:5px; border:1px solid #ccc; border-radius:4px;" onchange="updateFabricAfterReferenceRange(false);">
+          <option value="">-- Select To Reference --</option>
+        </select>
       </div>
+      <div style="display:flex; gap:10px;">
+        <button type="button" onclick="applyFabricAfterBulkReferenceSelection()" style="padding:6px 12px; background:#3498db; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:600;">
+          Apply
+        </button>
+        <button type="button" onclick="clearFabricAfterBulkReferenceSelection()" style="padding:6px 12px; background:#6c757d; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:600;">
+          Clear
+        </button>
+      </div>
+      <!-- Hidden input to store the selected bundle reference range -->
+      <input type="hidden" id="fabric_after_bundle_reference_range" name="bundle_reference_range" value="">
     </div>
 
     <div class="form-row">
@@ -934,6 +1073,7 @@ $unit_options = ['g/m²', 'mm', 'kN/m', '%', 'N'];
 document.addEventListener('DOMContentLoaded', function() {
     updateTimeAndShift();
     updateSampleId();
+    // Don't auto-select any reference type - let user choose
 });
 
 function updateTimeAndShift() {
@@ -960,68 +1100,279 @@ function updateSampleId() {
     // Function kept for compatibility but no longer generates sample ID
 }
 
-// Handle reference selection - check if bundle and show individual roll selector
-function handleFabricAfterReferenceSelection(selectedValue) {
-    const productRefSelect = document.getElementById('sample_id');
-    const individualRollSelect = document.getElementById('fabric_after_individual_roll_reference');
-    const bundleInfo = document.getElementById('fabric_after_bundle_info');
+// Set reference type (Single or Bundle)
+function setFabricAfterReferenceType(type) {
+    const singleBtn = document.getElementById('fabric_after_ref_type_single');
+    const bundleBtn = document.getElementById('fabric_after_ref_type_bundle');
+    const singleGroup = document.getElementById('fabric_after_single_reference_group');
+    const bundleGroup = document.getElementById('fabric_after_bundle_reference_group');
+    const sampleId = document.getElementById('sample_id');
+    const fromRef = document.getElementById('fabric_after_from_reference');
+    const toRef = document.getElementById('fabric_after_to_reference');
     
-    if (!selectedValue || selectedValue === '') {
-        // Hide individual roll selector
-        if (individualRollSelect) {
-            individualRollSelect.style.display = 'none';
-            individualRollSelect.value = '';
-            individualRollSelect.removeAttribute('required');
+    if (type === 'single') {
+        // Single mode
+        if (singleBtn) {
+            singleBtn.style.background = '#3498db';
+            singleBtn.style.color = 'white';
         }
-        if (bundleInfo) bundleInfo.style.display = 'none';
-        return;
-    }
-    
-    // Get the selected option
-    const selectedOption = productRefSelect.options[productRefSelect.selectedIndex];
-    const isBundle = selectedOption?.getAttribute('data-is-bundle') === 'true';
-    
-    if (isBundle) {
-        // Show individual roll selector
-        const baseRef = selectedOption.getAttribute('data-base-ref');
-        const rollCount = parseInt(selectedOption.getAttribute('data-roll-count')) || 1;
-        
-        // Populate individual roll dropdown
-        if (individualRollSelect) {
-            individualRollSelect.innerHTML = '<option value="">-- Select Individual Roll for Testing --</option>';
-            for (let i = 1; i <= rollCount; i++) {
-                const option = document.createElement('option');
-                const individualRef = baseRef + '-' + i;
-                option.value = individualRef;
-                option.textContent = `Roll ${i} - ${individualRef}`;
-                individualRollSelect.appendChild(option);
-            }
-            individualRollSelect.style.display = 'block';
-            individualRollSelect.setAttribute('required', 'required');
+        if (bundleBtn) {
+            bundleBtn.style.background = '#e0e0e0';
+            bundleBtn.style.color = '#333';
         }
-        if (bundleInfo) bundleInfo.style.display = 'block';
+        if (singleGroup) singleGroup.style.display = 'block';
+        if (bundleGroup) bundleGroup.style.display = 'none';
+        if (sampleId) {
+            sampleId.setAttribute('required', 'required');
+            sampleId.value = '';
+        }
+        if (fromRef) {
+            fromRef.removeAttribute('required');
+            fromRef.value = '';
+        }
+        if (toRef) {
+            toRef.removeAttribute('required');
+            toRef.value = '';
+        }
+        // Clear bundle range
+        const bundleRangeInput = document.getElementById('fabric_after_bundle_reference_range');
+        if (bundleRangeInput) bundleRangeInput.value = '';
     } else {
-        // Hide individual roll selector
-        if (individualRollSelect) {
-            individualRollSelect.style.display = 'none';
-            individualRollSelect.value = '';
-            individualRollSelect.removeAttribute('required');
+        // Bundle mode
+        if (singleBtn) {
+            singleBtn.style.background = '#e0e0e0';
+            singleBtn.style.color = '#333';
         }
-        if (bundleInfo) bundleInfo.style.display = 'none';
+        if (bundleBtn) {
+            bundleBtn.style.background = '#3498db';
+            bundleBtn.style.color = 'white';
+        }
+        if (singleGroup) singleGroup.style.display = 'none';
+        if (bundleGroup) bundleGroup.style.display = 'block';
+        if (sampleId) {
+            sampleId.removeAttribute('required');
+            sampleId.value = '';
+        }
+        if (fromRef) fromRef.setAttribute('required', 'required');
+        if (toRef) toRef.setAttribute('required', 'required');
+        
+        // Populate To reference dropdown with bundle references
+        populateFabricAfterToReferenceDropdown();
     }
 }
 
-// Handle individual roll selection from bundle
-function handleFabricAfterIndividualRollSelection(selectedValue) {
-    // No additional action needed for fabric after production test
+// Populate To reference dropdown with bundle references
+function populateFabricAfterToReferenceDropdown() {
+    const fromRef = document.getElementById('fabric_after_from_reference');
+    const toRef = document.getElementById('fabric_after_to_reference');
+    
+    if (!fromRef || !toRef) return;
+    
+    // Copy all options from From dropdown to To dropdown
+    toRef.innerHTML = '<option value="">-- Select To Reference --</option>';
+    Array.from(fromRef.options).forEach((option, index) => {
+        if (index > 0 && option.value) { // Skip first option (placeholder)
+            const newOption = document.createElement('option');
+            newOption.value = option.value;
+            newOption.textContent = option.textContent;
+            newOption.setAttribute('data-is-bundle', option.getAttribute('data-is-bundle') || 'false');
+            newOption.setAttribute('data-base-ref', option.getAttribute('data-base-ref') || '');
+            newOption.setAttribute('data-roll-count', option.getAttribute('data-roll-count') || '1');
+            toRef.appendChild(newOption);
+        }
+    });
+    
+    // If From reference is already selected, update the range
+    if (fromRef.value) {
+        updateFabricAfterReferenceRange(true);
+    }
+}
+
+// Update To Reference dropdown based on From Reference selection
+function updateFabricAfterReferenceRange(autoSelect = true) {
+    const fromRef = document.getElementById('fabric_after_from_reference');
+    const toRef = document.getElementById('fabric_after_to_reference');
+    
+    if (!fromRef || !toRef) return;
+    
+    const fromValue = fromRef.value;
+    if (!fromValue) {
+        // If From is cleared, reset To dropdown to show all options
+        Array.from(toRef.options).forEach(option => {
+            option.style.display = '';
+        });
+        toRef.value = '';
+        return;
+    }
+    
+    // Get the selected From reference option
+    const fromOption = fromRef.options[fromRef.selectedIndex];
+    const isBundle = fromOption?.getAttribute('data-is-bundle') === 'true';
+    let baseRef = fromOption?.getAttribute('data-base-ref') || '';
+    let rollCount = parseInt(fromOption?.getAttribute('data-roll-count')) || 1;
+    
+    // Extract base reference from the selected value if not provided
+    if (!baseRef) {
+        const rollMatch = fromValue.match(/^(.+?)-(\d+)$/);
+        if (rollMatch) {
+            baseRef = rollMatch[1];
+        } else {
+            baseRef = fromValue;
+        }
+    }
+    
+    // Find all rolls in the bundle to determine the last roll
+    let maxRollCount = rollCount;
+    let lastRollRef = null;
+    
+    if (baseRef) {
+        // Find the maximum roll count for this base reference across all options
+        Array.from(fromRef.options).forEach(option => {
+            if (option.value && option.value !== '') {
+                const optionBaseRef = option.getAttribute('data-base-ref') || option.value.replace(/-\d+$/, '');
+                const optionIsBundle = option.getAttribute('data-is-bundle') === 'true';
+                if (optionIsBundle && optionBaseRef === baseRef) {
+                    const optionRollCount = parseInt(option.getAttribute('data-roll-count')) || 1;
+                    if (optionRollCount > maxRollCount) {
+                        maxRollCount = optionRollCount;
+                    }
+                }
+            }
+        });
+        
+        // The last roll reference is the one with the highest roll count for this base reference
+        // Format: baseRef-maxRollCount (e.g., "REF-4" if maxRollCount is 4)
+        lastRollRef = baseRef + '-' + maxRollCount;
+    }
+    
+    // Find the index of the selected From reference in the To dropdown
+    let fromIndex = -1;
+    Array.from(toRef.options).forEach((option, index) => {
+        if (option.value === fromValue) {
+            fromIndex = index;
+        }
+    });
+    
+    // Auto-select the last roll of the bundle in To dropdown
+    if (baseRef && maxRollCount > 0 && autoSelect) {
+        let found = false;
+        
+        // First, try to find the last roll reference in To dropdown
+        Array.from(toRef.options).forEach(option => {
+            if (option.value === lastRollRef) {
+                toRef.value = lastRollRef;
+                found = true;
+            }
+        });
+        
+        // If not found, try to find any option with the same base reference and highest roll count
+        if (!found && lastRollRef) {
+            let bestOption = null;
+            let bestRollCount = 0;
+            
+            Array.from(toRef.options).forEach(option => {
+                if (option.value && option.value !== '') {
+                    const optionBaseRef = option.getAttribute('data-base-ref') || option.value.replace(/-\d+$/, '');
+                    const optionRollCount = parseInt(option.getAttribute('data-roll-count')) || 1;
+                    
+                    if (optionBaseRef === baseRef && optionRollCount >= bestRollCount) {
+                        bestRollCount = optionRollCount;
+                        bestOption = option;
+                    }
+                }
+            });
+            
+            if (bestOption) {
+                toRef.value = bestOption.value;
+                found = true;
+            }
+        }
+    }
+    
+    // Show only references from the target From reference onwards
+    Array.from(toRef.options).forEach((option, index) => {
+        if (index === 0) {
+            // Keep the placeholder
+            option.style.display = '';
+        } else if (index >= fromIndex) {
+            // Show this option and onwards
+            option.style.display = '';
+        } else {
+            // Hide options before the target From reference
+            option.style.display = 'none';
+        }
+    });
+}
+
+// Apply bulk reference selection
+function applyFabricAfterBulkReferenceSelection() {
+    const fromRef = document.getElementById('fabric_after_from_reference').value;
+    const toRef = document.getElementById('fabric_after_to_reference').value;
+    
+    if (!fromRef || !toRef) {
+        alert('Please select both From and To references');
+        return;
+    }
+    
+    // Store the range in hidden input
+    const bundleRangeInput = document.getElementById('fabric_after_bundle_reference_range');
+    if (bundleRangeInput) {
+        bundleRangeInput.value = fromRef + '|' + toRef;
+    }
+    
+    // Update the main reference dropdown to show the range (for display purposes)
+    const sampleId = document.getElementById('sample_id');
+    if (sampleId) {
+        // Find or create an option for the range
+        let rangeOption = Array.from(sampleId.options).find(opt => opt.value === fromRef + '|' + toRef);
+        if (!rangeOption) {
+            rangeOption = document.createElement('option');
+            rangeOption.value = fromRef + '|' + toRef;
+            rangeOption.textContent = fromRef + ' to ' + toRef;
+            sampleId.appendChild(rangeOption);
+        }
+        sampleId.value = rangeOption.value;
+    }
+}
+
+// Clear bulk reference selection
+function clearFabricAfterBulkReferenceSelection() {
+    const fromRef = document.getElementById('fabric_after_from_reference');
+    const toRef = document.getElementById('fabric_after_to_reference');
+    const bundleRangeInput = document.getElementById('fabric_after_bundle_reference_range');
+    
+    if (fromRef) fromRef.value = '';
+    if (toRef) toRef.value = '';
+    if (bundleRangeInput) bundleRangeInput.value = '';
+    
+    // Reset To dropdown to show all options
+    if (toRef) {
+        Array.from(toRef.options).forEach(option => {
+            option.style.display = '';
+        });
+    }
+}
+
+// Handle reference selection (for single mode)
+function handleFabricAfterReferenceSelection(selectedValue) {
+    // No additional action needed for single reference selection
 }
 
 function clearForm() {
     if (confirm('Are you sure you want to clear all data?')) {
         document.querySelector('form').reset();
-        document.getElementById('sample_id').selectedIndex = 0;
         document.querySelector('input[name="report_number"]').value = '<?php echo htmlspecialchars($generated_report_number); ?>';
         document.querySelector('input[name="test_performed_by"]').value = '<?php echo htmlspecialchars($reporter_full_name); ?>';
+        
+        // Reset reference type to Single
+        setFabricAfterReferenceType('single');
+        clearFabricAfterBulkReferenceSelection();
+        
+        // Reset sample_id dropdown
+        const sampleId = document.getElementById('sample_id');
+        if (sampleId) {
+            sampleId.selectedIndex = 0;
+        }
     }
 }
 

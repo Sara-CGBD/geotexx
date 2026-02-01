@@ -108,30 +108,27 @@ if ($checkCol && $checkCol->num_rows > 0) {
 
 $pre_scrap_id = $scrap_prefix . str_pad((string)$next_scrap_number, 3, '0', STR_PAD_LEFT);
 
-// Fetch reference numbers from fiber_to_roll_entry (exclude already submitted lab scrap)
+// Fetch reference numbers from gsm_roll_entry (GSM and roll input data table) - exclude already submitted lab scrap
 $references = [];
-$refQuery = $conn->query("SELECT DISTINCT f.reference_number 
-    FROM fiber_to_roll_entry f
-    WHERE f.reference_number IS NOT NULL 
-    AND f.reference_number NOT IN (
-        SELECT s.reference_number FROM scrap s 
-        WHERE s.scrap_product = 'Lab Testing' 
-        AND s.is_deleted = 0 
-        AND s.reference_number IS NOT NULL
-    )
-    ORDER BY f.date_time DESC LIMIT 50");
-if ($refQuery) {
-    while ($row = $refQuery->fetch_assoc()) {
-        $references[] = $row;
-    }
-}
+$tableCheck = $conn->query("SHOW TABLES LIKE 'gsm_roll_entry'");
+$gsmTableExists = ($tableCheck && $tableCheck->num_rows > 0);
 
-// Fetch CNC batches
-$cncBatches = [];
-$cncQuery = $conn->query("SELECT DISTINCT cnc_cutting_batch FROM cnc_entries WHERE cnc_cutting_batch IS NOT NULL ORDER BY date_time DESC LIMIT 50");
-if ($cncQuery) {
-    while ($row = $cncQuery->fetch_assoc()) {
-        $cncBatches[] = $row;
+if ($gsmTableExists) {
+    $refQuery = $conn->query("SELECT DISTINCT g.reference as reference_number 
+        FROM gsm_roll_entry g
+        WHERE g.reference IS NOT NULL 
+        AND g.reference != ''
+        AND g.reference NOT IN (
+            SELECT s.reference_number FROM scrap s 
+            WHERE s.scrap_product = 'Lab Testing' 
+            AND s.is_deleted = 0 
+            AND s.reference_number IS NOT NULL
+        )
+        ORDER BY g.created_at DESC LIMIT 50");
+    if ($refQuery) {
+        while ($row = $refQuery->fetch_assoc()) {
+            $references[] = $row;
+        }
     }
 }
 
@@ -216,23 +213,10 @@ $conn->close();
       </select>
     </div>
 
-    <!-- CNC Cutting Batch (optional) -->
-    <div class="form-group">
-      <label>CNC Cutting Batch:</label>
-      <select id="cutting_batch" name="cutting_batch">
-        <option value="">-- Select CNC Batch (Optional) --</option>
-        <?php foreach($cncBatches as $batch): ?>
-          <option value="<?php echo htmlspecialchars($batch['cnc_cutting_batch']); ?>">
-            <?php echo htmlspecialchars($batch['cnc_cutting_batch']); ?>
-          </option>
-        <?php endforeach; ?>
-      </select>
-    </div>
-
     <!-- Weight (kg) - REQUIRED -->
     <div class="form-group">
       <label>Weight (kg): <span style="color: #e74c3c;">*</span></label>
-      <input type="number" id="weight" name="weight" step="0.01" min="0.01" required placeholder="Enter weight in kg" oninput="updateSummary()">
+      <input type="number" id="weight" name="weight" step="1" min="1" required placeholder="Enter weight in kg" oninput="updateSummary()">
     </div>
 
     <!-- Scrap Type -->

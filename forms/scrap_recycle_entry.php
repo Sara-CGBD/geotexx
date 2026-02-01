@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 // scrap_recycle_entry.php
 
 session_start();
@@ -71,9 +71,9 @@ if ($sheetRes) {
     }
 }
 
-// Fetch Swing Production side cuts (with cutting_batch_no)
-$swingProductionScraps = [];
-$swingRes = $conn->query("SELECT 
+// Fetch Sewing Production side cuts (with cutting_batch_no)
+$sewingProductionScraps = [];
+$sewingRes = $conn->query("SELECT 
     scs.id,
     scs.entry_id,
     scs.entry_date as date,
@@ -87,15 +87,15 @@ $swingRes = $conn->query("SELECT
     (scs.quantity_kg - COALESCE(SUM({$srSideCase}), 0)) as remaining_qty
 FROM side_cut_scrap scs
 LEFT JOIN scrap_recycle sr ON scs.id = sr.scrap_id AND {$srSideCond}
-WHERE scs.category = 'Swing Production'
+WHERE (scs.category = 'Sewing Production' OR scs.category = 'Swing Production')
   AND scs.cutting_batch_no IS NOT NULL 
   AND scs.cutting_batch_no != ''
 GROUP BY scs.id, scs.entry_id, scs.entry_date, scs.shift, scs.category, scs.reference_number, scs.cutting_batch_no, scs.quantity_kg
 HAVING remaining_qty > 0
 ORDER BY scs.id DESC");
-if ($swingRes) {
-    while ($row = $swingRes->fetch_assoc()) {
-        $swingProductionScraps[] = $row;
+if ($sewingRes) {
+    while ($row = $sewingRes->fetch_assoc()) {
+        $sewingProductionScraps[] = $row;
     }
 }
 
@@ -244,7 +244,7 @@ function generateRecycleId() {
       <label>Production Category: </label>
       <div class="btn-group" id="categoryGroup">
         <button type="button" class="btn" data-value="Sheet Production" onclick="selectCategory(this)">Sheet Production</button>
-        <button type="button" class="btn" data-value="Swing Production" onclick="selectCategory(this)">Swing Production</button>
+        <button type="button" class="btn" data-value="Sewing Production" onclick="selectCategory(this)">Sewing Production</button>
       </div>
       <input type="hidden" id="category" name="category" value="">
     </div>
@@ -277,12 +277,12 @@ function generateRecycleId() {
       </select>
     </div>
 
-    <!-- Scrap ID - Swing Production (CNC Cutting Batch) -->
-    <div class="form-group" id="swingProductionSection" style="display:none;">
+    <!-- Scrap ID - Sewing Production (CNC Cutting Batch) -->
+    <div class="form-group" id="sewingProductionSection" style="display:none;">
       <label>Scrap ID: </label>
-      <select id="scrap_id_swing" onchange="updateScrapId()">
+      <select id="scrap_id_sewing" onchange="updateScrapId()">
         <option value="">-- Select CNC Cutting Batch --</option>
-        <?php foreach($swingProductionScraps as $s): ?>
+        <?php foreach($sewingProductionScraps as $s): ?>
           <?php 
             $id = $s['id'] ?? '';
             $scrapType = $s['scrap_type'] ?? 'side_cut';
@@ -370,10 +370,10 @@ function selectCategory(btn) {
   // Show/hide appropriate section
   if (category === 'Sheet Production') {
     document.getElementById('sheetProductionSection').style.display = 'block';
-    document.getElementById('swingProductionSection').style.display = 'none';
-    document.getElementById('scrap_id_swing').value = '';
-  } else if (category === 'Swing Production') {
-    document.getElementById('swingProductionSection').style.display = 'block';
+    document.getElementById('sewingProductionSection').style.display = 'none';
+    document.getElementById('scrap_id_sewing').value = '';
+  } else if (category === 'Sewing Production') {
+    document.getElementById('sewingProductionSection').style.display = 'block';
     document.getElementById('sheetProductionSection').style.display = 'none';
     document.getElementById('scrap_id_sheet').value = '';
   }
@@ -389,7 +389,7 @@ function updateScrapId() {
   const category = document.getElementById('category').value;
   const scrapSelect = category === 'Sheet Production' 
     ? document.getElementById("scrap_id_sheet")
-    : document.getElementById("scrap_id_swing");
+    : document.getElementById("scrap_id_sewing");
   
   // Update the hidden scrap_id input
   document.getElementById('scrap_id').value = scrapSelect.value;
@@ -432,7 +432,7 @@ function updateRemainingQty() {
   const category = document.getElementById("category").value;
   const scrapSelect = category === 'Sheet Production' 
     ? document.getElementById("scrap_id_sheet")
-    : document.getElementById("scrap_id_swing");
+    : document.getElementById("scrap_id_sewing");
   
   const selectedOption = scrapSelect.options[scrapSelect.selectedIndex];
   const availableQtyField = document.getElementById("available_qty");
@@ -505,7 +505,7 @@ function updateSummary(){
   const category = document.getElementById('category').value;
   const scrapSelect = category === 'Sheet Production' 
     ? document.getElementById("scrap_id_sheet")
-    : document.getElementById("scrap_id_swing");
+    : document.getElementById("scrap_id_sewing");
   const scrapText = scrapSelect && scrapSelect.selectedIndex >= 0 ? scrapSelect.options[scrapSelect.selectedIndex].text : '';
   const scrapId = scrapSelect ? scrapSelect.value : '';
   const qtyInput = document.getElementById("recycled_qty");
@@ -559,7 +559,7 @@ document.addEventListener('DOMContentLoaded', function(){
   
   // Add event listeners for dynamic updates
   document.getElementById("scrap_id_sheet").addEventListener("change", updateSummary);
-  document.getElementById("scrap_id_swing").addEventListener("change", updateSummary);
+  document.getElementById("scrap_id_sewing").addEventListener("change", updateSummary);
   document.getElementById("recycled_qty").addEventListener("input", updateSummary);
   document.getElementById("remarks").addEventListener("input", updateSummary);
 });

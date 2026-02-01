@@ -1176,6 +1176,23 @@ $generated_report_no = generateNextReportNumber($conn);
               Clear
             </button>
           </div>
+          
+          <!-- Reference Test Status Display (shown when Apply is clicked) -->
+          <div id="wpt_reference_test_status_container" style="display:none; margin-top:20px; padding:0; background:#ffffff; border:2px solid #e0e0e0; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,0.1); max-width:600px; margin-left:auto; margin-right:auto;">
+            <div style="padding:20px; background:linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius:12px 12px 0 0; color:white;">
+              <div style="display:flex; align-items:center; gap:12px;">
+                <i class="fas fa-list-check" style="font-size:24px;"></i>
+                <div>
+                  <h3 style="margin:0; font-size:18px; font-weight:600;" id="wpt_reference_status_title">Reference Test Status</h3>
+                  <div style="font-size:13px; opacity:0.9; margin-top:4px;" id="wpt_reference_status_summary"></div>
+                </div>
+              </div>
+            </div>
+            <div id="wpt_reference_test_status_list" style="padding:20px; max-height:500px; overflow-y:auto;">
+              <!-- Status will be populated here -->
+            </div>
+          </div>
+          
           <!-- Hidden input to store the selected product_reference when line-based selection is used -->
           <input type="hidden" id="wpt_line_based_product_reference" name="product_reference" value="">
         </div>
@@ -1750,9 +1767,13 @@ function populateWPTLineReferences(line) {
             return;
         }
         
+        // Check if this reference is part of a bundle (ends with -N pattern)
+        const isPartOfBundle = /-\d+$/.test(ref.value);
+        const displayText = isPartOfBundle ? ref.text + ' (Bundle)' : ref.text;
+        
         const fromOption = document.createElement('option');
         fromOption.value = ref.value;
-        fromOption.textContent = ref.text;
+        fromOption.textContent = displayText;
         fromOption.setAttribute('data-is-bundle', ref.isBundle);
         fromOption.setAttribute('data-base-ref', ref.baseRef);
         fromOption.setAttribute('data-roll-count', ref.rollCount);
@@ -1760,7 +1781,7 @@ function populateWPTLineReferences(line) {
         
         const toOption = document.createElement('option');
         toOption.value = ref.value;
-        toOption.textContent = ref.text;
+        toOption.textContent = displayText;
         toOption.setAttribute('data-is-bundle', ref.isBundle);
         toOption.setAttribute('data-base-ref', ref.baseRef);
         toOption.setAttribute('data-roll-count', ref.rollCount);
@@ -1868,8 +1889,44 @@ function updateWPTReferenceRange(autoSelect = true) {
         let actualBaseRef = baseRef;
         let actualRollCount = rollCount;
         
+        // Extract base reference from the selected value
+        const rollMatch = fromValue.match(/^(.+)-(\d+)$/);
+        if (rollMatch) {
+            actualBaseRef = rollMatch[1];
+            const selectedRollNum = parseInt(rollMatch[2]);
+            
+            // If first roll (-1) is selected, find the highest roll number for this base reference
+            if (selectedRollNum === 1) {
+                // Find all rolls for this base reference in the To dropdown
+                let highestRoll = 0;
+                let highestRollRef = '';
+                
+                Array.from(toRefSelect.options).forEach(option => {
+                    if (option.value && option.value !== '') {
+                        const optionRollMatch = option.value.match(/^(.+)-(\d+)$/);
+                        if (optionRollMatch) {
+                            const optionBaseRef = optionRollMatch[1];
+                            const optionRollNum = parseInt(optionRollMatch[2]);
+                            
+                            // If it's from the same base reference
+                            if (optionBaseRef === actualBaseRef && optionRollNum > highestRoll) {
+                                highestRoll = optionRollNum;
+                                highestRollRef = option.value;
+                            }
+                        }
+                    }
+                });
+                
+                // Auto-select the highest roll found
+                if (highestRollRef && highestRoll > 1) {
+                    toRefSelect.value = highestRollRef;
+                    return; // Exit early since we've found and selected the last roll
+                }
+            }
+        }
+        
+        // Fallback to original logic for other cases
         if (!actualBaseRef) {
-            const rollMatch = fromValue.match(/^(.+)-(\d+)$/);
             if (rollMatch) {
                 actualBaseRef = rollMatch[1];
             } else {
@@ -1959,6 +2016,159 @@ function applyWPTBulkReferenceSelection() {
         }
         productRefSelect.value = rangeOption.value;
     }
+    
+    // Check which references in the range have been submitted
+    checkWPTReferenceTestStatus(fromRef, toRef);
+}
+
+// Check which references in range have been submitted for Water Permeability Test
+function checkWPTReferenceTestStatus(fromRef, toRef) {
+    const container = document.getElementById('wpt_reference_test_status_container');
+    const statusList = document.getElementById('wpt_reference_test_status_list');
+    const statusTitle = document.getElementById('wpt_reference_status_title');
+    const statusSummary = document.getElementById('wpt_reference_status_summary');
+    
+    if (!container || !statusList) {
+        console.error('Reference status container elements not found!');
+        return;
+    }
+    
+    // Show container with loading state
+    container.style.display = 'block';
+    if (statusTitle) statusTitle.textContent = 'Test Status';
+    statusList.innerHTML = '<div style="padding:20px; text-align:center; color:#666;"><i class="fas fa-spinner fa-spin" style="font-size:18px;"></i><div style="margin-top:8px; font-size:12px;">Loading...</div></div>';
+    if (statusSummary) statusSummary.innerHTML = '';
+    
+    // Fetch submitted references
+    fetch(`api/check_submitted_tests_range_wpt.php?from_reference=${encodeURIComponent(fromRef)}&to_reference=${encodeURIComponent(toRef)}`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                displayWPTReferenceStatus(data, fromRef, toRef);
+            } else {
+                statusList.innerHTML = `<div style="padding:12px; text-align:center; color:#dc3545; font-size:12px;"><i class="fas fa-exclamation-triangle"></i> ${data.error || 'Unknown error'}</div>`;
+            }
+        })
+        .catch(error => {
+            console.error('Error checking reference status:', error);
+            statusList.innerHTML = `<div style="padding:12px; text-align:center; color:#dc3545; font-size:12px;"><i class="fas fa-exclamation-triangle"></i> Error loading status</div>`;
+        });
+}
+
+// Display reference status with modern UI
+function displayWPTReferenceStatus(data, fromRef, toRef) {
+    const statusList = document.getElementById('wpt_reference_test_status_list');
+    const statusSummary = document.getElementById('wpt_reference_status_summary');
+    
+    if (!statusList) return;
+    
+    const submittedRefs = data.submitted_references || [];
+    const submittedRefSet = new Set(submittedRefs.map(r => r.reference));
+    
+    // Get all references in range
+    const fromSelect = document.getElementById('wpt_from_reference');
+    const toSelect = document.getElementById('wpt_to_reference');
+    const allRefs = [];
+    
+    if (fromSelect && toSelect) {
+        const fromIndex = Array.from(fromSelect.options).findIndex(opt => opt.value === fromRef);
+        const toIndex = Array.from(toSelect.options).findIndex(opt => opt.value === toRef);
+        
+        if (fromIndex !== -1 && toIndex !== -1) {
+            for (let i = fromIndex; i <= toIndex; i++) {
+                const opt = fromSelect.options[i];
+                if (opt && opt.value) {
+                    allRefs.push(opt.value);
+                }
+            }
+        }
+    }
+    
+    // If we couldn't get refs from dropdown, use submitted refs to infer
+    if (allRefs.length === 0) {
+        const fromMatch = fromRef.match(/^(.+?)-(\d+)$/);
+        const toMatch = toRef.match(/^(.+?)-(\d+)$/);
+        if (fromMatch && toMatch && fromMatch[1] === toMatch[1]) {
+            const base = fromMatch[1];
+            const fromNum = parseInt(fromMatch[2]);
+            const toNum = parseInt(toMatch[2]);
+            for (let i = fromNum; i <= toNum; i++) {
+                allRefs.push(base + '-' + i);
+            }
+        } else {
+            allRefs.push(fromRef, toRef);
+        }
+    }
+    
+    const pendingRefs = allRefs.filter(ref => !submittedRefSet.has(ref));
+    const submittedCount = submittedRefs.length;
+    const pendingCount = pendingRefs.length;
+    
+    // Update summary
+    if (statusSummary) {
+        statusSummary.innerHTML = `${allRefs.length} refs | ${submittedCount} done | ${pendingCount} pending`;
+    }
+    
+    // Build HTML - compact modern design
+    let html = '';
+    
+    if (submittedCount > 0) {
+        html += `
+            <div style="margin-bottom:12px;">
+                <div style="display:flex; align-items:center; gap:6px; margin-bottom:8px; padding:6px 10px; background:#e8f5e9; border-radius:6px;">
+                    <i class="fas fa-check-circle" style="color:#4caf50; font-size:14px;"></i>
+                    <span style="color:#2e7d32; font-size:12px; font-weight:600;">Submitted (${submittedCount})</span>
+                </div>
+                <div style="display:flex; flex-wrap:wrap; gap:6px;">
+        `;
+        
+        submittedRefs.forEach(ref => {
+            const statusBadge = ref.status === 'approved' ? '<span style="background:#4caf50; color:white; padding:1px 6px; border-radius:3px; font-size:10px; font-weight:500;">✓</span>' :
+                           ref.status === 'checked' ? '<span style="background:#2196f3; color:white; padding:1px 6px; border-radius:3px; font-size:10px; font-weight:500;">✓</span>' :
+                           '<span style="background:#ff9800; color:white; padding:1px 6px; border-radius:3px; font-size:10px; font-weight:500;">⏳</span>';
+            html += `
+                <div style="padding:6px 10px; background:#f8f9fa; border:1px solid #e0e0e0; border-radius:5px; display:flex; align-items:center; gap:6px; font-size:11px;">
+                    <span style="color:#333; font-weight:500;">${ref.reference}</span>
+                    ${statusBadge}
+                </div>
+            `;
+        });
+        
+        html += `</div></div>`;
+    }
+    
+    if (pendingCount > 0) {
+        html += `
+            <div>
+                <div style="display:flex; align-items:center; gap:6px; margin-bottom:8px; padding:6px 10px; background:#fff3e0; border-radius:6px;">
+                    <i class="fas fa-clock" style="color:#ff9800; font-size:14px;"></i>
+                    <span style="color:#e65100; font-size:12px; font-weight:600;">Pending (${pendingCount})</span>
+                </div>
+                <div style="display:flex; flex-wrap:wrap; gap:6px;">
+        `;
+        
+        pendingRefs.forEach(ref => {
+            html += `
+                <div style="padding:6px 10px; background:#fff8e1; border:1px solid #ffcc80; border-radius:5px; display:flex; align-items:center; gap:6px; font-size:11px;">
+                    <span style="color:#333; font-weight:500;">${ref}</span>
+                    <span style="background:#ff9800; color:white; padding:1px 6px; border-radius:3px; font-size:10px; font-weight:500;">→</span>
+                </div>
+            `;
+        });
+        
+        html += `</div></div>`;
+    }
+    
+    if (submittedCount === 0 && pendingCount === 0) {
+        html = `
+            <div style="padding:20px; text-align:center; color:#999;">
+                <i class="fas fa-info-circle" style="font-size:20px; color:#2196F3; margin-bottom:8px;"></i>
+                <div style="font-size:12px; color:#666;">No references found in range</div>
+            </div>
+        `;
+    }
+    
+    statusList.innerHTML = html;
 }
 
 // Clear bulk reference selection

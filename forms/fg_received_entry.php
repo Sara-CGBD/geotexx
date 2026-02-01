@@ -80,24 +80,66 @@ if ($table_check && $table_check->num_rows > 0) {
 
 $pre_entry_id = $entry_prefix . str_pad((string)$next_entry_number, 3, '0', STR_PAD_LEFT);
 
-// Fetch trip numbers from roll_transfer where to_location = 'FG'
+// Fetch trip numbers and references from fg_entry where product_type = 'roll'
+// These are entries that have been submitted in FG Entry and are ready to be received
 $fgTripNumbers = [];
 $fgRollTripReferences = [];
 
-$hasRollTransfer = $conn->query("SHOW TABLES LIKE 'roll_transfer'")->num_rows > 0;
-if ($hasRollTransfer) {
-    $hasToLocation = $conn->query("SHOW COLUMNS FROM roll_transfer LIKE 'to_location'")->num_rows > 0;
-    $hasTrip = $conn->query("SHOW COLUMNS FROM roll_transfer LIKE 'trip'")->num_rows > 0;
+$hasFgEntry = $conn->query("SHOW TABLES LIKE 'fg_entry'")->num_rows > 0;
+if ($hasFgEntry) {
+    // Ensure trip_number column exists (required for FG Received Entry - trips come from FG Entry)
+    $colCheck = $conn->query("SHOW COLUMNS FROM fg_entry LIKE 'trip_number'");
+    $hasTrip = ($colCheck && $colCheck->num_rows > 0);
+    if (!$hasTrip) {
+        $conn->query("ALTER TABLE fg_entry ADD COLUMN trip_number INT NULL AFTER reference_number");
+        $hasTrip = true;
+        error_log("FG Received Entry: Added trip_number column to fg_entry");
+    }
+    // Backfill trip_number for existing roll entries (from roll_transfer) so they appear in dropdown
+    $rtExists = $conn->query("SHOW TABLES LIKE 'roll_transfer'")->num_rows > 0;
+    if ($rtExists && $hasTrip) {
+        $rtCols = $conn->query("SHOW COLUMNS FROM roll_transfer");
+        $hasToLoc = false;
+        $hasRef = false;
+        $hasTripCol = false;
+        if ($rtCols) {
+            while ($c = $rtCols->fetch_assoc()) {
+                if ($c['Field'] === 'to_location') $hasToLoc = true;
+                if ($c['Field'] === 'reference_number') $hasRef = true;
+                if ($c['Field'] === 'trip') $hasTripCol = true;
+            }
+        }
+        if ($hasToLoc && $hasRef && $hasTripCol) {
+            $conn->query("
+                UPDATE fg_entry fe
+                INNER JOIN (
+                    SELECT reference_number, MAX(trip) as trip
+                    FROM roll_transfer
+                    WHERE UPPER(TRIM(to_location)) = 'FG'
+                      AND reference_number IS NOT NULL AND TRIM(reference_number) != ''
+                      AND trip IS NOT NULL AND trip > 0
+                    GROUP BY reference_number
+                ) rt ON TRIM(fe.reference_number) = TRIM(rt.reference_number)
+                SET fe.trip_number = rt.trip
+                WHERE fe.product_type = 'roll'
+                  AND (fe.trip_number IS NULL OR fe.trip_number = 0)
+                  AND fe.reference_number IS NOT NULL
+            ");
+        }
+    }
+    $hasProductType = $conn->query("SHOW COLUMNS FROM fg_entry LIKE 'product_type'")->num_rows > 0;
+    $hasReference = $conn->query("SHOW COLUMNS FROM fg_entry LIKE 'reference_number'")->num_rows > 0;
+    $hasDateTime = $conn->query("SHOW COLUMNS FROM fg_entry LIKE 'date_time'")->num_rows > 0;
     
-    if ($hasToLocation && $hasTrip) {
-        // Exclude trip numbers that have already been submitted in fg_received_entry
+    if ($hasProductType && $hasTrip) {
+        // Exclude trip numbers that have already been received in fg_received_entry
         $hasFgReceived = $conn->query("SHOW TABLES LIKE 'fg_received_entry'")->num_rows > 0;
         $excludeTripFilter = "";
         if ($hasFgReceived) {
             $hasTripCol = $conn->query("SHOW COLUMNS FROM fg_received_entry LIKE 'trip_number'")->num_rows > 0;
             if ($hasTripCol) {
                 // Exclude trips that exist in fg_received_entry for roll entries
-                $excludeTripFilter = "AND rt.trip NOT IN (
+                $excludeTripFilter = "AND fe.trip_number NOT IN (
                     SELECT DISTINCT trip_number 
                     FROM fg_received_entry 
                     WHERE trip_number IS NOT NULL 
@@ -107,43 +149,41 @@ if ($hasRollTransfer) {
             }
         }
         
+        // Fetch trip numbers from fg_entry
+        $dateSelect = $hasDateTime ? ", MAX(fe.date_time) as last_entry_date" : "";
         $tripQuery = $conn->query("
-            SELECT DISTINCT rt.trip, MAX(rt.date_time) as last_transfer_date
-            FROM roll_transfer rt
-            WHERE rt.to_location = 'FG' 
-              AND rt.trip IS NOT NULL
+            SELECT DISTINCT fe.trip_number as trip{$dateSelect}
+            FROM fg_entry fe
+            WHERE fe.product_type = 'roll' 
+              AND fe.trip_number IS NOT NULL
+              AND fe.trip_number > 0
               {$excludeTripFilter}
-            GROUP BY rt.trip
-            ORDER BY rt.trip DESC
+            GROUP BY fe.trip_number
+            ORDER BY fe.trip_number DESC
             LIMIT 50
         ");
         if ($tripQuery) {
             while ($row = $tripQuery->fetch_assoc()) {
                 $fgTripNumbers[] = [
                     'trip' => (int)$row['trip'],
-                    'last_transfer_date' => $row['last_transfer_date']
+                    'last_transfer_date' => $row['last_entry_date'] ?? null
                 ];
             }
+            error_log("FG Received Entry: Found " . count($fgTripNumbers) . " trip numbers from fg_entry");
         }
     }
     
-    // Fetch references for each trip from roll_transfer
-    // Exclude references that have already been submitted in fg_received_entry
-    if ($hasToLocation && $hasTrip) {
-        // Check if is_deleted column exists
-        $hasIsDeleted = $conn->query("SHOW COLUMNS FROM roll_transfer LIKE 'is_deleted'")->num_rows > 0;
-        $deletedCondition = $hasIsDeleted ? "AND (rt.is_deleted = 0 OR rt.is_deleted IS NULL)" : "";
-        
+    // Fetch references for each trip from fg_entry
+    // Exclude references that have already been received in fg_received_entry
+    if ($hasProductType && $hasTrip && $hasReference) {
         $hasFgReceived = $conn->query("SHOW TABLES LIKE 'fg_received_entry'")->num_rows > 0;
         $excludeFilter = "";
         if ($hasFgReceived) {
             $hasRefCol = $conn->query("SHOW COLUMNS FROM fg_received_entry LIKE 'reference_number'")->num_rows > 0;
             if ($hasRefCol) {
                 // Exclude references that exist in fg_received_entry for the SAME trip
-                // Handle comma-separated reference numbers by using FIND_IN_SET or LIKE pattern
-                // Only exclude if the reference was received for the same trip number
                 $hasTripCol = $conn->query("SHOW COLUMNS FROM fg_received_entry LIKE 'trip_number'")->num_rows > 0;
-                $tripMatch = $hasTripCol ? "AND fre.trip_number = rt.trip" : "";
+                $tripMatch = $hasTripCol ? "AND fre.trip_number = fe.trip_number" : "";
                 
                 $excludeFilter = "AND NOT EXISTS (
                     SELECT 1 
@@ -153,59 +193,41 @@ if ($hasRollTransfer) {
                       AND fre.reference_number != ''
                       {$tripMatch}
                       AND (
-                        fre.reference_number = rt.reference_number
-                        OR FIND_IN_SET(rt.reference_number, REPLACE(fre.reference_number, ', ', ',')) > 0
-                        OR fre.reference_number LIKE CONCAT(rt.reference_number, ',%')
-                        OR fre.reference_number LIKE CONCAT('%, ', rt.reference_number, ',%')
-                        OR fre.reference_number LIKE CONCAT('%, ', rt.reference_number)
+                        fre.reference_number = fe.reference_number
+                        OR FIND_IN_SET(fe.reference_number, REPLACE(fre.reference_number, ', ', ',')) > 0
+                        OR fre.reference_number LIKE CONCAT(fe.reference_number, ',%')
+                        OR fre.reference_number LIKE CONCAT('%, ', fe.reference_number, ',%')
+                        OR fre.reference_number LIKE CONCAT('%, ', fe.reference_number)
                       )
                 )";
             }
         }
         
-        // Debug: Check total references without exclusion
-        $testQuery = $conn->query("
-            SELECT COUNT(*) as total_count
-            FROM roll_transfer rt
-            WHERE rt.to_location = 'FG'
-              AND rt.reference_number IS NOT NULL
-              AND rt.reference_number != ''
-              AND rt.trip IS NOT NULL
-              {$deletedCondition}
-        ");
-        $testResult = $testQuery ? $testQuery->fetch_assoc() : null;
-        error_log("FG Received Entry: Total references in roll_transfer with to_location='FG' and trip IS NOT NULL: " . ($testResult['total_count'] ?? 0));
+        // Fetch references from fg_entry
+        $hasDeliveredQty = $conn->query("SHOW COLUMNS FROM fg_entry LIKE 'delivered_quantity'")->num_rows > 0;
+        $hasTotalArea = $conn->query("SHOW COLUMNS FROM fg_entry LIKE 'total_area'")->num_rows > 0;
+        $hasRollSize = $conn->query("SHOW COLUMNS FROM fg_entry LIKE 'roll_size'")->num_rows > 0;
         
-        // Debug: Check references after exclusion filter
-        $testQuery2 = $conn->query("
-            SELECT COUNT(*) as total_count
-            FROM roll_transfer rt
-            WHERE rt.to_location = 'FG'
-              AND rt.reference_number IS NOT NULL
-              AND rt.reference_number != ''
-              AND rt.trip IS NOT NULL
-              {$deletedCondition}
-              {$excludeFilter}
-        ");
-        $testResult2 = $testQuery2 ? $testQuery2->fetch_assoc() : null;
-        error_log("FG Received Entry: References after exclusion filter: " . ($testResult2['total_count'] ?? 0));
+        $deliveredQtySelect = $hasDeliveredQty ? "SUM(fe.delivered_quantity) AS total_amount" : "0 AS total_amount";
+        $totalAreaSelect = $hasTotalArea ? "COALESCE(SUM(fe.total_area), 0) AS total_area" : "0 AS total_area";
+        $rollSizeSelect = $hasRollSize ? "MAX(fe.roll_size) AS roll_size" : "NULL AS roll_size";
         
         $refQuery = $conn->query("
             SELECT 
-                rt.reference_number,
-                rt.trip,
-                SUM(rt.amount_kg) AS total_amount,
-                COALESCE(re.total_area, 0) AS total_area
-            FROM roll_transfer rt
-            LEFT JOIN roll_entry re ON rt.reference_number = re.reference_number
-            WHERE rt.to_location = 'FG'
-              AND rt.reference_number IS NOT NULL
-              AND rt.reference_number != ''
-              AND rt.trip IS NOT NULL
-              {$deletedCondition}
+                fe.reference_number,
+                fe.trip_number as trip,
+                {$deliveredQtySelect},
+                {$totalAreaSelect},
+                {$rollSizeSelect}
+            FROM fg_entry fe
+            WHERE fe.product_type = 'roll'
+              AND fe.reference_number IS NOT NULL
+              AND fe.reference_number != ''
+              AND fe.trip_number IS NOT NULL
+              AND fe.trip_number > 0
               {$excludeFilter}
-            GROUP BY rt.reference_number, rt.trip, re.total_area
-            ORDER BY MAX(rt.date_time) DESC
+            GROUP BY fe.reference_number, fe.trip_number
+            ORDER BY MAX(fe.date_time) DESC
             LIMIT 400
         ");
         
@@ -216,16 +238,17 @@ if ($hasRollTransfer) {
                     'reference_number' => $row['reference_number'],
                     'trip' => (int)$row['trip'],
                     'total_amount' => (float)$row['total_amount'],
-                    'total_area' => (float)$row['total_area']
+                    'total_area' => (float)$row['total_area'],
+                    'roll_size' => $row['roll_size'] ?? null
                 ];
                 $refCount++;
             }
-            error_log("FG Received Entry: Loaded " . $refCount . " references from roll_transfer");
+            error_log("FG Received Entry: Loaded " . $refCount . " references from fg_entry");
         } else {
-            error_log("FG Received Entry: Query failed: " . $conn->error);
+            error_log("FG Received Entry: Reference query failed: " . $conn->error);
         }
     } else {
-        error_log("FG Received Entry: Missing columns - hasToLocation: " . ($hasToLocation ? 'yes' : 'no') . ", hasTrip: " . ($hasTrip ? 'yes' : 'no'));
+        error_log("FG Received Entry: Missing columns - hasProductType: " . ($hasProductType ? 'yes' : 'no') . ", hasTrip: " . ($hasTrip ? 'yes' : 'no') . ", hasReference: " . ($hasReference ? 'yes' : 'no'));
     }
 }
 
@@ -248,14 +271,20 @@ if ($hasFgEntry) {
         $baseBatchExpr = "TRIM(SUBSTRING_INDEX(CONCAT(TRIM(COALESCE(fe.cnc_cutting_batch,'')), '||'), '||', 1))";
         $bagSizeSelect = $hasFgBagSize ? "TRIM(COALESCE(fe.bag_size,'')) AS bag_size" : "'' AS bag_size";
         $bagSizeGroup = $hasFgBagSize ? ", TRIM(COALESCE(fe.bag_size,''))" : "";
-        // Build set of (batch, bag_size) already in fg_received_entry so we exclude them in PHP (avoids HAVING/subquery issues)
+        // Build set of (batch, bag_size) already submitted in fg_received_entry — they won't show in dropdown again
         $receivedKeys = [];
         if ($hasReceivedCnc) {
-            $receivedSql = "SELECT DISTINCT TRIM(COALESCE(cnc_cutting_batch,'')) AS cb, TRIM(COALESCE(bag_size,'')) AS bs FROM fg_received_entry WHERE product_type = 'bag' AND cnc_cutting_batch IS NOT NULL AND cnc_cutting_batch != ''";
+            $receivedSql = "SELECT DISTINCT TRIM(COALESCE(cnc_cutting_batch,'')) AS cb, TRIM(COALESCE(bag_size,'')) AS bs 
+                FROM fg_received_entry 
+                WHERE product_type = 'bag' 
+                  AND cnc_cutting_batch IS NOT NULL 
+                  AND TRIM(COALESCE(cnc_cutting_batch,'')) != '' 
+                  AND TRIM(COALESCE(cnc_cutting_batch,'')) != '0'";
             $receivedRes = $conn->query($receivedSql);
             if ($receivedRes) {
                 while ($rr = $receivedRes->fetch_assoc()) {
-                    $receivedKeys[$rr['cb'] . '||' . $rr['bs']] = true;
+                    $key = $rr['cb'] . '||' . $rr['bs'];
+                    $receivedKeys[$key] = true;
                 }
             }
         }
@@ -277,20 +306,30 @@ if ($hasFgEntry) {
         if ($cncQuery) {
             $hasMaster = $conn->query("SHOW TABLES LIKE 'bag_size_master'")->num_rows > 0;
             while ($row = $cncQuery->fetch_assoc()) {
-                $baseBatch = $row['base_batch'] ?? '';
+                $baseBatch = trim($row['base_batch'] ?? '');
                 $bagSizeVal = isset($row['bag_size']) ? trim($row['bag_size'] ?? '') : '';
+                if ($baseBatch === '' || $baseBatch === '0') {
+                    continue;
+                }
                 if (isset($receivedKeys[$baseBatch . '||' . $bagSizeVal])) {
                     continue;
                 }
                 // Resolve numeric-only bag_size from bag_size_master
                 if ($bagSizeVal !== '' && preg_match('/^\d+$/', $bagSizeVal)) {
                     if ($hasMaster) {
-                        $esc = $conn->real_escape_string($bagSizeVal);
+                        // Use prepared statement for security
                         $len = (int) strlen($bagSizeVal);
-                        $ex = $conn->query("SELECT bag_size FROM bag_size_master WHERE TRIM(bag_size) LIKE '{$esc}%' AND TRIM(bag_size) LIKE '%mm%' AND LENGTH(TRIM(bag_size)) > {$len} ORDER BY bag_size ASC LIMIT 1");
-                        if ($ex && $exRow = $ex->fetch_assoc()) {
-                            $full = trim($exRow['bag_size'] ?? '');
-                            if ($full !== '') $bagSizeVal = $full;
+                        $bagSizePattern = $bagSizeVal . '%';
+                        $exStmt = $conn->prepare("SELECT bag_size FROM bag_size_master WHERE TRIM(bag_size) LIKE ? AND TRIM(bag_size) LIKE '%mm%' AND LENGTH(TRIM(bag_size)) > ? ORDER BY bag_size ASC LIMIT 1");
+                        if ($exStmt) {
+                            $exStmt->bind_param("si", $bagSizePattern, $len);
+                            $exStmt->execute();
+                            $ex = $exStmt->get_result();
+                            if ($ex && $exRow = $ex->fetch_assoc()) {
+                                $full = trim($exRow['bag_size'] ?? '');
+                                if ($full !== '') $bagSizeVal = $full;
+                            }
+                            $exStmt->close();
                         }
                     }
                     if ($bagSizeVal === '1000') $bagSizeVal = '1000mmX700mm';
@@ -473,7 +512,7 @@ $shiftInCharge = trim($_SESSION['full_name'] ?? $_SESSION['username'] ?? 'User')
         <option value="">-- Select Trip Number --</option>
       </select>
       <small style="color:#6c757d; display:block; margin-top:8px;">
-        Select a trip number from roll transfers submitted as FG
+        Select a trip number from FG Entry (roll) - only trips that have been submitted in FG Entry are shown
       </small>
     </div>
 
@@ -485,7 +524,7 @@ $shiftInCharge = trim($_SESSION['full_name'] ?? $_SESSION['username'] ?? 'User')
       </select>
       <input type="hidden" name="bag_size" id="bag_size_from_dropdown" value="">
       <small style="color:#6c757d; display:block; margin-top:8px;">
-        Select a CNC cutting batch from FG entries (bag size shown is saved with the entry)
+        Select a CNC cutting batch from FG entries (bag size saved with the entry). Batches already received won't appear again.
       </small>
     </div>
 
@@ -607,7 +646,7 @@ function loadFGTripNumbers() {
   } else {
     const option = document.createElement('option');
     option.value = '';
-    option.textContent = 'No trips found';
+    option.textContent = 'No trips found - submit FG Entry (roll) first';
     option.disabled = true;
     tripSelect.appendChild(option);
   }
@@ -1130,10 +1169,23 @@ function validateForm() {
       return false;
     }
   } else if (productType === 'bag') {
-    const cncBatch = document.getElementById('cnc_cutting_batch').value;
-    if (!cncBatch) {
-      alert('Please select a CNC Cutting Batch.');
+    updateBagSizeFromDropdown();
+    const cncSelect = document.getElementById('cnc_cutting_batch');
+    const idx = cncSelect ? cncSelect.selectedIndex : -1;
+    const cncBatch = (cncSelect && idx > 0 && cncSelect.options[idx])
+      ? (cncSelect.options[idx].value || cncSelect.value)
+      : (cncSelect ? cncSelect.value : '');
+    if (!cncBatch || String(cncBatch).trim() === '' || String(cncBatch) === '0') {
+      alert('Please select a valid CNC Cutting Batch.');
       return false;
+    }
+    // Ensure the select's value is the selected option (so correct value is always submitted)
+    if (cncSelect && cncSelect.value !== cncBatch) {
+      cncSelect.value = cncBatch;
+    }
+    // Update summary so it always contains the current CNC batch (handler can read from summary if needed)
+    if (typeof updateSummary === 'function') {
+      updateSummary();
     }
     
     const receivedQuantity = document.getElementById('received_quantity').value;

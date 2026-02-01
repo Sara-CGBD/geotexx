@@ -573,12 +573,15 @@ function removeSieveRow(button) {
     calculateSieve();
 }
 
-// Calculate opening size based on O-value - using same logic as main form
+// Calculate opening size based on O-value - using exact same logic as main form
 function calculateOpening() {
-  // Ensure sieve calculations are done first
-  calculateSieve();
+  const oValueInput = document.getElementById('o_value_input');
+  if (!oValueInput) {
+    alert('O-value input field not found');
+    return;
+  }
   
-  const oValue = parseFloat(document.getElementById('o_value_input').value);
+  const oValue = parseFloat(oValueInput.value);
   
   if (!oValue || oValue < 0 || oValue > 100) {
     alert('Please enter a valid O-value between 0 and 100');
@@ -590,50 +593,37 @@ function calculateOpening() {
   let upperSize = 0, lowerSize = 0, upperPass = 0, lowerPass = 0;
   let found = false;
   
-  // Get all rows dynamically
+  // First, find how many sieve rows exist - use data-row attribute
   const tbody = document.getElementById('sieve_tbody');
   if (!tbody) {
-    alert('Error: Sieve data table not found');
+    alert('Sieve table not found');
     return;
   }
   
-  const rows = Array.from(tbody.querySelectorAll('tr'));
-  if (rows.length === 0) {
-    alert('Error: No sieve data rows found. Please add sieve data first.');
-    return;
-  }
-  
-  // Collect all sieve data with their row numbers
-  const sieveData = [];
+  const rows = tbody.querySelectorAll('tr');
+  const rowNumbers = [];
   rows.forEach(row => {
     const rowNum = row.getAttribute('data-row');
-    if (!rowNum) return;
-    
-    const sieveSizeEl = document.getElementById(`sieve_size_${rowNum}`);
-    const passingEl = document.getElementById(`passing_${rowNum}`);
-    
-    if (sieveSizeEl && passingEl) {
-      const sieveSize = parseFloat(sieveSizeEl.value) || 0;
-      const passing = parseFloat(passingEl.value) || 0;
-      if (sieveSize > 0) {
-        sieveData.push({ size: sieveSize, passing: passing, rowNum: rowNum });
-      }
+    if (rowNum) {
+      rowNumbers.push(parseInt(rowNum));
     }
   });
   
-  if (sieveData.length === 0) {
-    alert('Error: No valid sieve data found. Please enter sieve sizes and ensure retained values are entered.');
-    return;
-  }
+  // Sort row numbers to process in order
+  rowNumbers.sort((a, b) => a - b);
   
-  // Sort by sieve size descending (largest first), same as main form logic
-  sieveData.sort((a, b) => b.size - a.size);
-  
-  // Loop through sorted data to find where passing crosses O-value
-  // This mimics the main form's loop from 1 to 8
-  for (let i = 0; i < sieveData.length; i++) {
-    const passing = sieveData[i].passing;
-    const sieveSize = sieveData[i].size;
+  // Loop through rows in order (same as original form)
+  for (let idx = 0; idx < rowNumbers.length; idx++) {
+    const i = rowNumbers[idx];
+    const passingEl = document.getElementById('passing_' + i);
+    const sieveSizeEl = document.getElementById('sieve_size_' + i);
+    
+    if (!passingEl || !sieveSizeEl) continue;
+    
+    const passing = parseFloat(passingEl.value) || 0;
+    const sieveSize = parseFloat(sieveSizeEl.value) || 0;
+    
+    if (sieveSize <= 0) continue; // Skip empty rows
     
     if (passing <= oValue) {
       // Found the lower bound (passing just below O-value)
@@ -641,10 +631,15 @@ function calculateOpening() {
       lowerPass = passing;
       
       // Get upper bound from previous row (passing just above O-value)
-      if (i > 0) {
-        upperSize = sieveData[i-1].size;
-        upperPass = sieveData[i-1].passing;
-        found = true;
+      if (idx > 0) {
+        const prevRowNum = rowNumbers[idx - 1];
+        const prevSieveSizeEl = document.getElementById('sieve_size_' + prevRowNum);
+        const prevPassingEl = document.getElementById('passing_' + prevRowNum);
+        if (prevSieveSizeEl && prevPassingEl) {
+          upperSize = parseFloat(prevSieveSizeEl.value) || 0;
+          upperPass = parseFloat(prevPassingEl.value) || 0;
+          found = true;
+        }
       } else {
         // O-value is higher than the first sieve's passing %
         // Use the first sieve size as the result
@@ -658,14 +653,19 @@ function calculateOpening() {
   
   // If O-value is lower than all sieves, use the last sieve
   if (!found && lowerSize === 0) {
-    for (let i = sieveData.length - 1; i >= 0; i--) {
-      const sieveSize = sieveData[i].size;
-      const passing = sieveData[i].passing;
-      if (sieveSize > 0) {
-        lowerSize = sieveSize;
-        lowerPass = passing;
-        found = true;
-        break;
+    for (let idx = rowNumbers.length - 1; idx >= 0; idx--) {
+      const i = rowNumbers[idx];
+      const sieveSizeEl = document.getElementById('sieve_size_' + i);
+      const passingEl = document.getElementById('passing_' + i);
+      if (sieveSizeEl && passingEl) {
+        const sieveSize = parseFloat(sieveSizeEl.value) || 0;
+        const passing = parseFloat(passingEl.value) || 0;
+        if (sieveSize > 0) {
+          lowerSize = sieveSize;
+          lowerPass = passing;
+          found = true;
+          break;
+        }
       }
     }
   }
@@ -700,28 +700,24 @@ function calculateOpening() {
     calculationHTML = `O${oValue} = ${openingSize.toFixed(3)} mm (${(openingSize * 1000).toFixed(0)} μm)`;
   }
   
-  // Update hidden field with calculated opening size
-  const openingSizeField = document.getElementById('opening_size');
-  if (openingSizeField) {
-    openingSizeField.value = openingSize.toFixed(4);
+  const openingSizeEl = document.getElementById('opening_size');
+  const calculationTextEl = document.getElementById('calculation_text');
+  const calculationDisplayEl = document.getElementById('calculation_display');
+  const finalResultEl = document.getElementById('final_result');
+  const resultDisplayEl = document.getElementById('result_display');
+  
+  if (!openingSizeEl || !calculationTextEl || !calculationDisplayEl || !finalResultEl || !resultDisplayEl) {
+    alert('Required display elements not found. Please refresh the page.');
+    return;
   }
   
-  // Update calculation display
-  const calculationText = document.getElementById('calculation_text');
-  const calculationDisplay = document.getElementById('calculation_display');
-  if (calculationText && calculationDisplay) {
-    calculationText.innerHTML = calculationHTML;
-    calculationDisplay.style.display = 'block';
-  }
+  openingSizeEl.value = openingSize.toFixed(4);
+  calculationTextEl.innerHTML = calculationHTML;
+  calculationDisplayEl.style.display = 'block';
   
-  // Update result display
-  const finalResult = document.getElementById('final_result');
-  const resultDisplay = document.getElementById('result_display');
-  if (finalResult && resultDisplay) {
-    finalResult.innerHTML = 
+  finalResultEl.innerHTML = 
     `Apparent Opening Size (O${oValue}): ${openingSize.toFixed(3)} mm (${(openingSize * 1000).toFixed(0)} μm)`;
-    resultDisplay.style.display = 'block';
-  }
+  resultDisplayEl.style.display = 'block';
 }
 
 // Trigger initial calculation on load

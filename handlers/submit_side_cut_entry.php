@@ -106,9 +106,9 @@ if ($category === 'Sheet Production' && empty($referenceNumber)) {
     header('Location: ../forms/side_cut_entry.php?error=' . urlencode('Reference Number is required for Sheet Production'));
     exit;
 }
-if ($category === 'Swing Production' && empty($cuttingBatchNo)) {
+if ($category === 'Sewing Production' && empty($cuttingBatchNo)) {
     $conn->close();
-    header('Location: ../forms/side_cut_entry.php?error=' . urlencode('CNC Cutting Batch is required for Swing Production'));
+    header('Location: ../forms/side_cut_entry.php?error=' . urlencode('CNC Cutting Batch is required for Sewing Production'));
     exit;
 }
 
@@ -116,6 +116,7 @@ try {
     // Ensure columns exist
     $conn->query("ALTER TABLE side_cut_scrap ADD COLUMN IF NOT EXISTS entry_id VARCHAR(50) UNIQUE");
     $conn->query("ALTER TABLE side_cut_scrap ADD COLUMN IF NOT EXISTS reference_number VARCHAR(100)");
+    $conn->query("ALTER TABLE side_cut_scrap ADD COLUMN IF NOT EXISTS recycled_amount_kg DECIMAL(10,2) DEFAULT 0");
     
     // Debug log
     error_log("Inserting side cut entry - Reporter ID: $reporterId, Reporter Name: $reporterName");

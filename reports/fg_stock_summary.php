@@ -62,12 +62,10 @@ $query = "SELECT
         WHEN " . ($hasProductType ? "COALESCE(fe.product_type, 'bag')" : "'bag'") . " = 'roll' THEN (fe.actual_weight - COALESCE(fe.delivered_quantity, 0))
         ELSE (fe.passed_qty - COALESCE(fe.delivered_quantity, 0))
     END as remaining_qty,
-    COALESCE(fe.project_id, ftr.project_id) as project_id,
-    COALESCE(p1.project_name, p2.project_name, '') as project_name
+    fe.project_id,
+    COALESCE(p1.project_name, '') as project_name
 FROM fg_entry fe
-LEFT JOIN fiber_to_roll_entry ftr ON fe.reference_number = ftr.reference_number
 LEFT JOIN projects p1 ON fe.project_id = p1.id
-LEFT JOIN projects p2 ON ftr.project_id = p2.id
 WHERE (
     (" . ($hasProductType ? "fe.product_type = 'roll'" : "1=1") . " AND (fe.actual_weight - COALESCE(fe.delivered_quantity, 0)) > 0)
     OR 

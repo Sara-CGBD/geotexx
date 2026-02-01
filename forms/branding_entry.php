@@ -164,9 +164,12 @@ $brandingId = 'BR-' . date('Ymd') . '-' . str_pad($nextBrandingNumber, 3, '0', S
   <?php endif; ?>
 
   <?php if (isset($_GET['error'])): ?>
-    <div class="alert alert-error" style="background: #f8d7da; color: #721c24; padding: 15px; border-radius: 6px; margin-bottom: 20px; border: 1px solid #f5c6cb;">
-      ❌ Error: <?php echo htmlspecialchars($_GET['error']); ?>
-    </div>
+    <script>
+      // Show toast notification for errors from URL parameters (no need for alert box)
+      document.addEventListener('DOMContentLoaded', function() {
+        showToast('<?php echo addslashes(htmlspecialchars($_GET['error'])); ?>', 'error');
+      });
+    </script>
   <?php endif; ?>
 
   <div id="dateTimeDisplay" class="summary-info"></div>
@@ -785,19 +788,84 @@ function clearForm() {
     updateSummary();
 }
 
+// Toast notification function
+function showToast(message, type = 'error') {
+  const toast = document.createElement('div');
+  const bgColor = type === 'error' ? '#e74c3c' : '#27ae60';
+  const icon = type === 'error' ? '❌' : '✓';
+  
+  toast.style.cssText = `
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    background: ${bgColor};
+    color: white;
+    padding: 15px 20px;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    z-index: 10000;
+    font-size: 14px;
+    font-weight: 600;
+    max-width: 400px;
+    animation: slideInRight 0.3s ease-out;
+  `;
+  
+  toast.innerHTML = `${icon} ${message}`;
+  document.body.appendChild(toast);
+  
+  // Add animation
+  const style = document.createElement('style');
+  style.textContent = `
+    @keyframes slideInRight {
+      from {
+        transform: translateX(100%);
+        opacity: 0;
+      }
+      to {
+        transform: translateX(0);
+        opacity: 1;
+      }
+    }
+  `;
+  if (!document.getElementById('toast-animations')) {
+    style.id = 'toast-animations';
+    document.head.appendChild(style);
+  }
+  
+  setTimeout(() => {
+    toast.style.transition = 'opacity 0.3s, transform 0.3s';
+    toast.style.opacity = '0';
+    toast.style.transform = 'translateX(100%)';
+    setTimeout(() => toast.remove(), 300);
+  }, 4000);
+}
+
 function validateForm() {
+    // Validate required fields
+    const cncBatchSelect = document.getElementById('cncCuttingBatch');
+    if (!cncBatchSelect || !cncBatchSelect.value) {
+        showToast('Please select a CNC Cutting Batch.', 'error');
+        return false;
+    }
+    
+    const printMachineInput = document.getElementById('printMachine');
+    if (!printMachineInput || !printMachineInput.value.trim()) {
+        showToast('Please enter Print Machine.', 'error');
+        return false;
+    }
+    
     // Validate print quantity against available
     const printQtyInput = document.getElementById('printQty');
     const printQty = parseInt(printQtyInput.value) || 0;
     const maxQty = parseInt(printQtyInput.getAttribute('data-max-qty')) || 0;
     
     if (maxQty > 0 && printQty > maxQty) {
-        alert(`❌ Print quantity (${printQty} pcs) exceeds available quantity (${maxQty} pcs).\n\nPlease reduce the print quantity.`);
+        showToast(`Print quantity (${printQty} pcs) exceeds available quantity (${maxQty} pcs). Please reduce the print quantity.`, 'error');
         return false;
     }
     
     if (printQty <= 0) {
-        alert('❌ Please enter a valid print quantity greater than 0.');
+        showToast('Please enter a valid print quantity greater than 0.', 'error');
         return false;
     }
     

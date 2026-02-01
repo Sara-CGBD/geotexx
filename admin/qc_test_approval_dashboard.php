@@ -197,7 +197,7 @@ if ($charQuery) {
 }
 
 // Get pending Sun Test Reports (status = 'pending' - goes directly to AGM)
-// Note: Sun test uses 'reference_name' column, not 'reference_number'
+// Use reference_number column (not reference_name) to show actual roll references
 $sun_roll_dest_exists = columnExists($conn, 'sun_test_reports', 'roll_destination');
 $sun_roll_dest_select = $sun_roll_dest_exists ? 'roll_destination,' : 'NULL as roll_destination,';
 
@@ -206,7 +206,7 @@ $sunQuery = $conn->query("
         id,
         report_number as report_number,
         lab_test_number,
-        reference_name as sample_reference_id,
+        reference_number as sample_reference_id,
         test_start_date as test_date,
         test_performed_by as inspector_name,
         '' as checked_by,
@@ -220,7 +220,7 @@ $sunQuery = $conn->query("
         NULL as test_data
     FROM sun_test_reports
     WHERE status = 'pending'
-    ORDER BY reference_name ASC, updated_at DESC
+    ORDER BY reference_number ASC, updated_at DESC
     LIMIT 200
 ");
 if ($sunQuery) {
@@ -691,8 +691,8 @@ if (!$qc_routing_res) {
             try {
                 $ref_lookup = $conn->prepare("SELECT reference_number FROM roll_entry WHERE reference_number LIKE ? OR reference_number LIKE ? ORDER BY LENGTH(reference_number) DESC LIMIT 1");
                 if ($ref_lookup) {
-                    $pattern1 = '%' . $conn->real_escape_string($original_ref) . '%';
-                    $pattern2 = $conn->real_escape_string($original_ref) . '-%';
+                    $pattern1 = '%' . $original_ref . '%';
+                    $pattern2 = $original_ref . '-%';
                     $ref_lookup->bind_param("ss", $pattern1, $pattern2);
                     if ($ref_lookup->execute()) {
                         $ref_result = $ref_lookup->get_result();
@@ -812,8 +812,8 @@ if ($wpt_roll_dest_exists_check) {
                 try {
                     $ref_search = $conn->prepare("SELECT reference_number FROM roll_entry WHERE reference_number LIKE ? OR reference_number LIKE ? ORDER BY LENGTH(reference_number) DESC LIMIT 1");
                     if ($ref_search) {
-                        $pattern1 = '%' . $conn->real_escape_string($sample_ref) . '%';
-                        $pattern2 = $conn->real_escape_string($sample_ref) . '-%';
+                        $pattern1 = '%' . $sample_ref . '%';
+                        $pattern2 = $sample_ref . '-%';
                         $ref_search->bind_param("ss", $pattern1, $pattern2);
                         if ($ref_search->execute()) {
                             $ref_search_result = $ref_search->get_result();
@@ -856,6 +856,7 @@ if ($char_roll_dest_exists_check) {
                    ELSE ct.reference_number
                END as sample_reference_id, 
                COALESCE(ct.roll_destination, '') as roll_destination, ct.approved_at,
+               COALESCE(ct.bundle_reference, '') as bundle_reference,
                'Characteristics Test' as test_name, 'characteristics' as test_type,
                NULL as test_data
         FROM characteristics_tests ct
@@ -917,6 +918,7 @@ if ($sun_roll_dest_exists_check) {
     $sun_routing_query = "
         SELECT str.report_number, $sun_ref_select, COALESCE(str.roll_destination, '') as roll_destination, str.approved_at,
                'Sun Test' as test_name, 'sun_test' as test_type,
+               COALESCE(str.bundle_reference, '') as bundle_reference,
                NULL as test_data
         FROM sun_test_reports str
         LEFT JOIN roll_entry re ON (
@@ -984,6 +986,7 @@ if ($uv_roll_dest_exists_check) {
                    ELSE wer.reference
                END as sample_reference_id, 
                COALESCE(wer.roll_destination, '') as roll_destination, wer.approved_at,
+               COALESCE(wer.bundle_reference, '') as bundle_reference,
                'UV Test (Weathering Exposure)' as test_name, 'uv_test' as test_type,
                NULL as test_data
         FROM weathering_exposure_reports wer
@@ -1030,11 +1033,226 @@ $extractBaseRefRouting = function($ref) {
     return preg_replace('/-\d+$/', '', trim($ref));
 };
 
+// First, group by bundle_reference if they share the same bundle
+$bundle_groups = [];
+$individual_routing_items = [];
+
+foreach ($ready_for_routing as $roll) {
+    $bundle_ref = trim($roll['bundle_reference'] ?? '');
+    
+    // For QC Test Orders, extract bundle info from bulk_from_reference and bulk_to_reference
+    if (empty($bundle_ref) && ($roll['test_type'] ?? '') === 'qc_test_order') {
+        $test_data = json_decode($roll['test_data'] ?? '{}', true);
+        if (is_string($test_data)) {
+            $test_data = json_decode($test_data, true) ?? [];
+        }
+        
+        if (isset($test_data['is_bulk_reference']) && $test_data['is_bulk_reference'] &&
+            isset($test_data['bulk_from_reference']) && isset($test_data['bulk_to_reference'])) {
+            $bulk_from = trim($test_data['bulk_from_reference']);
+            $bulk_to = trim($test_data['bulk_to_reference']);
+            if (!empty($bulk_from) && !empty($bulk_to)) {
+                $bundle_ref = $bulk_from . '|' . $bulk_to;
+            }
+        }
+        
+        // Also check if already extracted in the array
+        if (empty($bundle_ref) && isset($roll['bulk_from_reference']) && isset($roll['bulk_to_reference'])) {
+            $bulk_from = trim($roll['bulk_from_reference']);
+            $bulk_to = trim($roll['bulk_to_reference']);
+            if (!empty($bulk_from) && !empty($bulk_to)) {
+                $bundle_ref = $bulk_from . '|' . $bulk_to;
+            }
+        }
+    }
+    
+    // If this has a bundle_reference in format "from|to", group it
+    if (!empty($bundle_ref) && strpos($bundle_ref, '|') !== false) {
+        $parts = explode('|', $bundle_ref);
+        if (count($parts) === 2) {
+            $from_ref = trim($parts[0]);
+            $to_ref = trim($parts[1]);
+            
+            // Only treat as bundle if from and to are different AND both have -N suffix AND same base reference
+            if (!empty($from_ref) && !empty($to_ref) && $from_ref !== $to_ref) {
+                // Check if both references have -N suffix (bundle pattern)
+                $from_has_suffix = preg_match('/^(.+)-(\d+)$/', $from_ref, $from_matches);
+                $to_has_suffix = preg_match('/^(.+)-(\d+)$/', $to_ref, $to_matches);
+                
+                // Only treat as bundle if BOTH have -N suffix AND same base reference
+                if ($from_has_suffix && $to_has_suffix) {
+                    $from_base = $from_matches[1];
+                    $to_base = $to_matches[1];
+                    
+                    if ($from_base === $to_base) {
+                        $bundle_key = $from_ref . '|' . $to_ref;
+                        if (!isset($bundle_groups[$bundle_key])) {
+                            $bundle_groups[$bundle_key] = [];
+                        }
+                        $bundle_groups[$bundle_key][] = $roll;
+                        continue; // Skip to next item, this is handled as bundle
+                    }
+                }
+            }
+        }
+    }
+    
+    // Not a bundle, add to individual items
+    $individual_routing_items[] = $roll;
+}
+
 // Group by normalized base reference
 $routing_by_reference = [];
 
-foreach ($ready_for_routing as $roll) {
+// Before processing individual items, check if any fall within bundle ranges and add them to bundles
+$filtered_individual_items = [];
+foreach ($individual_routing_items as $roll) {
     $sample_ref = trim($roll['sample_reference_id'] ?? '');
+    
+    // Check if this individual reference falls within any existing bundle range
+    $is_part_of_bundle = false;
+    if (!empty($sample_ref) && preg_match('/^(.+)-(\d+)$/', $sample_ref, $matches)) {
+        $base_ref = $matches[1];
+        $roll_num = (int)$matches[2];
+        
+        // Check against all bundle groups
+        foreach ($bundle_groups as $bundle_key => $bundle_rolls) {
+            $bundle_parts = explode('|', $bundle_key);
+            $bundle_from = trim($bundle_parts[0]);
+            $bundle_to = trim($bundle_parts[1]);
+            
+            // Extract base and roll number from bundle references
+            if (preg_match('/^(.+)-(\d+)$/', $bundle_from, $from_matches) && 
+                preg_match('/^(.+)-(\d+)$/', $bundle_to, $to_matches)) {
+                $bundle_base = $from_matches[1];
+                $from_num = (int)$from_matches[2];
+                $to_num = (int)$to_matches[2];
+                
+                // If base references match and roll number is within range, add to bundle
+                if ($base_ref === $bundle_base && $roll_num >= $from_num && $roll_num <= $to_num) {
+                    $is_part_of_bundle = true;
+                    // Add this roll to the bundle group
+                    $bundle_groups[$bundle_key][] = $roll;
+                    break;
+                }
+            }
+        }
+    }
+    
+    // Only add to filtered list if NOT part of a bundle
+    if (!$is_part_of_bundle) {
+        $filtered_individual_items[] = $roll;
+    }
+}
+
+// Update individual_routing_items to exclude items that are part of bundles
+$individual_routing_items = $filtered_individual_items;
+
+// Process bundle groups first
+foreach ($bundle_groups as $bundle_key => $bundle_rolls) {
+    $parts = explode('|', $bundle_key);
+    $from_ref = trim($parts[0]);
+    $to_ref = trim($parts[1]);
+    
+    // Use bundle key as ref_key
+    $ref_key = $bundle_key;
+    $is_bulk_range = true;
+    
+    // Get the first roll's sample_reference_id for display (or use from_ref)
+    $sample_ref = $from_ref;
+    if (!empty($bundle_rolls[0]['sample_reference_id'])) {
+        $first_ref = trim($bundle_rolls[0]['sample_reference_id']);
+        // If first ref is an individual roll (ends with -N), use from_ref instead
+        if (!preg_match('/-\d+$/', $first_ref)) {
+            $sample_ref = $first_ref;
+        }
+    }
+    
+    if (!isset($routing_by_reference[$ref_key])) {
+        $routing_by_reference[$ref_key] = [
+            'reference' => $sample_ref,
+            'base_reference' => '',
+            'is_bulk_range' => true,
+            'from_reference' => $from_ref,
+            'to_reference' => $to_ref,
+            'tests' => [],
+            'report_numbers' => [],
+            'test_types' => [],
+            'routing_destination' => '',
+            'approved_at' => ''
+        ];
+    }
+    
+    // Add all tests from this bundle
+    foreach ($bundle_rolls as $roll) {
+        $routing_by_reference[$ref_key]['tests'][] = [
+            'test_name' => $roll['test_name'] ?? 'N/A',
+            'report_number' => $roll['report_number'] ?? '',
+            'test_type' => $roll['test_type'] ?? 'qc_test_order',
+            'routing_destination' => $roll['roll_destination'] ?? ''
+        ];
+        
+        if (!empty($roll['report_number'])) {
+            $routing_by_reference[$ref_key]['report_numbers'][] = $roll['report_number'];
+        }
+        
+        if (!empty($roll['test_type'])) {
+            $routing_by_reference[$ref_key]['test_types'][] = $roll['test_type'];
+        }
+        
+        // Use routing destination if set
+        if (!empty($roll['roll_destination']) && empty($routing_by_reference[$ref_key]['routing_destination'])) {
+            $routing_by_reference[$ref_key]['routing_destination'] = $roll['roll_destination'];
+        }
+        
+        // Use most recent approved_at
+        if (!empty($roll['approved_at']) && 
+            (empty($routing_by_reference[$ref_key]['approved_at']) || 
+             $roll['approved_at'] > $routing_by_reference[$ref_key]['approved_at'])) {
+            $routing_by_reference[$ref_key]['approved_at'] = $roll['approved_at'];
+        }
+    }
+}
+
+// Now process individual routing items (not part of bundles)
+// First, check if any individual references fall within existing bundle ranges
+foreach ($individual_routing_items as $roll) {
+    $sample_ref = trim($roll['sample_reference_id'] ?? '');
+    
+    // Check if this individual reference falls within any existing bundle range
+    $is_part_of_bundle = false;
+    if (!empty($sample_ref) && preg_match('/^(.+)-(\d+)$/', $sample_ref, $matches)) {
+        $base_ref = $matches[1];
+        $roll_num = (int)$matches[2];
+        
+        // Check against all bundle groups
+        foreach ($bundle_groups as $bundle_key => $bundle_rolls) {
+            $bundle_parts = explode('|', $bundle_key);
+            $bundle_from = trim($bundle_parts[0]);
+            $bundle_to = trim($bundle_parts[1]);
+            
+            // Extract base and roll number from bundle references
+            if (preg_match('/^(.+)-(\d+)$/', $bundle_from, $from_matches) && 
+                preg_match('/^(.+)-(\d+)$/', $bundle_to, $to_matches)) {
+                $bundle_base = $from_matches[1];
+                $from_num = (int)$from_matches[2];
+                $to_num = (int)$to_matches[2];
+                
+                // If base references match and roll number is within range, skip this individual item
+                if ($base_ref === $bundle_base && $roll_num >= $from_num && $roll_num <= $to_num) {
+                    $is_part_of_bundle = true;
+                    // Add this roll to the bundle group instead
+                    $bundle_groups[$bundle_key][] = $roll;
+                    break;
+                }
+            }
+        }
+    }
+    
+    // Skip if this roll is part of a bundle (will be processed with bundle)
+    if ($is_part_of_bundle) {
+        continue;
+    }
     
     // Check if this is a bulk reference (has from/to in test_data)
     $test_data = json_decode($roll['test_data'] ?? '{}', true);
@@ -1085,13 +1303,13 @@ foreach ($ready_for_routing as $roll) {
         // Use bulk references from first loop processing
         $from_ref = trim($roll['bulk_from_reference']);
         $to_ref = trim($roll['bulk_to_reference']);
-        $has_bulk_refs = !empty($from_ref) && !empty($to_ref);
+        $has_bulk_refs = !empty($from_ref) && !empty($to_ref) && $from_ref !== $to_ref;
     } elseif (isset($test_data['is_bulk_reference']) && $test_data['is_bulk_reference'] && 
         isset($test_data['bulk_from_reference']) && isset($test_data['bulk_to_reference'])) {
         // Extract from test_data if not already set
         $from_ref = trim($test_data['bulk_from_reference']);
         $to_ref = trim($test_data['bulk_to_reference']);
-        $has_bulk_refs = !empty($from_ref) && !empty($to_ref);
+        $has_bulk_refs = !empty($from_ref) && !empty($to_ref) && $from_ref !== $to_ref;
     }
     
     if ($has_bulk_refs) {
@@ -1555,16 +1773,20 @@ $total_routing_items = count($grouped_bulk_routing) + count($grouped_individual_
                 <?php endif; ?>
               </td>
               <td style="padding:10px;">
-                <form onsubmit="return setRouting('<?php echo htmlspecialchars($report_numbers_str); ?>', '<?php echo htmlspecialchars($test_type); ?>', '<?php echo htmlspecialchars($bulk_group['from_reference']); ?>', event)" style="display:inline-block;">
-                  <select name="roll_destination" required style="padding:6px 8px; border:1px solid #ccc; border-radius:4px; font-size:13px; margin-right:5px;">
-                    <option value="">-- Select --</option>
-                    <option value="fg_production" <?php echo ($routing_dest === 'fg_production') ? 'selected' : ''; ?>>🟢 FG</option>
-                    <option value="bag_production" <?php echo ($routing_dest === 'bag_production') ? 'selected' : ''; ?>>🔵 Bag</option>
-                  </select>
-                  <button type="submit" class="btn" style="padding:6px 12px; background:#28a745; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:13px;">
-                    <i class="fas fa-route"></i> Route
-                  </button>
-                </form>
+                <?php if (empty($routing_dest)): ?>
+                  <form onsubmit="return setRouting('<?php echo htmlspecialchars($report_numbers_str); ?>', '<?php echo htmlspecialchars($test_type); ?>', '<?php echo htmlspecialchars($bulk_group['from_reference']); ?>', event)" style="display:inline-block;">
+                    <select name="roll_destination" required style="padding:6px 8px; border:1px solid #ccc; border-radius:4px; font-size:13px; margin-right:5px;">
+                      <option value="">-- Select --</option>
+                      <option value="fg_production">🟢 FG</option>
+                      <option value="bag_production">🔵 Bag</option>
+                    </select>
+                    <button type="submit" class="btn" style="padding:6px 12px; background:#28a745; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:13px;">
+                      <i class="fas fa-route"></i> Route
+                    </button>
+                  </form>
+                <?php else: ?>
+                  <span style="color:#6c757d; font-style:italic;">Already routed</span>
+                <?php endif; ?>
               </td>
             </tr>
             <?php endforeach; ?>
@@ -1622,17 +1844,21 @@ $total_routing_items = count($grouped_bulk_routing) + count($grouped_individual_
                 <?php endif; ?>
               </td>
               <td style="padding:10px;">
-                <form onsubmit="return setRouting('<?php echo htmlspecialchars($report_numbers_str); ?>', '<?php echo htmlspecialchars($test_type); ?>', '<?php echo htmlspecialchars($ref_display); ?>', event)" style="display:inline-block;">
-                  <select name="roll_destination" required style="padding:6px 8px; border:1px solid #ccc; border-radius:4px; font-size:13px; margin-right:5px;">
-                    <option value="">-- Select --</option>
-                    <option value="fg_production" <?php echo ($routing_dest === 'fg_production') ? 'selected' : ''; ?>>🟢 FG</option>
-                    <option value="bag_production" <?php echo ($routing_dest === 'bag_production') ? 'selected' : ''; ?>>🔵 Bag</option>
-                </select>
-                  <button type="submit" class="btn" style="padding:6px 12px; background:#28a745; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:13px;">
-                  <i class="fas fa-route"></i> Route
-                </button>
-              </form>
-            </td>
+                <?php if (empty($routing_dest)): ?>
+                  <form onsubmit="return setRouting('<?php echo htmlspecialchars($report_numbers_str); ?>', '<?php echo htmlspecialchars($test_type); ?>', '<?php echo htmlspecialchars($ref_display); ?>', event)" style="display:inline-block;">
+                    <select name="roll_destination" required style="padding:6px 8px; border:1px solid #ccc; border-radius:4px; font-size:13px; margin-right:5px;">
+                      <option value="">-- Select --</option>
+                      <option value="fg_production">🟢 FG</option>
+                      <option value="bag_production">🔵 Bag</option>
+                    </select>
+                    <button type="submit" class="btn" style="padding:6px 12px; background:#28a745; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:13px;">
+                      <i class="fas fa-route"></i> Route
+                    </button>
+                  </form>
+                <?php else: ?>
+                  <span style="color:#6c757d; font-style:italic;">Already routed</span>
+                <?php endif; ?>
+              </td>
           </tr>
           <?php endforeach; ?>
         </tbody>

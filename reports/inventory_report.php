@@ -81,21 +81,49 @@ $query = "
         sre.date_time as received_date,
         sre.manufacturer_name,
         $usedSubquery,
-        ft.status as fiber_test_status,
-        ft.report_number as fiber_report_number,
-        st.status as sewing_test_status,
-        st.report_number as sewing_report_number,
-        CASE 
-            WHEN (ft.status = 'approved' OR st.status = 'approved') THEN 'Approved'
-            WHEN (ft.status = 'pending' OR st.status = 'pending') THEN 'Testing'
-            WHEN (ft.status = 'rejected' OR st.status = 'rejected') THEN 'Rejected'
-            ELSE 'Pending Test'
-        END as status
+        (
+            SELECT status
+            FROM fineness_fiber_reports
+            WHERE CAST(TRIM(store_entry_reference) AS CHAR) COLLATE utf8mb4_unicode_ci = CAST(TRIM(sre.entry_number) AS CHAR) COLLATE utf8mb4_unicode_ci
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+        ) as fineness_fiber_status,
+        (
+            SELECT status
+            FROM cut_length_fiber_reports
+            WHERE CAST(TRIM(store_entry_reference) AS CHAR) COLLATE utf8mb4_unicode_ci = CAST(TRIM(sre.entry_number) AS CHAR) COLLATE utf8mb4_unicode_ci
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+        ) as cut_length_fiber_status,
+        (
+            SELECT status
+            FROM tenacity_fiber_reports
+            WHERE CAST(TRIM(store_entry_reference) AS CHAR) COLLATE utf8mb4_unicode_ci = CAST(TRIM(sre.entry_number) AS CHAR) COLLATE utf8mb4_unicode_ci
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+        ) as tenacity_fiber_status,
+        (
+            SELECT status
+            FROM tenacity_yarn_reports
+            WHERE CAST(TRIM(store_entry_reference) AS CHAR) COLLATE utf8mb4_unicode_ci = CAST(TRIM(sre.entry_number) AS CHAR) COLLATE utf8mb4_unicode_ci
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+        ) as tenacity_yarn_status,
+        (
+            SELECT status
+            FROM fiber_test_reports
+            WHERE CAST(TRIM(store_entry_reference) AS CHAR) COLLATE utf8mb4_unicode_ci = CAST(TRIM(sre.entry_number) AS CHAR) COLLATE utf8mb4_unicode_ci
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+        ) as fiber_test_status,
+        (
+            SELECT status
+            FROM sewing_thread_reports
+            WHERE CAST(TRIM(store_entry_reference) AS CHAR) COLLATE utf8mb4_unicode_ci = CAST(TRIM(sre.entry_number) AS CHAR) COLLATE utf8mb4_unicode_ci
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+        ) as sewing_thread_status
     FROM store_received_entries sre
-    LEFT JOIN fiber_test_reports ft ON sre.entry_number COLLATE utf8mb4_unicode_ci = ft.store_entry_reference
-    LEFT JOIN sewing_thread_reports st ON sre.entry_number COLLATE utf8mb4_unicode_ci = st.store_entry_reference
-    GROUP BY sre.entry_number, sre.material_type, sre.amount_kg, sre.original_amount_kg, sre.date_time, sre.manufacturer_name, 
-             ft.status, ft.report_number, st.status, st.report_number
     ORDER BY sre.date_time DESC, sre.created_at DESC
 ";
 
@@ -126,6 +154,90 @@ if ($issueTableExists) {
     }
 }
 
+/**
+ * Normalize raw status value coming from the DB.
+ */
+$normalizeStatus = function ($value) {
+    $trimmed = trim($value ?? '');
+    if ($trimmed === '') {
+        return null;
+    }
+    return strtolower($trimmed);
+};
+
+/**
+ * Decide inventory status label based on required test statuses.
+ */
+$determineStatus = function ($materialType, $finenessStatus, $cutLengthStatus, $tenacityFiberStatus, $tenacityYarnStatus, $fiberTestStatus, $sewingThreadStatus) {
+    $type = strtolower($materialType ?? '');
+    $isFiberMaterial = strpos($type, 'fiber') !== false || strpos($type, 'pp') !== false;
+    $isThreadMaterial = strpos($type, 'thread') !== false || strpos($type, 'sewing') !== false;
+
+    $fiberStatuses = [
+        $finenessStatus,
+        $cutLengthStatus,
+        $tenacityFiberStatus,
+        $tenacityYarnStatus,
+        $fiberTestStatus,
+        $sewingThreadStatus
+    ];
+
+    $hasAnyFiberTest = false;
+    $anyRejected = false;
+    $allApproved = true;
+
+    foreach ($fiberStatuses as $status) {
+        if ($status !== null) {
+            $hasAnyFiberTest = true;
+            if ($status === 'rejected') {
+                $anyRejected = true;
+                $allApproved = false;
+            } elseif ($status !== 'approved') {
+                $allApproved = false;
+            }
+        } else {
+            $allApproved = false;
+        }
+    }
+
+    if ($isFiberMaterial || (!$isFiberMaterial && !$isThreadMaterial)) {
+        if ($anyRejected) {
+            return 'Rejected';
+        }
+        if ($allApproved && $hasAnyFiberTest) {
+            return 'Approved';
+        }
+        if ($hasAnyFiberTest) {
+            return 'Testing';
+        }
+        return 'Pending Test';
+    }
+
+    if ($isThreadMaterial) {
+        if ($sewingThreadStatus === 'rejected') {
+            return 'Rejected';
+        }
+        if ($sewingThreadStatus === 'approved') {
+            return 'Approved';
+        }
+        if ($sewingThreadStatus !== null) {
+            return 'Testing';
+        }
+        return 'Pending Test';
+    }
+
+    if ($anyRejected) {
+        return 'Rejected';
+    }
+    if ($allApproved && $hasAnyFiberTest) {
+        return 'Approved';
+    }
+    if ($hasAnyFiberTest) {
+        return 'Testing';
+    }
+    return 'Pending Test';
+};
+
 if ($result) {
     while ($row = $result->fetch_assoc()) {
         // Calculate deducted amount from material issue entries
@@ -138,8 +250,27 @@ if ($result) {
 
         $originalAmount = floatval($row['original_amount'] ?? 0);
         $row['remaining_amount'] = max(0, $originalAmount - $row['used_amount']);
+
+        $row['fineness_fiber_status'] = $normalizeStatus($row['fineness_fiber_status']);
+        $row['cut_length_fiber_status'] = $normalizeStatus($row['cut_length_fiber_status']);
+        $row['tenacity_fiber_status'] = $normalizeStatus($row['tenacity_fiber_status']);
+        $row['tenacity_yarn_status'] = $normalizeStatus($row['tenacity_yarn_status']);
+        $row['fiber_test_status'] = $normalizeStatus($row['fiber_test_status']);
+        $row['sewing_thread_status'] = $normalizeStatus($row['sewing_thread_status']);
+
+        $row['status'] = $determineStatus(
+            $row['material_type'],
+            $row['fineness_fiber_status'],
+            $row['cut_length_fiber_status'],
+            $row['tenacity_fiber_status'],
+            $row['tenacity_yarn_status'],
+            $row['fiber_test_status'],
+            $row['sewing_thread_status']
+        );
+
         $inventory[] = $row;
     }
+    unset($row);
 }
 
 // Calculate summary statistics

@@ -184,8 +184,338 @@ try {
             $report_nums_to_route = [$report_number];
         }
         
-        // Update routing destination for all report numbers
+        // For QC test orders, check if any report has bulk references and update ALL rolls in that bundle
+        $processed_bundles = []; // Track bundles we've already processed
+        
+        // Update routing destination for all report numbers and populate routed table
         foreach ($report_nums_to_route as $report_num) {
+            // First, check if this is a QC test order with bulk references
+            if ($report_type === 'qc_test_order') {
+                // Get test_data to check for bulk references
+                $checkBulkStmt = $conn->prepare("SELECT test_data, sample_reference_id FROM $table WHERE report_number COLLATE utf8mb4_unicode_ci = ?");
+                $checkBulkStmt->bind_param("s", $report_num);
+                $checkBulkStmt->execute();
+                $bulkResult = $checkBulkStmt->get_result();
+                $bulkRow = $bulkResult->fetch_assoc();
+                $checkBulkStmt->close();
+                
+                if ($bulkRow && !empty($bulkRow['test_data'])) {
+                    $test_data = json_decode($bulkRow['test_data'], true);
+                    if (isset($test_data['is_bulk_reference']) && $test_data['is_bulk_reference'] &&
+                        isset($test_data['bulk_from_reference']) && isset($test_data['bulk_to_reference'])) {
+                        
+                        $bulk_from = trim($test_data['bulk_from_reference']);
+                        $bulk_to = trim($test_data['bulk_to_reference']);
+                        $bundle_key = $bulk_from . '|' . $bulk_to;
+                        
+                        // If we haven't processed this bundle yet, update ALL rolls in the bundle
+                        if (!in_array($bundle_key, $processed_bundles)) {
+                            $processed_bundles[] = $bundle_key;
+                            
+                            // Extract base reference and roll numbers
+                            $fromBaseRef = '';
+                            $fromRollNum = 0;
+                            $toBaseRef = '';
+                            $toRollNum = 0;
+                            
+                            if (preg_match('/^(.+)-(\d+)$/', $bulk_from, $fromMatches)) {
+                                $fromBaseRef = $fromMatches[1];
+                                $fromRollNum = (int)$fromMatches[2];
+                            } else {
+                                $fromBaseRef = $bulk_from;
+                            }
+                            
+                            if (preg_match('/^(.+)-(\d+)$/', $bulk_to, $toMatches)) {
+                                $toBaseRef = $toMatches[1];
+                                $toRollNum = (int)$toMatches[2];
+                            } else {
+                                $toBaseRef = $bulk_to;
+                            }
+                            
+                            // Only process if both have same base and valid roll numbers
+                            if ($fromBaseRef === $toBaseRef && $fromRollNum > 0 && $toRollNum > 0 && $fromRollNum <= $toRollNum) {
+                                // Generate all individual roll references in the bundle range
+                                $individualRefs = [];
+                                for ($i = $fromRollNum; $i <= $toRollNum; $i++) {
+                                    $individualRefs[] = $fromBaseRef . '-' . $i;
+                                }
+                                
+                                // Update ALL qc_test_orders entries for all individual rolls in this bundle
+                                $placeholders = str_repeat('?,', count($individualRefs) - 1) . '?';
+                                $updateBulkStmt = $conn->prepare("
+                                    UPDATE $table 
+                                    SET roll_destination = ?, updated_at = NOW() 
+                                    WHERE status = 'approved'
+                                    AND sample_reference_id IN ($placeholders)
+                                ");
+                                
+                                $params = array_merge([$roll_destination], $individualRefs);
+                                $types = str_repeat('s', count($params));
+                                $updateBulkStmt->bind_param($types, ...$params);
+                                
+                                if ($updateBulkStmt->execute()) {
+                                    $bulkAffected = $updateBulkStmt->affected_rows;
+                                    $success_count += $bulkAffected;
+                                    
+                                    error_log("QC Bundle routing: Updated $bulkAffected rows for bundle $bundle_key with destination $roll_destination");
+                                    
+                                    // Update ALL test tables for all individual roll references in this bundle
+                                    $allTestTables = [
+                                        'qc_test_orders' => 'sample_reference_id',
+                                        'water_permeability_tests' => 'reference_number',
+                                        'characteristics_tests' => 'reference_number',
+                                        'sun_test_reports' => 'reference_number',
+                                        'weathering_exposure_reports' => 'reference'
+                                    ];
+                                    
+                                    foreach ($allTestTables as $testTable => $refColumn) {
+                                        // Ensure roll_destination column exists
+                                        $checkCol = $conn->query("SHOW COLUMNS FROM $testTable LIKE 'roll_destination'");
+                                        if ($checkCol && $checkCol->num_rows === 0) {
+                                            @$conn->query("ALTER TABLE $testTable ADD COLUMN roll_destination VARCHAR(255) NULL");
+                                        }
+                                        
+                                        // Update all approved tests for these references
+                                        $updateAllTestsStmt = $conn->prepare("
+                                            UPDATE $testTable 
+                                            SET roll_destination = ?, updated_at = NOW() 
+                                            WHERE status = 'approved'
+                                            AND $refColumn IN ($placeholders)
+                                        ");
+                                        $updateParams = array_merge([$roll_destination], $individualRefs);
+                                        $updateTypes = str_repeat('s', count($updateParams));
+                                        $updateAllTestsStmt->bind_param($updateTypes, ...$updateParams);
+                                        $updateAllTestsStmt->execute();
+                                        $updateAllTestsStmt->close();
+                                    }
+                                    
+                                    // Get all individual roll references from ALL test tables and populate routed table
+                                    $allRefsWithApprovers = [];
+                                    
+                                    // Query each test table to get references and approvers
+                                    foreach ($allTestTables as $testTable => $refColumn) {
+                                        // Use correct approver column for each table
+                                        $approverCol = ($testTable === 'characteristics_tests') ? 'approver_name' : 'approved_by';
+                                        
+                                        $getRefsStmt = $conn->prepare("
+                                            SELECT DISTINCT $refColumn as ref, 
+                                                   COALESCE($approverCol, 'System') as approved_by 
+                                            FROM $testTable 
+                                            WHERE status = 'approved'
+                                            AND $refColumn IN ($placeholders)
+                                        ");
+                                        $getTypes = str_repeat('s', count($individualRefs));
+                                        $getRefsStmt->bind_param($getTypes, ...$individualRefs);
+                                        $getRefsStmt->execute();
+                                        $refsResult = $getRefsStmt->get_result();
+                                        
+                                        while ($refRow = $refsResult->fetch_assoc()) {
+                                            $ref_num = $refRow['ref'] ?? '';
+                                            if (!empty($ref_num)) {
+                                                // Store reference with approver, prefer non-System approvers
+                                                if (!isset($allRefsWithApprovers[$ref_num]) || 
+                                                    ($allRefsWithApprovers[$ref_num] === 'System' && $refRow['approved_by'] !== 'System')) {
+                                                    $allRefsWithApprovers[$ref_num] = $refRow['approved_by'];
+                                                }
+                                            }
+                                        }
+                                        $getRefsStmt->close();
+                                    }
+                                    
+                                    // Populate routed table for all references
+                                    $routed_by = $_SESSION['full_name'] ?? $_SESSION['username'] ?? 'System';
+                                    $bundle_ref = $bundle_key;
+                                    
+                                    foreach ($allRefsWithApprovers as $ref_number => $rollRoutedBy) {
+                                        $finalRoutedBy = ($rollRoutedBy && $rollRoutedBy !== 'System') ? $rollRoutedBy : $routed_by;
+                                        
+                                        // Ensure bundle_ref is not empty string
+                                        $bundle_ref_final = (!empty($bundle_ref) && $bundle_ref !== '') ? $bundle_ref : null;
+                                        
+                                        error_log("Inserting into routed table: ref=$ref_number, bundle=$bundle_ref_final, dest=$roll_destination");
+                                        
+                                        $insertRoutedStmt = $conn->prepare("
+                                            INSERT INTO routed (reference_number, bundle_reference, roll_destination, routed_by, routed_at)
+                                            VALUES (?, ?, ?, ?, NOW())
+                                            ON DUPLICATE KEY UPDATE 
+                                                bundle_reference = IF(? IS NOT NULL AND ? != '', ?, bundle_reference),
+                                                roll_destination = ?,
+                                                routed_by = ?,
+                                                updated_at = NOW()
+                                        ");
+                                        $insertRoutedStmt->bind_param("sssssssss", $ref_number, $bundle_ref_final, $roll_destination, $finalRoutedBy, $bundle_ref_final, $bundle_ref_final, $bundle_ref_final, $roll_destination, $finalRoutedBy);
+                                        if (!$insertRoutedStmt->execute()) {
+                                            error_log("Failed to insert into routed table: " . $insertRoutedStmt->error . " | Reference: $ref_number | Bundle: $bundle_ref_final");
+                                        } else {
+                                            error_log("Successfully inserted/updated routed table for ref=$ref_number");
+                                        }
+                                        $insertRoutedStmt->close();
+                                    }
+                                }
+                                $updateBulkStmt->close();
+                                
+                                // Skip individual update for this report since we've already updated the bundle
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Check if this is a bundle for non-QC test orders (water_permeability, characteristics, sun, uv)
+            if (in_array($report_type, ['water_permeability', 'water_perm', 'characteristics', 'sun_test', 'sun', 'uv_test', 'uv'])) {
+                // Get bundle_reference to check if this is a bundle
+                $checkBundleStmt = $conn->prepare("SELECT bundle_reference FROM $table WHERE report_number COLLATE utf8mb4_unicode_ci = ?");
+                $checkBundleStmt->bind_param("s", $report_num);
+                $checkBundleStmt->execute();
+                $bundleResult = $checkBundleStmt->get_result();
+                $bundleRow = $bundleResult->fetch_assoc();
+                $checkBundleStmt->close();
+                
+                if ($bundleRow && !empty($bundleRow['bundle_reference']) && strpos($bundleRow['bundle_reference'], '|') !== false) {
+                    $bundleParts = explode('|', $bundleRow['bundle_reference']);
+                    if (count($bundleParts) === 2) {
+                        $bulk_from = trim($bundleParts[0]);
+                        $bulk_to = trim($bundleParts[1]);
+                        $bundle_key = $bulk_from . '|' . $bulk_to;
+                        
+                        // If we haven't processed this bundle yet, update ALL rolls in the bundle
+                        if (!in_array($bundle_key, $processed_bundles)) {
+                            $processed_bundles[] = $bundle_key;
+                            
+                            // Extract base reference and roll numbers
+                            $fromBaseRef = '';
+                            $fromRollNum = 0;
+                            $toBaseRef = '';
+                            $toRollNum = 0;
+                            
+                            if (preg_match('/^(.+)-(\d+)$/', $bulk_from, $fromMatches)) {
+                                $fromBaseRef = $fromMatches[1];
+                                $fromRollNum = (int)$fromMatches[2];
+                            } else {
+                                $fromBaseRef = $bulk_from;
+                            }
+                            
+                            if (preg_match('/^(.+)-(\d+)$/', $bulk_to, $toMatches)) {
+                                $toBaseRef = $toMatches[1];
+                                $toRollNum = (int)$toMatches[2];
+                            } else {
+                                $toBaseRef = $bulk_to;
+                            }
+                            
+                            // Only process if both have same base and valid roll numbers
+                            if ($fromBaseRef === $toBaseRef && $fromRollNum > 0 && $toRollNum > 0 && $fromRollNum <= $toRollNum) {
+                                // Generate all individual roll references in the bundle range
+                                $individualRefs = [];
+                                for ($i = $fromRollNum; $i <= $toRollNum; $i++) {
+                                    $individualRefs[] = $fromBaseRef . '-' . $i;
+                                }
+                                
+                                // Update ALL test tables for all individual roll references in this bundle
+                                $allTestTables = [
+                                    'qc_test_orders' => 'sample_reference_id',
+                                    'water_permeability_tests' => 'reference_number',
+                                    'characteristics_tests' => 'reference_number',
+                                    'sun_test_reports' => 'reference_number',
+                                    'weathering_exposure_reports' => 'reference'
+                                ];
+                                
+                                $placeholders = str_repeat('?,', count($individualRefs) - 1) . '?';
+                                
+                                foreach ($allTestTables as $testTable => $refColumn) {
+                                    // Ensure roll_destination column exists
+                                    $checkCol = $conn->query("SHOW COLUMNS FROM $testTable LIKE 'roll_destination'");
+                                    if ($checkCol && $checkCol->num_rows === 0) {
+                                        @$conn->query("ALTER TABLE $testTable ADD COLUMN roll_destination VARCHAR(255) NULL");
+                                    }
+                                    
+                                    // Update all approved tests for these references
+                                    $updateAllTestsStmt = $conn->prepare("
+                                        UPDATE $testTable 
+                                        SET roll_destination = ?, updated_at = NOW() 
+                                        WHERE status = 'approved'
+                                        AND $refColumn IN ($placeholders)
+                                    ");
+                                    $updateParams = array_merge([$roll_destination], $individualRefs);
+                                    $updateTypes = str_repeat('s', count($updateParams));
+                                    $updateAllTestsStmt->bind_param($updateTypes, ...$updateParams);
+                                    $updateAllTestsStmt->execute();
+                                    $updateAllTestsStmt->close();
+                                }
+                                
+                                // Get all individual roll references from ALL test tables and populate routed table
+                                $allRefsWithApprovers = [];
+                                
+                                // Query each test table to get references and approvers
+                                foreach ($allTestTables as $testTable => $refColumn) {
+                                    // Use correct approver column for each table
+                                    $approverCol = ($testTable === 'characteristics_tests') ? 'approver_name' : 'approved_by';
+                                    
+                                    $getRefsStmt = $conn->prepare("
+                                        SELECT DISTINCT $refColumn as ref, 
+                                               COALESCE($approverCol, 'System') as approved_by 
+                                        FROM $testTable 
+                                        WHERE status = 'approved'
+                                        AND $refColumn IN ($placeholders)
+                                    ");
+                                    $getTypes = str_repeat('s', count($individualRefs));
+                                    $getRefsStmt->bind_param($getTypes, ...$individualRefs);
+                                    $getRefsStmt->execute();
+                                    $refsResult = $getRefsStmt->get_result();
+                                    
+                                    while ($refRow = $refsResult->fetch_assoc()) {
+                                        $ref_num = $refRow['ref'] ?? '';
+                                        if (!empty($ref_num)) {
+                                            // Store reference with approver, prefer non-System approvers
+                                            if (!isset($allRefsWithApprovers[$ref_num]) || 
+                                                ($allRefsWithApprovers[$ref_num] === 'System' && $refRow['approved_by'] !== 'System')) {
+                                                $allRefsWithApprovers[$ref_num] = $refRow['approved_by'];
+                                            }
+                                        }
+                                    }
+                                    $getRefsStmt->close();
+                                }
+                                
+                                // Populate routed table for all references
+                                $routed_by = $_SESSION['full_name'] ?? $_SESSION['username'] ?? 'System';
+                                $bundle_ref = $bundle_key;
+                                
+                                foreach ($allRefsWithApprovers as $ref_number => $rollRoutedBy) {
+                                    $finalRoutedBy = ($rollRoutedBy && $rollRoutedBy !== 'System') ? $rollRoutedBy : $routed_by;
+                                    
+                                    // Ensure bundle_ref is not empty string
+                                    $bundle_ref_final = (!empty($bundle_ref) && $bundle_ref !== '') ? $bundle_ref : null;
+                                    
+                                    error_log("Inserting into routed table (non-QC bundle): ref=$ref_number, bundle=$bundle_ref_final, dest=$roll_destination");
+                                    
+                                    $insertRoutedStmt = $conn->prepare("
+                                        INSERT INTO routed (reference_number, bundle_reference, roll_destination, routed_by, routed_at)
+                                        VALUES (?, ?, ?, ?, NOW())
+                                        ON DUPLICATE KEY UPDATE 
+                                            bundle_reference = IF(? IS NOT NULL AND ? != '', ?, bundle_reference),
+                                            roll_destination = ?,
+                                            routed_by = ?,
+                                            updated_at = NOW()
+                                    ");
+                                    $insertRoutedStmt->bind_param("sssssssss", $ref_number, $bundle_ref_final, $roll_destination, $finalRoutedBy, $bundle_ref_final, $bundle_ref_final, $bundle_ref_final, $roll_destination, $finalRoutedBy);
+                                    if (!$insertRoutedStmt->execute()) {
+                                        error_log("Failed to insert into routed table: " . $insertRoutedStmt->error . " | Reference: $ref_number | Bundle: $bundle_ref_final");
+                                    } else {
+                                        error_log("Successfully inserted/updated routed table for ref=$ref_number");
+                                    }
+                                    $insertRoutedStmt->close();
+                                }
+                                
+                                $success_count++;
+                                // Skip individual update for this report since we've already updated the bundle
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Regular update for non-bundle or if bundle processing failed
             if ($report_type === 'qc_test_order') {
                 $stmt = $conn->prepare("UPDATE $table SET roll_destination = ?, updated_at = NOW() WHERE report_number COLLATE utf8mb4_unicode_ci = ? AND status = 'approved'");
                 $stmt->bind_param("ss", $roll_destination, $report_num);
@@ -200,6 +530,118 @@ try {
             
             if ($stmt->execute() && $stmt->affected_rows > 0) {
                 $success_count++;
+                
+                // Get reference number and bundle_reference from the updated record
+                $getRefStmt = null;
+                if ($report_type === 'qc_test_order') {
+                    $getRefStmt = $conn->prepare("SELECT sample_reference_id as ref, test_data, approved_by FROM $table WHERE report_number COLLATE utf8mb4_unicode_ci = ?");
+                } elseif ($report_type === 'characteristics') {
+                    $getRefStmt = $conn->prepare("SELECT reference_number as ref, bundle_reference, approver_name as approved_by FROM $table WHERE report_number COLLATE utf8mb4_unicode_ci = ?");
+                } else {
+                    // Water Permeability, Sun Test, UV Test
+                    $refCol = ($report_type === 'uv_test' || $report_type === 'uv') ? 'reference' : 'reference_number';
+                    $getRefStmt = $conn->prepare("SELECT $refCol as ref, bundle_reference, approved_by FROM $table WHERE report_number COLLATE utf8mb4_unicode_ci = ?");
+                }
+                
+                if ($getRefStmt) {
+                    $getRefStmt->bind_param("s", $report_num);
+                    $getRefStmt->execute();
+                    $refResult = $getRefStmt->get_result();
+                    if ($refRow = $refResult->fetch_assoc()) {
+                        $ref_number = $refRow['ref'] ?? '';
+                        $bundle_ref = $refRow['bundle_reference'] ?? null;
+                        $routed_by = $refRow['approved_by'] ?? $_SESSION['full_name'] ?? $_SESSION['username'] ?? 'System';
+                        
+                        // For QC test orders, extract bundle from test_data JSON
+                        if ($report_type === 'qc_test_order' && empty($bundle_ref) && !empty($refRow['test_data'])) {
+                            $test_data = json_decode($refRow['test_data'], true);
+                            if (isset($test_data['is_bulk_reference']) && $test_data['is_bulk_reference'] &&
+                                isset($test_data['bulk_from_reference']) && isset($test_data['bulk_to_reference'])) {
+                                $bundle_ref = $test_data['bulk_from_reference'] . '|' . $test_data['bulk_to_reference'];
+                            }
+                        }
+                        
+                        // Update ALL test tables for this reference (not just the current table)
+                        if (!empty($ref_number)) {
+                            $allTestTables = [
+                                'qc_test_orders' => 'sample_reference_id',
+                                'water_permeability_tests' => 'reference_number',
+                                'characteristics_tests' => 'reference_number',
+                                'sun_test_reports' => 'reference_number',
+                                'weathering_exposure_reports' => 'reference'
+                            ];
+                            
+                            // If bundle reference exists, extract individual references
+                            $refsToUpdate = [$ref_number];
+                            if (!empty($bundle_ref) && strpos($bundle_ref, '|') !== false) {
+                                $bundleParts = explode('|', $bundle_ref);
+                                $bundleFrom = trim($bundleParts[0]);
+                                $bundleTo = trim($bundleParts[1]);
+                                
+                                // Extract base and roll numbers
+                                if (preg_match('/^(.+)-(\d+)$/', $bundleFrom, $fromMatches) &&
+                                    preg_match('/^(.+)-(\d+)$/', $bundleTo, $toMatches)) {
+                                    $fromBase = $fromMatches[1];
+                                    $fromNum = (int)$fromMatches[2];
+                                    $toBase = $toMatches[1];
+                                    $toNum = (int)$toMatches[2];
+                                    
+                                    if ($fromBase === $toBase && $fromNum > 0 && $toNum > 0) {
+                                        $refsToUpdate = [];
+                                        for ($i = $fromNum; $i <= $toNum; $i++) {
+                                            $refsToUpdate[] = $fromBase . '-' . $i;
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // Update all test tables for all references
+                            foreach ($allTestTables as $testTable => $refColumn) {
+                                // Ensure roll_destination column exists
+                                $checkCol = $conn->query("SHOW COLUMNS FROM $testTable LIKE 'roll_destination'");
+                                if ($checkCol && $checkCol->num_rows === 0) {
+                                    @$conn->query("ALTER TABLE $testTable ADD COLUMN roll_destination VARCHAR(255) NULL");
+                                }
+                                
+                                // Update all approved tests for these references
+                                $placeholders = str_repeat('?,', count($refsToUpdate) - 1) . '?';
+                                $updateAllTestsStmt = $conn->prepare("
+                                    UPDATE $testTable 
+                                    SET roll_destination = ?, updated_at = NOW() 
+                                    WHERE status = 'approved'
+                                    AND $refColumn IN ($placeholders)
+                                ");
+                                $updateParams = array_merge([$roll_destination], $refsToUpdate);
+                                $updateTypes = str_repeat('s', count($updateParams));
+                                $updateAllTestsStmt->bind_param($updateTypes, ...$updateParams);
+                                $updateAllTestsStmt->execute();
+                                $updateAllTestsStmt->close();
+                            }
+                            
+                            // Insert/update routed table for each reference
+                            // Ensure bundle_ref is not empty string
+                            $bundle_ref_final = (!empty($bundle_ref) && $bundle_ref !== '') ? $bundle_ref : null;
+                            
+                            foreach ($refsToUpdate as $refToRoute) {
+                                $insertRoutedStmt = $conn->prepare("
+                                    INSERT INTO routed (reference_number, bundle_reference, roll_destination, routed_by, routed_at)
+                                    VALUES (?, ?, ?, ?, NOW())
+                                    ON DUPLICATE KEY UPDATE 
+                                        bundle_reference = COALESCE(NULLIF(?, ''), bundle_reference),
+                                        roll_destination = ?,
+                                        routed_by = ?,
+                                        updated_at = NOW()
+                                ");
+                                $insertRoutedStmt->bind_param("sssssss", $refToRoute, $bundle_ref_final, $roll_destination, $routed_by, $bundle_ref_final, $roll_destination, $routed_by);
+                                if (!$insertRoutedStmt->execute()) {
+                                    error_log("Failed to insert into routed table: " . $insertRoutedStmt->error . " | Reference: $refToRoute | Bundle: $bundle_ref_final");
+                                }
+                                $insertRoutedStmt->close();
+                            }
+                        }
+                    }
+                    $getRefStmt->close();
+                }
             } else {
                 $failed_reports[] = $report_num;
             }
@@ -371,6 +813,120 @@ try {
         if ($stmt->execute()) {
             if ($stmt->affected_rows > 0) {
                 $success_count++;
+                
+                // If roll_destination was set during approval, update ALL test tables and populate routed table
+                if (!empty($roll_destination)) {
+                    // Get reference number and bundle_reference
+                    $getRefStmt = null;
+                    if ($report_type === 'qc_test_order') {
+                        $getRefStmt = $conn->prepare("SELECT sample_reference_id as ref, test_data, approved_by FROM $table WHERE report_number COLLATE utf8mb4_unicode_ci = ?");
+                    } elseif ($report_type === 'characteristics') {
+                        $getRefStmt = $conn->prepare("SELECT reference_number as ref, bundle_reference, approver_name as approved_by FROM $table WHERE report_number COLLATE utf8mb4_unicode_ci = ?");
+                    } else {
+                        $refCol = ($report_type === 'uv_test' || $report_type === 'uv') ? 'reference' : 'reference_number';
+                        $getRefStmt = $conn->prepare("SELECT $refCol as ref, bundle_reference, approved_by FROM $table WHERE report_number COLLATE utf8mb4_unicode_ci = ?");
+                    }
+                    
+                    if ($getRefStmt) {
+                        $getRefStmt->bind_param("s", $current_report_number);
+                        $getRefStmt->execute();
+                        $refResult = $getRefStmt->get_result();
+                        if ($refRow = $refResult->fetch_assoc()) {
+                            $ref_number = $refRow['ref'] ?? '';
+                            $bundle_ref = $refRow['bundle_reference'] ?? null;
+                            $routed_by = $refRow['approved_by'] ?? $approver;
+                            
+                            // For QC test orders, extract bundle from test_data JSON
+                            if ($report_type === 'qc_test_order' && empty($bundle_ref) && !empty($refRow['test_data'])) {
+                                $test_data = json_decode($refRow['test_data'], true);
+                                if (isset($test_data['is_bulk_reference']) && $test_data['is_bulk_reference'] &&
+                                    isset($test_data['bulk_from_reference']) && isset($test_data['bulk_to_reference'])) {
+                                    $bundle_ref = $test_data['bulk_from_reference'] . '|' . $test_data['bulk_to_reference'];
+                                }
+                            }
+                            
+                            // Update ALL test tables for this reference
+                            if (!empty($ref_number)) {
+                                $allTestTables = [
+                                    'qc_test_orders' => 'sample_reference_id',
+                                    'water_permeability_tests' => 'reference_number',
+                                    'characteristics_tests' => 'reference_number',
+                                    'sun_test_reports' => 'reference_number',
+                                    'weathering_exposure_reports' => 'reference'
+                                ];
+                                
+                                // If bundle reference exists, extract individual references
+                                $refsToUpdate = [$ref_number];
+                                if (!empty($bundle_ref) && strpos($bundle_ref, '|') !== false) {
+                                    $bundleParts = explode('|', $bundle_ref);
+                                    $bundleFrom = trim($bundleParts[0]);
+                                    $bundleTo = trim($bundleParts[1]);
+                                    
+                                    // Extract base and roll numbers
+                                    if (preg_match('/^(.+)-(\d+)$/', $bundleFrom, $fromMatches) &&
+                                        preg_match('/^(.+)-(\d+)$/', $bundleTo, $toMatches)) {
+                                        $fromBase = $fromMatches[1];
+                                        $fromNum = (int)$fromMatches[2];
+                                        $toBase = $toMatches[1];
+                                        $toNum = (int)$toMatches[2];
+                                        
+                                        if ($fromBase === $toBase && $fromNum > 0 && $toNum > 0) {
+                                            $refsToUpdate = [];
+                                            for ($i = $fromNum; $i <= $toNum; $i++) {
+                                                $refsToUpdate[] = $fromBase . '-' . $i;
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                // Update all test tables for all references
+                                foreach ($allTestTables as $testTable => $refColumn) {
+                                    // Ensure roll_destination column exists
+                                    $checkCol = $conn->query("SHOW COLUMNS FROM $testTable LIKE 'roll_destination'");
+                                    if ($checkCol && $checkCol->num_rows === 0) {
+                                        @$conn->query("ALTER TABLE $testTable ADD COLUMN roll_destination VARCHAR(255) NULL");
+                                    }
+                                    
+                                    // Update all approved tests for these references
+                                    $placeholders = str_repeat('?,', count($refsToUpdate) - 1) . '?';
+                                    $updateAllTestsStmt = $conn->prepare("
+                                        UPDATE $testTable 
+                                        SET roll_destination = ?, updated_at = NOW() 
+                                        WHERE status = 'approved'
+                                        AND $refColumn IN ($placeholders)
+                                    ");
+                                    $updateParams = array_merge([$roll_destination], $refsToUpdate);
+                                    $updateTypes = str_repeat('s', count($updateParams));
+                                    $updateAllTestsStmt->bind_param($updateTypes, ...$updateParams);
+                                    $updateAllTestsStmt->execute();
+                                    $updateAllTestsStmt->close();
+                                }
+                                
+                                // Insert/update routed table for each reference
+                                // Ensure bundle_ref is not empty string
+                                $bundle_ref_final = (!empty($bundle_ref) && $bundle_ref !== '') ? $bundle_ref : null;
+                                
+                                foreach ($refsToUpdate as $refToRoute) {
+                                    $insertRoutedStmt = $conn->prepare("
+                                        INSERT INTO routed (reference_number, bundle_reference, roll_destination, routed_by, routed_at)
+                                        VALUES (?, ?, ?, ?, NOW())
+                                        ON DUPLICATE KEY UPDATE 
+                                            bundle_reference = IF(? IS NOT NULL AND ? != '', ?, bundle_reference),
+                                            roll_destination = ?,
+                                            routed_by = ?,
+                                            updated_at = NOW()
+                                    ");
+                                    $insertRoutedStmt->bind_param("sssssssss", $refToRoute, $bundle_ref_final, $roll_destination, $routed_by, $bundle_ref_final, $bundle_ref_final, $bundle_ref_final, $roll_destination, $routed_by);
+                                    if (!$insertRoutedStmt->execute()) {
+                                        error_log("Failed to insert into routed table (approval): " . $insertRoutedStmt->error . " | Reference: $refToRoute | Bundle: $bundle_ref_final");
+                                    }
+                                    $insertRoutedStmt->close();
+                                }
+                            }
+                        }
+                        $getRefStmt->close();
+                    }
+                }
             } else {
                 // No rows affected - check if report exists and its current status
                 $checkStmt = $conn->prepare("SELECT status FROM $table WHERE report_number COLLATE utf8mb4_unicode_ci = ?");

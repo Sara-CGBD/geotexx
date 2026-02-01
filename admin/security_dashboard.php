@@ -263,12 +263,17 @@ try {
                   ADD COLUMN IF NOT EXISTS lock_until TIMESTAMP NULL DEFAULT NULL,
                   ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'active'");
 
-    // Update current user's last_activity to NOW() (since they're currently logged in)
+    // Update current user's last_activity to NOW() (since they're currently logged in) - using prepared statement
     $current_user = $_SESSION['username'];
-    $conn->query("UPDATE new_user SET 
+    $updateStmt = $conn->prepare("UPDATE new_user SET 
                   last_activity = NOW(), 
                   last_login = NOW() 
-                  WHERE username = '" . $conn->real_escape_string($current_user) . "'");
+                  WHERE username = ?");
+    if ($updateStmt) {
+        $updateStmt->bind_param("s", $current_user);
+        $updateStmt->execute();
+        $updateStmt->close();
+    }
 
     // Total users
     $result = $conn->query("SELECT COUNT(*) as count FROM new_user");

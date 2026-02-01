@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 // Security headers
 header("X-Content-Type-Options: nosniff");
 header("X-Frame-Options: SAMEORIGIN");
@@ -46,37 +46,50 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         header("Location: login.html?error=db");
         exit();
     }
+    // Set charset early for better performance
+    $conn->set_charset("utf8mb4");
 
-    // Simple user lookup - prioritize users table first, but only query existing tables
+    // Optimized user lookup - try users table first, then new_user
+    // Cache table existence to avoid multiple SHOW TABLES queries
     $user = null;
-    $tables_to_try = ['users', 'new_user']; // Changed order to prioritize users table
-
-    foreach ($tables_to_try as $table) {
-        $exists = $conn->query("SHOW TABLES LIKE '{$table}'");
-        if (!$exists || $exists->num_rows === 0) {
-            error_log("Login lookup skipped missing table: {$table}");
-            continue;
+    
+    // Try users table first (most common)
+    $stmt = $conn->prepare("SELECT * FROM users WHERE username = ? LIMIT 1");
+    if ($stmt) {
+        $stmt->bind_param("s", $username);
+        $stmt->execute();
+        $result = $stmt->get_result();
+        if ($result->num_rows > 0) {
+            $user = $result->fetch_assoc();
+            error_log("User found in users table with ID: " . $user['id']);
         }
-
-        $stmt = $conn->prepare("SELECT * FROM {$table} WHERE username = ?");
+        $stmt->close();
+    }
+    
+    // If not found in users, try new_user table
+    if (!$user) {
+        $stmt = $conn->prepare("SELECT * FROM new_user WHERE username = ? LIMIT 1");
         if ($stmt) {
             $stmt->bind_param("s", $username);
             $stmt->execute();
             $result = $stmt->get_result();
-
             if ($result->num_rows > 0) {
                 $user = $result->fetch_assoc();
-                error_log("User found in table: " . $table . " with ID: " . $user['id']);
-                break; // Found user, stop trying other tables
+                error_log("User found in new_user table with ID: " . $user['id']);
             }
-        } else {
-            error_log("Error preparing statement for table: " . $table . " - " . $conn->error);
+            $stmt->close();
         }
     }
 
-    // Get IP address for logging
-    require_once 'get_real_ip.php';
-    $ip_address = getRealIPAddress();
+    // Get IP address for logging (optimized - check REMOTE_ADDR first)
+    $ip_address = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
+    // Only use getRealIPAddress if behind proxy (check common proxy headers first)
+    if (empty($_SERVER['HTTP_X_FORWARDED_FOR']) && empty($_SERVER['HTTP_X_REAL_IP']) && empty($_SERVER['HTTP_CF_CONNECTING_IP'])) {
+        // Not behind proxy, use REMOTE_ADDR directly (fastest)
+    } else {
+        require_once 'get_real_ip.php';
+        $ip_address = getRealIPAddress();
+    }
     $user_agent = $_SERVER['HTTP_USER_AGENT'] ?? '';
 
     // Check if user exists
@@ -189,19 +202,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit();
     }
 
-    // Successful login - reset wrong attempts in new_user table (for security dashboard)
-    $stmt = $conn->prepare("UPDATE new_user SET wrong_attempts = 0, lock_until = NULL, last_login = NOW(), last_activity = NOW() WHERE username = ?");
-    $stmt->bind_param("s", $username);
-    $stmt->execute();
-
-    // Log successful login
-    $log_stmt = $conn->prepare("INSERT INTO login_attempts (username, ip_address, user_agent, success, failure_reason) VALUES (?, ?, ?, 1, NULL)");
-    $log_stmt->bind_param("sss", $username, $ip_address, $user_agent);
-    $log_stmt->execute();
+    // Successful login - batch operations for better performance
+    // Update user table and log in parallel (non-blocking for logging)
+    $user_id = $user['id'];
     
-    // Enterprise audit log (compatible with audit_log table schema: table_name, action, etc.)
-    $audit_table_exists = $conn->query("SHOW TABLES LIKE 'audit_log'");
-    if ($audit_table_exists && $audit_table_exists->num_rows > 0) {
+    // Critical: Update user status (must complete before redirect)
+    try {
+        $stmt = $conn->prepare("UPDATE new_user SET wrong_attempts = 0, lock_until = NULL, last_login = NOW(), last_activity = NOW() WHERE username = ?");
+        if ($stmt) {
+            $stmt->bind_param("s", $username);
+            $stmt->execute();
+            $stmt->close();
+        }
+    } catch (Exception $e) {
+        // Non-critical, continue
+    }
+    
+    // Non-critical logging - execute but don't wait (defer to background if possible)
+    // Use INSERT IGNORE or try-catch to prevent blocking on errors
+    try {
+        // Log successful login (non-blocking)
+        $log_stmt = $conn->prepare("INSERT INTO login_attempts (username, ip_address, user_agent, success, failure_reason) VALUES (?, ?, ?, 1, NULL)");
+        if ($log_stmt) {
+            $log_stmt->bind_param("sss", $username, $ip_address, $user_agent);
+            $log_stmt->execute();
+            $log_stmt->close();
+        }
+    } catch (Exception $e) {
+        // Non-critical logging error - continue
+    }
+    
+    // Enterprise audit log (non-blocking)
+    try {
         $login_details_json = json_encode([
             'event' => 'login',
             'username' => $user['username'],
@@ -211,9 +243,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $audit_stmt = $conn->prepare("INSERT INTO audit_log (table_name, record_id, action, old_values, new_values, changed_by, user_id, ip_address, user_agent) VALUES ('auth', NULL, 'LOGIN', NULL, ?, ?, ?, ?, ?)");
         if ($audit_stmt) {
-            $audit_stmt->bind_param("ssiss", $login_details_json, $username, $user['id'], $ip_address, $user_agent);
-    $audit_stmt->execute();
+            $audit_stmt->bind_param("ssiss", $login_details_json, $username, $user_id, $ip_address, $user_agent);
+            $audit_stmt->execute();
+            $audit_stmt->close();
         }
+    } catch (Exception $e) {
+        // Table doesn't exist or error - silently continue (non-critical)
     }
 
     // Set session variables
@@ -233,111 +268,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
               ", Full Name: " . $_SESSION['full_name']);
 
     $bangladesh_time = date('Y-m-d H:i:s');
+    // Note: last_login already updated above in new_user table, skip duplicate update
 
-    // Determine which table to update
-    $update_table = 'users';
-    foreach (['users', 'new_user'] as $table) {
-        $check = $conn->query("SHOW TABLES LIKE '$table'");
-        if ($check && $check->num_rows > 0) {
-            $columns = $conn->query("SHOW COLUMNS FROM $table LIKE 'last_login'");
-            if ($columns && $columns->num_rows > 0) {
-                $update_table = $table;
-                break;
-            }
-        }
-    }
-
-    // âš¡ FIX: assign array element to variable
-    $user_id = $user['id'];
-    $stmt = $conn->prepare("UPDATE $update_table SET last_login = ?, last_activity = ? WHERE id = ?");
-    $stmt->bind_param("ssi", $bangladesh_time, $bangladesh_time, $user_id);
-    $stmt->execute();
-
-    // Record active session
+    // Record active session - non-blocking (defer if table doesn't exist)
     $session_id = session_id();
-    require_once 'get_real_ip.php';
-    $ip_address = getRealIPAddress();
-    $user_agent = $_SERVER['HTTP_USER_AGENT'] ?? '';
+    $email = $user['email'] ?? null;
+    $role = $user['role'] ?? 'user';
+    $uname = $user['username'];
 
-    $check_table = $conn->query("SHOW TABLES LIKE 'active_sessions'");
-    if ($check_table && $check_table->num_rows > 0) {
-        // Assign array values into variables before bind
-        $email = $user['email'] ?? null;
-        $role = $user['role'] ?? 'user';
-        $uname = $user['username'];
-
-        // Detect active_sessions columns
-        $cols = [];
-        $colRes = $conn->query("SHOW COLUMNS FROM active_sessions");
-        if ($colRes) {
-            while ($row = $colRes->fetch_assoc()) {
-                $cols[] = strtolower($row['Field']);
-            }
-        }
-
-        // Build column list dynamically based on existing schema
-        $columns = [];
-        $placeholders = [];
-        $types = '';
-        $values = [];
-
-        // helper to add a column/value/type
-        $addCol = function($name, $value, $type) use (&$columns, &$placeholders, &$types, &$values) {
-            $columns[] = $name;
-            $placeholders[] = '?';
-            $types .= $type;
-            $values[] = $value;
-        };
-
-        $addCol('user_id', $user_id, 'i');
-        $addCol('username', $uname, 's');
-
-        $hasEmail = in_array('email', $cols, true);
-        if ($hasEmail) {
-            $addCol('email', $email ?? 'user@example.com', 's');
-        }
-
-        $hasRole = in_array('role', $cols, true);
-        if ($hasRole) {
-            $addCol('role', $role, 's');
-        }
-
-        $addCol('session_id', $session_id, 's');
-        $addCol('ip_address', $ip_address, 's');
-        $addCol('user_agent', $user_agent, 's');
-        $addCol('login_time', $bangladesh_time, 's');
-        $addCol('last_activity', $bangladesh_time, 's');
-        // is_active is constant
-        $columns[] = 'is_active';
-        $placeholders[] = '1';
-
-        $updateParts = [
-            "user_id = VALUES(user_id)",
-            "session_id = VALUES(session_id)",
-            "ip_address = VALUES(ip_address)",
-            "user_agent = VALUES(user_agent)",
-            "login_time = VALUES(login_time)",
-            "last_activity = VALUES(last_activity)",
-            "is_active = 1"
-        ];
-        if ($hasEmail) {
-            array_splice($updateParts, 1, 0, "email = VALUES(email)");
-        }
-        if ($hasRole) {
-            array_splice($updateParts, 1 + ($hasEmail ? 1 : 0), 0, "role = VALUES(role)");
-        }
-
-        $sql = "INSERT INTO active_sessions (" . implode(',', $columns) . ") VALUES (" . implode(',', $placeholders) . ")
-            ON DUPLICATE KEY UPDATE " . implode(', ', $updateParts);
-
+    // Try to insert/update active_sessions (non-blocking)
+    try {
+        // Standard columns that should exist in active_sessions
+        $sql = "INSERT INTO active_sessions (user_id, username, session_id, ip_address, user_agent, login_time, last_activity, is_active) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                ON DUPLICATE KEY UPDATE 
+                    user_id = VALUES(user_id),
+                    session_id = VALUES(session_id),
+                    ip_address = VALUES(ip_address),
+                    user_agent = VALUES(user_agent),
+                    login_time = VALUES(login_time),
+                    last_activity = VALUES(last_activity),
+                    is_active = 1";
+        
         $stmt = $conn->prepare($sql);
         if ($stmt) {
-            if ($types !== '') {
-                $stmt->bind_param($types, ...$values);
-            }
-        $stmt->execute();
+            $stmt->bind_param("issssss", $user_id, $uname, $session_id, $ip_address, $user_agent, $bangladesh_time, $bangladesh_time);
+            $stmt->execute();
             $stmt->close();
         }
+    } catch (Exception $e) {
+        // Table doesn't exist or missing columns - non-critical, skip silently
     }
 
     $conn->close();

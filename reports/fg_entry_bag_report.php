@@ -19,7 +19,6 @@ $conn = SecurityConfig::getConnection();
 
 $dateFrom = $_GET['date_from'] ?? '';
 $dateTo = $_GET['date_to'] ?? '';
-$referenceNumber = $_GET['reference_number'] ?? '';
 $cncBatch = $_GET['cnc_batch'] ?? '';
 $bagSizeFilter = $_GET['bag_size'] ?? '';
 
@@ -54,11 +53,6 @@ if ($dateFrom) {
 if ($dateTo) {
     $where .= " AND fe.date_time <= ?";
     $params[] = $dateTo . ' 23:59:59';
-    $types .= 's';
-}
-if ($referenceNumber !== '') {
-    $where .= " AND fe.reference_number = ?";
-    $params[] = $referenceNumber;
     $types .= 's';
 }
 if ($cncBatch !== '') {
@@ -106,9 +100,6 @@ $avgPassRate = $totalQty > 0 ? round(($totalPassed / $totalQty) * 100, 2) : 0;
 
 $baseWhere = $hasIsDeleted ? "AND (is_deleted = 0 OR is_deleted IS NULL)" : "";
 $baseWhere .= $hasProductType ? " AND (product_type = 'bag' OR product_type IS NULL)" : "";
-
-$refRes = $conn->query("SELECT DISTINCT reference_number FROM fg_entry WHERE reference_number IS NOT NULL AND reference_number != '' $baseWhere ORDER BY reference_number");
-$referenceNumbers = $refRes ? $refRes->fetch_all(MYSQLI_ASSOC) : [];
 
 $cncRes = $conn->query("SELECT DISTINCT cnc_cutting_batch FROM fg_entry WHERE cnc_cutting_batch IS NOT NULL AND cnc_cutting_batch != '' $baseWhere ORDER BY cnc_cutting_batch");
 $cncBatches = $cncRes ? $cncRes->fetch_all(MYSQLI_ASSOC) : [];
@@ -220,17 +211,6 @@ $conn->close();
                         <input type="date" name="date_to" value="<?php echo htmlspecialchars($dateTo); ?>">
                     </div>
                     <div class="filter-group">
-                        <label>Reference</label>
-                        <select name="reference_number">
-                            <option value="">All</option>
-                            <?php foreach ($referenceNumbers as $ref): ?>
-                                <option value="<?php echo htmlspecialchars($ref['reference_number']); ?>" <?php echo ($referenceNumber === $ref['reference_number']) ? 'selected' : ''; ?>>
-                                    <?php echo htmlspecialchars($ref['reference_number']); ?>
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    <div class="filter-group">
                         <label>CNC Batch</label>
                         <select name="cnc_batch">
                             <option value="">All</option>
@@ -273,7 +253,6 @@ $conn->close();
                         <th>FG ID</th>
                         <th>Date &amp; Time</th>
                         <th>Shift</th>
-                        <th>Reference</th>
                         <th>CNC Cutting Batch</th>
                         <th>Bag Size</th>
                         <th>Quality Checked</th>
@@ -299,7 +278,6 @@ $conn->close();
                                     <?php echo htmlspecialchars($r['shift'] ?? 'N/A'); ?>
                                 </span>
                             </td>
-                            <td><?php echo htmlspecialchars($r['reference_number'] ?? '—'); ?></td>
                             <td><?php echo htmlspecialchars($r['cnc_cutting_batch'] ?? '—'); ?></td>
                             <td><?php echo htmlspecialchars($r['bag_size'] ?? '—'); ?></td>
                             <td><?php echo number_format((int)($r['quality_checked'] ?? 0)); ?></td>

@@ -70,11 +70,13 @@ function generateFiberInputEntryId($conn) {
     if ($tableCheck && $tableCheck->num_rows > 0) {
         $colCheck = $conn->query("SHOW COLUMNS FROM fiber_to_roll_entry LIKE 'entry_id'");
         if ($colCheck && $colCheck->num_rows > 0) {
+            // Filter by entry_id pattern to ensure we count entries from the same day
+            // This is more reliable than filtering by date_time
+            $pattern = 'FIE-' . $dateKey . '-%';
             $stmt = $conn->prepare("SELECT MAX(CAST(SUBSTRING(entry_id, -3) AS UNSIGNED)) as last_num 
                                     FROM fiber_to_roll_entry 
-                                    WHERE date_time >= ?");
-            $resetTimestamp = $baseDate->format('Y-m-d H:i:s');
-            $stmt->bind_param('s', $resetTimestamp);
+                                    WHERE entry_id LIKE ?");
+            $stmt->bind_param('s', $pattern);
             $stmt->execute();
             $result = $stmt->get_result();
             $nextNum = 1;
@@ -495,6 +497,7 @@ if ($manufacturerQuery) {
           <?php endif; ?>
         </div>
         <input type="hidden" id="manufacturer_name" name="manufacturer_name" value="">
+        <input type="hidden" id="fiber_entry_id" name="fiber_entry_id" value="">
         <small style="color: #666; font-size: 12px; display: block; margin-top: 5px;">Only manufacturers from Fiber Received Entry are available</small>
       </div>
 
@@ -637,6 +640,11 @@ if ($manufacturerQuery) {
   updateTimeAndShift();
 
   function selectBtn(button, groupId) {
+    // Prevent selection if button is disabled
+    if (button.disabled) {
+      return;
+    }
+    
     document.querySelectorAll(`#${groupId} .btn`).forEach(b=>b.classList.remove('selected'));
     button.classList.add('selected');
     if(groupId==="projectGroup"){
@@ -687,10 +695,74 @@ if ($manufacturerQuery) {
     const materialValue = (button.dataset.value || button.textContent).trim();
     document.getElementById('material_type').value = materialValue;
     
+    // Check and disable manufacturers with 0 remaining amount
+    checkManufacturerAvailability();
+    
     // Fetch available material quantity (will use manufacturer if selected)
     fetchAvailableMaterial();
     
     updateSummary();
+  }
+  
+  // Check remaining amounts for all manufacturers and disable those with 0
+  async function checkManufacturerAvailability() {
+    const materialType = document.getElementById('material_type').value;
+    if (!materialType) {
+      // Enable all manufacturers if no material type selected
+      document.querySelectorAll('#manufacturerGroup .btn').forEach(btn => {
+        btn.disabled = false;
+        btn.style.opacity = '1';
+        btn.style.cursor = 'pointer';
+      });
+      return;
+    }
+    
+    const manufacturerButtons = document.querySelectorAll('#manufacturerGroup .btn');
+    
+    // Check each manufacturer's remaining amount
+    for (const btn of manufacturerButtons) {
+      const manufacturerName = btn.dataset.value || btn.textContent.trim();
+      if (!manufacturerName) continue;
+      
+      try {
+        const apiUrl = `api/get_fiber_available_material.php?material_type=${encodeURIComponent(materialType)}&manufacturer_name=${encodeURIComponent(manufacturerName)}`;
+        const response = await fetch(apiUrl);
+        
+        if (response.ok) {
+          const data = await response.json();
+          if (data.success) {
+            const remainingQty = parseFloat(data.remaining_quantity || 0);
+            
+            if (remainingQty <= 0) {
+              // Disable button if no remaining amount
+              btn.disabled = true;
+              btn.style.opacity = '0.5';
+              btn.style.cursor = 'not-allowed';
+              btn.style.backgroundColor = '#f5f5f5';
+              btn.style.color = '#999';
+              // Remove selected state if it was selected
+              btn.classList.remove('selected');
+              if (document.getElementById('manufacturer_name').value === manufacturerName) {
+                document.getElementById('manufacturer_name').value = '';
+              }
+            } else {
+              // Enable button if there's remaining amount
+              btn.disabled = false;
+              btn.style.opacity = '1';
+              btn.style.cursor = 'pointer';
+              btn.style.backgroundColor = '';
+              btn.style.color = '';
+            }
+          }
+        }
+      } catch (error) {
+        console.error('Error checking manufacturer availability:', error);
+        // On error, keep button enabled
+        btn.disabled = false;
+        btn.style.opacity = '1';
+        btn.style.cursor = 'pointer';
+      }
+    }
   }
   
   // Function to handle manufacturer selection
@@ -745,8 +817,24 @@ if ($manufacturerQuery) {
         const remainingQty = parseFloat(data.remaining_quantity || data.available_quantity) || 0;
         const receivedQty = parseFloat(data.received_quantity || 0) || 0;
         const usedQty = parseFloat(data.used_quantity || 0) || 0;
+        const apiMessage = data.message || '';
+        const fiberEntryId = data.fiber_entry_id || null;
         
-        console.log('Remaining quantity:', remainingQty, 'kg');
+        console.log('API Response:', {
+          remainingQty,
+          receivedQty,
+          usedQty,
+          fiberEntryId,
+          message: apiMessage,
+          debug: data.debug
+        });
+        
+        // Set fiber_entry_id for direct tracking
+        if (fiberEntryId) {
+          document.getElementById('fiber_entry_id').value = fiberEntryId;
+        } else {
+          document.getElementById('fiber_entry_id').value = '';
+        }
         
         if (remainingQty > 0) {
           let displayText = `Remaining: ${remainingQty.toFixed(2)} kg`;
@@ -761,7 +849,14 @@ if ($manufacturerQuery) {
           // Store for validation
           document.getElementById('total_weight').setAttribute('data-max-weight', remainingQty);
         } else {
-          availableText.textContent = `No remaining stock available${manufacturerName ? ' for this manufacturer' : ''}`;
+          // Show detailed message when no amount available
+          let displayText = apiMessage || `No remaining stock available${manufacturerName ? ' for this manufacturer' : ''}`;
+          if (manufacturerName && receivedQty > 0) {
+            displayText += ` (Received: ${receivedQty.toFixed(2)} kg, Used: ${usedQty.toFixed(2)} kg)`;
+          } else if (manufacturerName && receivedQty === 0) {
+            displayText += ` (No entries found matching manufacturer "${manufacturerName}" and material type "${materialType}")`;
+          }
+          availableText.textContent = displayText;
           availableText.style.color = '#e74c3c'; // Red for no stock
           availableText.style.display = 'block';
           availableText.style.fontWeight = '600';
@@ -907,6 +1002,16 @@ if ($manufacturerQuery) {
     document.getElementById("bale_opener_number").value='';
     // Hide Bale Opener section
     document.getElementById("baleOpenerSection").style.display = "none";
+    
+    // Re-enable all manufacturer buttons when form is cleared
+    document.querySelectorAll('#manufacturerGroup .btn').forEach(btn => {
+      btn.disabled = false;
+      btn.style.opacity = '1';
+      btn.style.cursor = 'pointer';
+      btn.style.backgroundColor = '';
+      btn.style.color = '';
+    });
+    
     updateTimeAndShift();
     updateSummary();
   }
@@ -1041,6 +1146,14 @@ if ($manufacturerQuery) {
     
     return true;
   }
+  
+  // Initialize: Check manufacturer availability when page loads if material type is selected
+  document.addEventListener('DOMContentLoaded', function() {
+    const materialType = document.getElementById('material_type').value;
+    if (materialType) {
+      checkManufacturerAvailability();
+    }
+  });
 </script>
 
 <!-- Quantity Limit Popup -->

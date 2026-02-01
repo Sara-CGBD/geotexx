@@ -62,38 +62,60 @@ try {
     
     // Validate recycled amount doesn't exceed available
     if ($recycledType !== 'none' && $recycledAmount > 0) {
-        // Get total recycled quantities from scrap_recycle
-        $recycledQuery = $conn->query("
-            SELECT 
-                s.scrap_category,
-                COALESCE(SUM(sr.recycled_qty), 0) as total_recycled
-            FROM scrap_recycle sr
-            INNER JOIN scrap s ON sr.scrap_id = s.id
-            WHERE s.is_deleted = 0
-            AND s.scrap_category IS NOT NULL
-            AND s.scrap_category != ''
-            GROUP BY s.scrap_category
-        ");
-        
-        $recycledTotals = [];
-        if ($recycledQuery) {
-            while ($row = $recycledQuery->fetch_assoc()) {
-                $category = trim($row['scrap_category']);
-                $total = (float)$row['total_recycled'];
-                
-                if (stripos($category, 'Sheet Production') !== false) {
-                    $recycledTotals['sheet_production'] = ($recycledTotals['sheet_production'] ?? 0) + $total;
-                } elseif (stripos($category, 'Swing') !== false && stripos($category, 'Sheet Production') === false) {
-                    $recycledTotals['swing'] = ($recycledTotals['swing'] ?? 0) + $total;
-                }
-            }
+        // Map types to category matches (same logic as API)
+        if ($recycledType === 'sheet_production') {
+            $categoryMatches = ['Sheet Production'];
+        } else {
+            // For swing/sewing, match both "Sewing Production" and "Swing"
+            $categoryMatches = ['Sewing Production', 'Swing'];
         }
         
+        // Check if production_category column exists
+        $colCheck = $conn->query("SHOW COLUMNS FROM scrap_recycle LIKE 'production_category'");
+        $hasProductionCategory = $colCheck && $colCheck->num_rows > 0;
+        
+        $totalRecycled = 0;
+        
+        if ($hasProductionCategory) {
+            // Use production_category column directly (same as API)
+            $placeholders = implode(',', array_fill(0, count($categoryMatches), '?'));
+            $recycledQuery = $conn->prepare("
+                SELECT COALESCE(SUM(sr.recycled_qty), 0) as total_recycled
+                FROM scrap_recycle sr
+                LEFT JOIN side_cut_scrap scs ON sr.scrap_id = scs.id AND sr.scrap_type = 'side_cut'
+                WHERE sr.scrap_type = 'side_cut'
+                  AND (
+                    sr.production_category IN ($placeholders)
+                    OR (sr.production_category IS NULL AND scs.category IN ($placeholders))
+                  )
+            ");
+            $bindParams = array_merge($categoryMatches, $categoryMatches);
+            $types = str_repeat('s', count($bindParams));
+            $recycledQuery->bind_param($types, ...$bindParams);
+        } else {
+            // Fallback: join with side_cut_scrap to get category
+            $placeholders = implode(',', array_fill(0, count($categoryMatches), '?'));
+            $recycledQuery = $conn->prepare("
+                SELECT COALESCE(SUM(sr.recycled_qty), 0) as total_recycled
+                FROM scrap_recycle sr
+                INNER JOIN side_cut_scrap scs ON sr.scrap_id = scs.id
+                WHERE sr.scrap_type = 'side_cut'
+                  AND scs.category IN ($placeholders)
+            ");
+            $types = str_repeat('s', count($categoryMatches));
+            $recycledQuery->bind_param($types, ...$categoryMatches);
+        }
+        
+        $recycledQuery->execute();
+        $recycledResult = $recycledQuery->get_result();
+        if ($recycledResult && $row = $recycledResult->fetch_assoc()) {
+            $totalRecycled = (float)($row['total_recycled'] ?? 0);
+        }
+        $recycledQuery->close();
+        
         // Get amounts already used in fiber_entries (not deleted)
-        // Exclude the current entry being submitted (if it's an update)
         $usedStmt = $conn->prepare("
-            SELECT 
-                COALESCE(SUM(recycled_amount), 0) as total_used
+            SELECT COALESCE(SUM(recycled_amount), 0) as total_used
             FROM fiber_entries
             WHERE is_deleted = 0
             AND recycled_type = ?
@@ -109,12 +131,7 @@ try {
         $usedStmt->close();
         
         // Calculate available
-        $available = 0;
-        if ($recycledType === 'sheet_production') {
-            $available = max(0, ($recycledTotals['sheet_production'] ?? 0) - $totalUsed);
-        } elseif ($recycledType === 'swing') {
-            $available = max(0, ($recycledTotals['swing'] ?? 0) - $totalUsed);
-        }
+        $available = max(0, $totalRecycled - $totalUsed);
         
         // Check if requested amount exceeds available
         if ($recycledAmount > $available) {
@@ -181,27 +198,47 @@ try {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
     $conn->query($createTable);
     
-    // Helper to add column safely (without failing if AFTER target missing)
+    // Helper to add column safely (without failing if AFTER target missing) - using prepared statements
     $ensureColumn = function($table, $column, $definition, $after = null) use ($conn) {
-        $safeCol = $conn->real_escape_string($column);
-        $existsRes = $conn->query("
+        // Validate column name before using
+        if (!preg_match('/^[A-Za-z0-9_]+$/', $column)) {
+            return; // Invalid column name
+        }
+        
+        // Use prepared statement for INFORMATION_SCHEMA query
+        $existsStmt = $conn->prepare("
             SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
             WHERE TABLE_SCHEMA = DATABASE()
-              AND TABLE_NAME = '{$table}'
-              AND COLUMN_NAME = '{$safeCol}'
+              AND TABLE_NAME = ?
+              AND COLUMN_NAME = ?
             LIMIT 1
         ");
-        if ($existsRes && $existsRes->num_rows > 0) {
-            return;
+        if ($existsStmt) {
+            $existsStmt->bind_param("ss", $table, $column);
+            $existsStmt->execute();
+            $existsRes = $existsStmt->get_result();
+            if ($existsRes && $existsRes->num_rows > 0) {
+                $existsStmt->close();
+                return;
+            }
+            $existsStmt->close();
         }
+        
         if ($after) {
-            $safeAfter = $conn->real_escape_string($after);
-            // Try with AFTER; if it fails, retry without AFTER
-            if (!$conn->query("ALTER TABLE {$table} ADD COLUMN {$column} {$definition} AFTER {$safeAfter}")) {
+            // Validate after column name
+            if (preg_match('/^[A-Za-z0-9_]+$/', $after)) {
+                // Try with AFTER; if it fails, retry without AFTER
+                if (!$conn->query("ALTER TABLE {$table} ADD COLUMN {$column} {$definition} AFTER {$after}")) {
+                    $conn->query("ALTER TABLE {$table} ADD COLUMN {$column} {$definition}");
+                }
+            } else {
                 $conn->query("ALTER TABLE {$table} ADD COLUMN {$column} {$definition}");
             }
         } else {
-            $conn->query("ALTER TABLE {$table} ADD COLUMN {$column} {$definition}");
+            // Validate table and column names before using
+            if (preg_match('/^[A-Za-z0-9_]+$/', $table) && preg_match('/^[A-Za-z0-9_]+$/', $column)) {
+                $conn->query("ALTER TABLE {$table} ADD COLUMN {$column} {$definition}");
+            }
         }
     };
 

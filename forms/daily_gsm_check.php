@@ -38,6 +38,9 @@ if (!AccessControl::hasModuleAccess($_SESSION['role'], AccessControl::MODULE_QC,
 date_default_timezone_set('Asia/Dhaka');
 $conn = SecurityConfig::getConnection();
 
+// Initialize rejected entries array early
+$rejectedEntries = [];
+
 // Schema helpers
 $colExists = function(mysqli $conn, string $table, string $column): bool {
     if (!preg_match('/^[A-Za-z0-9_]+$/', $table)) return false;
@@ -102,7 +105,7 @@ if ($hasDgcRoll) {
     }
 }
 
-// Fetch roll numbers from gsm_roll_entry (primary source) and fiber_to_roll_entry (fallback)
+// Fetch roll numbers from gsm_roll_entry (GSM and roll input data table)
 $rollNumbers = [];
 
 // First, try to fetch from gsm_roll_entry table
@@ -113,60 +116,144 @@ if ($tableCheck && $tableCheck->num_rows > 0) {
 }
 
 if ($tableExists) {
+    // Check if daily_gsm_checks table exists before using it in NOT EXISTS clause
+    $dgcTableCheck = $conn->query("SHOW TABLES LIKE 'daily_gsm_checks'");
+    $dgcTableExists = ($dgcTableCheck && $dgcTableCheck->num_rows > 0);
+    
+    // Build the exclusion clause only if daily_gsm_checks table exists
+    // Exclude rolls that have already been submitted (except rejected ones which can be resubmitted)
+    $exclusionClause = "";
+    if ($dgcTableExists && $hasDgcRoll) {
+        // Re-check status column existence since table might not have existed when checked earlier
+        $statusColCheck = $conn->query("SHOW COLUMNS FROM daily_gsm_checks LIKE 'status'");
+        $statusColExists = ($statusColCheck && $statusColCheck->num_rows > 0);
+        
+        // Build exclusion clause with proper status filter
+        // IMPORTANT: Always match by BOTH roll_no AND reference_number (entire reference)
+        // This allows the same roll number with different reference/GSM to appear in dropdown
+        // Only exclude if status is NOT 'rejected' (rejected entries can be resubmitted)
+        if ($statusColExists) {
+            // Exclude only if BOTH roll_no AND reference_number match exactly
+            // This ensures Roll 3 with reference "REF-A" doesn't exclude Roll 3 with reference "REF-B"
+            $exclusionClause = "AND NOT EXISTS (
+                SELECT 1 FROM daily_gsm_checks d 
+                WHERE CAST(d.roll_no AS CHAR) = CAST(g.roll_no AS CHAR)
+                AND (
+                    -- Both have reference numbers and they match
+                    (d.reference_number IS NOT NULL AND d.reference_number != '' 
+                     AND g.reference IS NOT NULL AND g.reference != ''
+                     AND TRIM(d.reference_number) COLLATE {$collation} = TRIM(g.reference) COLLATE {$collation})
+                    OR
+                    -- Both are NULL or empty (treat as match)
+                    ((d.reference_number IS NULL OR TRIM(d.reference_number) = '') 
+                     AND (g.reference IS NULL OR TRIM(g.reference) = ''))
+                )
+                AND d.status != 'rejected'
+            )";
+        } else {
+            // If status column doesn't exist, exclude all submitted rolls matching both roll_no and reference
+            $exclusionClause = "AND NOT EXISTS (
+                SELECT 1 FROM daily_gsm_checks d 
+                WHERE CAST(d.roll_no AS CHAR) = CAST(g.roll_no AS CHAR)
+                AND (
+                    -- Both have reference numbers and they match
+                    (d.reference_number IS NOT NULL AND d.reference_number != '' 
+                     AND g.reference IS NOT NULL AND g.reference != ''
+                     AND TRIM(d.reference_number) COLLATE {$collation} = TRIM(g.reference) COLLATE {$collation})
+                    OR
+                    -- Both are NULL or empty (treat as match)
+                    ((d.reference_number IS NULL OR TRIM(d.reference_number) = '') 
+                     AND (g.reference IS NULL OR TRIM(g.reference) = ''))
+                )
+            )";
+        }
+    }
+    
+    // First, check total rolls without exclusions
+    $totalQuery = $conn->query("SELECT COUNT(*) as cnt FROM gsm_roll_entry WHERE roll_no IS NOT NULL AND roll_no != 0");
+    $totalResult = $totalQuery ? $totalQuery->fetch_assoc() : null;
+    $totalRolls = $totalResult ? (int)$totalResult['cnt'] : 0;
+    
+    // Check how many are already submitted
+    $submittedCount = 0;
+    if ($dgcTableExists && $hasDgcRoll) {
+        $statusColCheck = $conn->query("SHOW COLUMNS FROM daily_gsm_checks LIKE 'status'");
+        $statusColExists = ($statusColCheck && $statusColCheck->num_rows > 0);
+        $submittedStatusFilter = $statusColExists ? "AND status NOT IN ('rejected')" : "";
+        $submittedQuery = $conn->query("SELECT COUNT(DISTINCT roll_no) as cnt FROM daily_gsm_checks WHERE roll_no IS NOT NULL AND roll_no != '' {$submittedStatusFilter}");
+        if ($submittedQuery) {
+            $submittedResult = $submittedQuery->fetch_assoc();
+            $submittedCount = (int)$submittedResult['cnt'];
+        }
+    }
+    
+    // Debug: Get all rolls from gsm_roll_entry first
+    $allRollsQuery = $conn->query("SELECT roll_no, reference, gsm FROM gsm_roll_entry WHERE roll_no IS NOT NULL AND roll_no != 0 ORDER BY created_at DESC LIMIT 10");
+    $allRollsList = [];
+    if ($allRollsQuery) {
+        while ($r = $allRollsQuery->fetch_assoc()) {
+            $allRollsList[] = "Roll " . $r['roll_no'];
+        }
+    }
+    error_log("Daily GSM Check - All rolls in gsm_roll_entry: " . implode(", ", $allRollsList));
+    
+    // Debug: Get submitted rolls
+    $submittedRollsList = [];
+    if ($dgcTableExists && $hasDgcRoll) {
+        $submittedQuery = $conn->query("SELECT DISTINCT roll_no FROM daily_gsm_checks WHERE roll_no IS NOT NULL AND roll_no != '' LIMIT 10");
+        if ($submittedQuery) {
+            while ($s = $submittedQuery->fetch_assoc()) {
+                $submittedRollsList[] = "Roll " . $s['roll_no'];
+            }
+        }
+    }
+    error_log("Daily GSM Check - Submitted rolls: " . implode(", ", $submittedRollsList));
+    
     // Fetch from gsm_roll_entry
+    // Include GSM in the query for display purposes (but won't be saved)
+    // Exclude rolls that have already been submitted in daily_gsm_checks (except rejected ones)
+    // Cast roll_no to CHAR for proper comparison with VARCHAR roll_no in daily_gsm_checks
     $rollQuery = $conn->query("
-        SELECT g.reference, g.roll_no, g.line_number as line_no
+        SELECT g.reference, g.roll_no, g.line_number as line_no, g.gsm
         FROM gsm_roll_entry g
-        WHERE g.reference IS NOT NULL 
-        AND g.reference != ''
-        AND g.roll_no IS NOT NULL
-        AND NOT EXISTS (
-            SELECT 1 FROM daily_gsm_checks d 
-            WHERE d.roll_no = g.roll_no
-            {$dgcStatusFilter}
-        )
+        WHERE g.roll_no IS NOT NULL
+        AND g.roll_no != 0
+        {$exclusionClause}
         ORDER BY g.created_at DESC 
         LIMIT 100
     ");
-    if ($rollQuery) {
+    
+    if ($rollQuery === false) {
+        // Log query error for debugging
+        error_log("Daily GSM Check - Roll Query Error: " . $conn->error);
+    } else {
+        $rowCount = 0;
         while ($row = $rollQuery->fetch_assoc()) {
-            $rollNo = $row['roll_no'];
-            $reference = $row['reference'];
-            $lineNo = $row['line_no'];
+            $rowCount++;
+            $rollNo = (string)$row['roll_no']; // Convert to string for consistency
+            $reference = $row['reference'] ?? '';
+            $lineNo = $row['line_no'] ?? '';
+            $gsm = $row['gsm'] ?? '';
+            // Convert line_no to "Line X" format if it's numeric
+            if (!empty($lineNo) && is_numeric($lineNo)) {
+                $lineNo = "Line " . $lineNo;
+            }
+            // Display format: "Roll X - GSM: Y" if GSM exists, otherwise just "Roll X"
+            $displayText = !empty($gsm) ? "Roll $rollNo - GSM: $gsm" : "Roll $rollNo";
             $rollNumbers[] = [
                 'roll_no' => $rollNo,
                 'reference' => $reference,
                 'line_no' => $lineNo,
-                'display' => "Roll $rollNo"
+                'gsm' => $gsm,
+                'display' => $displayText
             ];
         }
+        
     }
 }
 
-// If no results from gsm_roll_entry, fallback to fiber_to_roll_entry
-if (empty($rollNumbers)) {
-    $rollQuery = $conn->query("
-        SELECT f.reference_number, f.roll_no, f.line_no 
-        FROM fiber_to_roll_entry f
-        WHERE f.reference_number IS NOT NULL 
-        {$dgcExistsClause}
-        ORDER BY f.created_at DESC 
-        LIMIT 100
-    ");
-    if ($rollQuery) {
-        while ($row = $rollQuery->fetch_assoc()) {
-            $rollNo = $row['roll_no'];
-            $reference = $row['reference_number'];
-            $lineNo = $row['line_no'];
-            $rollNumbers[] = [
-                'roll_no' => $rollNo,
-                'reference' => $reference,
-                'line_no' => $lineNo,
-                'display' => "Roll $rollNo"
-            ];
-        }
-    }
-}
+// Note: Only using gsm_roll_entry as the source (no fallback to fiber_to_roll_entry)
+// If gsm_roll_entry doesn't exist or has no data, $rollNumbers will remain empty
 
 // Fetch bag sizes with GSM and thickness from bag_size_master table
 $bagSizes = [];
@@ -183,7 +270,6 @@ if ($bagQuery) {
 }
 
 // Fetch rejected entries for this user to allow resubmission
-$rejectedEntries = [];
 $userId = $_SESSION['user_id'];
 $hasRejectionReason = $colExists($conn, 'daily_gsm_checks', 'rejection_reason');
 $rejCol = $hasRejectionReason ? "rejection_reason" : "NULL AS rejection_reason";
@@ -336,6 +422,7 @@ $conn->close();
     <div style="overflow-x:auto;">
       <table class="gsm-table table table-bordered text-center align-middle" id="gsmTable">
         <thead>
+          <tr>
           <tr>
             <th rowspan="2">Roll No.</th>
             <th rowspan="2">
@@ -502,15 +589,31 @@ function autoSelectLineFromRoll(rowId) {
     refField.value = reference || '';
   }
   
-  if (lineNo && !document.getElementById("line_number").value) {
-    // Auto-select the line number button
-    const lineText = `Line ${lineNo}`;
-    document.getElementById("line_number").value = lineText;
+  // Always auto-select the line number if available
+  if (lineNo) {
+    // Extract numeric part if lineNo is in "Line X" format, otherwise use as-is
+    let lineText = lineNo;
+    if (lineNo.startsWith('Line ')) {
+      lineText = lineNo; // Already in correct format
+    } else {
+      // Extract number from lineNo (could be "1", "2", "Line 1", etc.)
+      const match = lineNo.match(/\d+/);
+      if (match) {
+        lineText = `Line ${match[0]}`;
+      }
+    }
+    
+    // Set the hidden field value
+    const lineNumberField = document.getElementById("line_number");
+    if (lineNumberField) {
+      lineNumberField.value = lineText;
+    }
     
     // Highlight the corresponding button
     const lineButtons = document.querySelectorAll('.btn-group .btn');
     lineButtons.forEach(btn => {
       btn.classList.remove('selected');
+      // Match by button text (e.g., "Line 1" or "Line 2")
       if (btn.textContent.trim() === lineText) {
         btn.classList.add('selected');
       }
@@ -563,12 +666,17 @@ function addRow() {
   const row = document.createElement('tr');
   row.id = `row_${rowCount}`;
   
-  // Build roll number options from PHP data (display only roll number, not full reference)
+  // Build roll number options from PHP data (includes GSM in display)
   const rollOptions = <?php echo json_encode($rollNumbers); ?>;
+  
   let rollOptionsHTML = '<option value="">-- Select Roll --</option>';
-  rollOptions.forEach(roll => {
-    rollOptionsHTML += `<option value="${roll.roll_no}" data-line="${roll.line_no || ''}" data-reference="${roll.reference || ''}">Roll ${roll.roll_no}</option>`;
-  });
+  if (rollOptions && Array.isArray(rollOptions) && rollOptions.length > 0) {
+    rollOptions.forEach(roll => {
+      // Use the display text which includes GSM if available (e.g., "Roll 1 - GSM: 120")
+      const displayText = roll.display || `Roll ${roll.roll_no}`;
+      rollOptionsHTML += `<option value="${roll.roll_no}" data-line="${roll.line_no || ''}" data-reference="${roll.reference || ''}" data-gsm="${roll.gsm || ''}">${displayText}</option>`;
+    });
+  }
   
   row.innerHTML = `
     <td>

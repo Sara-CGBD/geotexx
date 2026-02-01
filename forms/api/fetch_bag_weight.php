@@ -1,18 +1,28 @@
-﻿<?php
+<?php
+session_start();
 header('Content-Type: application/json');
 
 require_once '../../config/security_config.php';
 
-$bagSize = $_GET['bag_size'] ?? '';
+if (!isset($_SESSION['user_id']) || !isset($_SESSION['username'])) {
+    echo json_encode(['weight' => null, 'error' => 'Unauthorized']);
+    exit;
+}
+
+$bagSize = trim($_GET['bag_size'] ?? '');
 $gsm = isset($_GET['gsm']) ? floatval($_GET['gsm']) : 0;
 $thickness = isset($_GET['thickness']) ? floatval($_GET['thickness']) : 0;
 
-if (!$bagSize) {
+if ($bagSize === '') {
     echo json_encode(['weight' => null]);
     exit;
 }
 
 $conn = SecurityConfig::getConnection();
+if (!$conn) {
+    echo json_encode(['weight' => null]);
+    exit;
+}
 
 // Try to find matching entry
 if ($gsm > 0 && $thickness > 0) {

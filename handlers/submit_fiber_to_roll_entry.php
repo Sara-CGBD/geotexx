@@ -35,6 +35,7 @@ $origin = substr(trim($_POST['origin']), 0, 100);
 $batchInfo = substr(trim($_POST['batch_info']), 0, 100);
 $totalWeight = (float)$_POST['total_weight'];
 $entryId = trim($_POST['entry_id']);
+$fiberEntryId = isset($_POST['fiber_entry_id']) && $_POST['fiber_entry_id'] !== '' ? (int)$_POST['fiber_entry_id'] : null;
 
 try {
     $conn = SecurityConfig::getConnection();
@@ -115,6 +116,12 @@ try {
         $conn->query("ALTER TABLE fiber_to_roll_entry ADD COLUMN material_percentage DECIMAL(5,2) AFTER manufacturer_name");
     }
     
+    // Add fiber_entry_id to track which fiber_entries entry was used
+    $checkFiberEntryId = $conn->query("SHOW COLUMNS FROM fiber_to_roll_entry LIKE 'fiber_entry_id'");
+    if ($checkFiberEntryId && $checkFiberEntryId->num_rows == 0) {
+        $conn->query("ALTER TABLE fiber_to_roll_entry ADD COLUMN fiber_entry_id INT NULL AFTER manufacturer_name");
+    }
+    
     // Modify bale_number to VARCHAR if it's INT
     $checkBaleNum = $conn->query("SHOW COLUMNS FROM fiber_to_roll_entry LIKE 'bale_number'");
     if ($checkBaleNum && $checkBaleNum->num_rows > 0) {
@@ -133,17 +140,69 @@ try {
         }
     }
 
-    $stmt = $conn->prepare("INSERT INTO fiber_to_roll_entry (entry_id, date_time, operator_id, project_id, bale_opener_number, bale_number, bale_weight, line_no, material_type, manufacturer_name, material_percentage, origin, batch_info, total_weight) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+    // If fiber_entry_id is not provided, find the appropriate fiber_entry to link
+    // Use FIFO: find the oldest fiber_entry with remaining amount matching manufacturer and material_type
+    if ($fiberEntryId === null && !empty($manufacturerName) && !empty($materialType)) {
+        // Check which amount column exists in fiber_entries
+        $colCheck = $conn->query("SHOW COLUMNS FROM fiber_entries LIKE 'total_amount'");
+        $hasTotalAmount = $colCheck && $colCheck->num_rows > 0;
+        $amountColumn = $hasTotalAmount ? 'total_amount' : 'amount_kg';
+        
+        // Check if manufacturer_name and material_type columns exist
+        $colCheck = $conn->query("SHOW COLUMNS FROM fiber_entries LIKE 'manufacturer_name'");
+        $hasManufacturer = $colCheck && $colCheck->num_rows > 0;
+        $colCheck = $conn->query("SHOW COLUMNS FROM fiber_entries LIKE 'material_type'");
+        $hasMaterialType = $colCheck && $colCheck->num_rows > 0;
+        $colCheck = $conn->query("SHOW COLUMNS FROM fiber_entries LIKE 'is_deleted'");
+        $hasIsDeleted = $colCheck && $colCheck->num_rows > 0;
+        
+        // Find fiber_entry with remaining amount (FIFO - oldest first)
+        $fiberEntryQuery = "SELECT fe.id, fe.$amountColumn as amount,
+                           COALESCE(SUM(ftr.total_weight), 0) as used_amount
+                           FROM fiber_entries fe
+                           LEFT JOIN fiber_to_roll_entry ftr ON ftr.fiber_entry_id = fe.id
+                           WHERE LOWER(TRIM(fe.manufacturer_name)) = LOWER(TRIM(?))";
+        
+        if ($hasMaterialType) {
+            $fiberEntryQuery .= " AND (fe.material_type IS NULL OR fe.material_type = '' OR LOWER(TRIM(fe.material_type)) = LOWER(TRIM(?)))";
+        }
+        
+        if ($hasIsDeleted) {
+            $fiberEntryQuery .= " AND (fe.is_deleted = 0 OR fe.is_deleted IS NULL)";
+        }
+        
+        $fiberEntryQuery .= " GROUP BY fe.id, fe.$amountColumn
+                            HAVING (fe.$amountColumn - COALESCE(SUM(ftr.total_weight), 0)) > 0
+                            ORDER BY fe.created_at ASC, fe.date_time ASC
+                            LIMIT 1";
+        
+        $fiberStmt = $conn->prepare($fiberEntryQuery);
+        if ($fiberStmt) {
+            if ($hasMaterialType) {
+                $fiberStmt->bind_param("ss", $manufacturerName, $materialType);
+            } else {
+                $fiberStmt->bind_param("s", $manufacturerName);
+            }
+            $fiberStmt->execute();
+            $fiberResult = $fiberStmt->get_result();
+            if ($fiberRow = $fiberResult->fetch_assoc()) {
+                $fiberEntryId = (int)$fiberRow['id'];
+            }
+            $fiberStmt->close();
+        }
+    }
+    
+    $stmt = $conn->prepare("INSERT INTO fiber_to_roll_entry (entry_id, date_time, operator_id, project_id, bale_opener_number, bale_number, bale_weight, line_no, material_type, manufacturer_name, fiber_entry_id, material_percentage, origin, batch_info, total_weight) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
     if (!$stmt) {
         throw new Exception('Prepare failed: ' . $conn->error);
     }
 
     // Insert single entry only (no multiple rolls in fiber_to_roll_entry)
     // bale_opener_number can be comma-separated values like "1,2,3"
-    // Type string: s=string, i=integer, d=double
-    // Parameters: entry_id(s), date_time(s), operator_id(i), project_id(i), bale_opener_number(s), bale_number(s), bale_weight(i), line_no(i), material_type(s), manufacturer_name(s), material_percentage(d), origin(s), batch_info(s), total_weight(d)
+    // Type string: s=string, i=integer, d=double, null
+    // Parameters: entry_id(s), date_time(s), operator_id(i), project_id(i), bale_opener_number(s), bale_number(s), bale_weight(i), line_no(i), material_type(s), manufacturer_name(s), fiber_entry_id(i/null), material_percentage(d), origin(s), batch_info(s), total_weight(d)
     $stmt->bind_param(
-        'ssiissiisssdsd',
+        'ssiissiissisdsd',
         $entryId,            // s - string
         $dateTime,           // s - string
         $operatorId,         // i - integer
@@ -154,6 +213,7 @@ try {
         $lineNo,             // i - integer
         $materialType,       // s - string
         $manufacturerName,   // s - string
+        $fiberEntryId,      // i - integer (or null)
         $materialPercentage, // d - double (DECIMAL)
         $origin,             // s - string
         $batchInfo,          // s - string
@@ -161,7 +221,12 @@ try {
     );
 
     if (!$stmt->execute()) {
-        throw new Exception('Execute failed: ' . $stmt->error);
+        $errorMsg = $stmt->error;
+        // Check if it's a duplicate entry_id error
+        if (strpos($errorMsg, 'Duplicate entry') !== false || strpos($errorMsg, 'UNIQUE constraint') !== false) {
+            throw new Exception('Entry ID already exists: ' . $entryId . '. Please refresh the page to get a new Entry ID.');
+        }
+        throw new Exception('Execute failed: ' . $errorMsg);
     }
     
     $stmt->close();

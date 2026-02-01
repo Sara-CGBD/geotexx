@@ -257,7 +257,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_entry'])) {
     <!-- Amount (Kg) -->
     <div class="form-group">
       <label>Amount (Kg):</label>
-      <input type="number" name="amountKg" id="amountKg" step="0.01" min="0.01" placeholder="Enter amount in kg" required>
+      <input type="number" name="amountKg" id="amountKg" step="1" min="1" placeholder="Enter amount in kg (whole numbers)" required>
     </div>
     
     <!-- Summary Section -->
@@ -360,7 +360,7 @@ function updateSummary() {
         summary += '<strong>Shift:</strong> ' + (shift || 'N/A') + '<br>';
         summary += '<strong>Manufacturer:</strong> ' + manufacturer + '<br>';
         summary += '<strong>Material Type:</strong> ' + materialType + '<br>';
-        summary += '<strong>Amount:</strong> ' + parseFloat(amount).toFixed(2) + ' kg';
+        summary += '<strong>Amount:</strong> ' + parseFloat(amount).toFixed(0) + ' kg';
         
         summaryContent.innerHTML = summary;
     } else {

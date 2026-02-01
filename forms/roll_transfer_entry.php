@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 session_start();
 require_once 'security_config.php';
 
@@ -58,63 +58,133 @@ if ($checkParentRef && $checkParentRef->num_rows > 0) {
 // Build the LEFT JOIN condition based on whether is_deleted column exists
 $deletedCondition = $hasIsDeleted ? "AND (rt.is_deleted = 0 OR rt.is_deleted IS NULL)" : "";
 
-$hasRollDest = $conn->query("SHOW COLUMNS FROM qc_test_orders LIKE 'roll_destination'");
-// Include only references that have been explicitly routed by AGM to FG or Bag Production
-// Only show references with roll_destination set (routed by AGM via route_roll.php handler)
-// When FG is selected, only references with roll_destination = 'fg_production' will be shown (AGM-routed for FG)
-// When Sewing/Bag is selected, only references with roll_destination = 'bag_production' will be shown (AGM-routed for Bag)
-$rollDestFilter = ($hasRollDest && $hasRollDest->num_rows > 0) 
-    ? "AND qto.roll_destination IN ('fg_production', 'bag_production')" 
-    : "";
+// Check if routed table exists
+$routedTableExists = $conn->query("SHOW TABLES LIKE 'routed'")->num_rows > 0;
 
 // Fetch references with their available amounts
 // This query calculates remaining quantity by subtracting all transferred amounts from total weight
 // IMPORTANT: We need to ensure ALL transfers are counted, even if reference was partially transferred
 $subqueryDeletedCondition = $hasIsDeleted ? "AND (rt2.is_deleted = 0 OR rt2.is_deleted IS NULL)" : "";
 // Build the WHERE condition for matching reference_number or parent_reference (if column exists)
+// Also check for bundle references - if a reference is part of a bundle, check transfers for all bundle members
 $referenceMatchCondition = $hasParentReference 
-    ? "(rt2.reference_number = re.reference_number OR rt2.parent_reference = re.reference_number)"
-    : "rt2.reference_number = re.reference_number";
+    ? "(rt2.reference_number COLLATE utf8mb4_unicode_ci = re.reference_number COLLATE utf8mb4_unicode_ci 
+        OR rt2.parent_reference COLLATE utf8mb4_unicode_ci = re.reference_number COLLATE utf8mb4_unicode_ci
+        OR rt2.reference_number COLLATE utf8mb4_unicode_ci LIKE CONCAT(re.reference_number COLLATE utf8mb4_unicode_ci, '-%')
+        OR re.reference_number COLLATE utf8mb4_unicode_ci LIKE CONCAT(rt2.reference_number COLLATE utf8mb4_unicode_ci, '-%'))"
+    : "(rt2.reference_number COLLATE utf8mb4_unicode_ci = re.reference_number COLLATE utf8mb4_unicode_ci
+        OR rt2.reference_number COLLATE utf8mb4_unicode_ci LIKE CONCAT(re.reference_number COLLATE utf8mb4_unicode_ci, '-%')
+        OR re.reference_number COLLATE utf8mb4_unicode_ci LIKE CONCAT(rt2.reference_number COLLATE utf8mb4_unicode_ci, '-%'))";
 
 // Query to fetch references that have been routed by AGM
-// Note: We use INNER JOIN to ensure reference exists in both roll_entry and qc_test_orders
-// IMPORTANT: This query fetches references that have been explicitly routed by AGM (roll_destination is set)
-// Query to fetch references that have been routed by AGM
-// Handle cases where multiple test orders exist for same reference - use the one with roll_destination set
-$res = $conn->query("
-    SELECT 
-        re.reference_number,
-        re.total_weight,
-        COALESCE((
-            SELECT SUM(rt2.amount_kg) 
-            FROM roll_transfer rt2 
-            WHERE {$referenceMatchCondition}
-            {$subqueryDeletedCondition}
-        ), 0) as transferred_amount,
-        (re.total_weight - COALESCE((
-            SELECT SUM(rt2.amount_kg) 
-            FROM roll_transfer rt2 
-            WHERE {$referenceMatchCondition}
-            {$subqueryDeletedCondition}
-        ), 0)) as available_amount,
-        MAX(qto.roll_destination) as roll_destination,
-        COALESCE(MAX(qto.admin_remarks), '') as admin_remarks
-    FROM roll_entry re
-    INNER JOIN qc_test_orders qto ON (
-        qto.sample_reference_id = re.reference_number 
-        OR qto.sample_reference_id LIKE CONCAT(re.reference_number, '-%')
-        OR re.reference_number LIKE CONCAT(qto.sample_reference_id, '-%')
-    )
-    WHERE re.reference_number IS NOT NULL 
-    AND re.reference_number != ''
-    AND re.reference_number != '0'
-    AND qto.status = 'approved'
-    {$rollDestFilter}
-    GROUP BY re.reference_number, re.total_weight
-    HAVING available_amount > 0.001
-    AND (MAX(qto.roll_destination) = 'fg_production' OR MAX(qto.roll_destination) = 'bag_production')
-    ORDER BY re.reference_number ASC
-");
+// IMPORTANT: This query now uses the routed table as the source of truth for routing information
+// References must exist in both roll_entry and routed tables
+// When FG is selected, only references with routed.roll_destination = 'fg_production' will be shown
+// When Sewing/Bag is selected, only references with routed.roll_destination = 'bag_production' will be shown
+if ($routedTableExists) {
+    // Use explicit collation to avoid collation mismatch errors
+    $collation = 'utf8mb4_unicode_ci';
+    $res = $conn->query("
+        SELECT 
+            re.reference_number,
+            re.total_weight,
+            COALESCE((
+                SELECT SUM(rt2.amount_kg) 
+                FROM roll_transfer rt2 
+                WHERE (
+                    -- Match exact reference
+                    rt2.reference_number COLLATE {$collation} = re.reference_number COLLATE {$collation}
+                    -- Match if transfer contains this reference (for bundle transfers stored with one ref)
+                    OR rt2.reference_number COLLATE {$collation} LIKE CONCAT('%', re.reference_number COLLATE {$collation}, '%')
+                    -- Match if this reference contains the transfer reference (for partial matches)
+                    OR re.reference_number COLLATE {$collation} LIKE CONCAT('%', rt2.reference_number COLLATE {$collation}, '%')
+                    -- Match if transfer reference is prefix of roll_entry reference (for bundles)
+                    OR re.reference_number COLLATE {$collation} LIKE CONCAT(rt2.reference_number COLLATE {$collation}, '-%')
+                    -- Match if roll_entry reference is prefix of transfer reference (for bundles)
+                    OR rt2.reference_number COLLATE {$collation} LIKE CONCAT(re.reference_number COLLATE {$collation}, '-%')
+                    -- Match parent_reference if exists
+                    " . ($hasParentReference ? "OR rt2.parent_reference COLLATE {$collation} = re.reference_number COLLATE {$collation} OR rt2.parent_reference COLLATE {$collation} LIKE CONCAT('%', re.reference_number COLLATE {$collation}, '%')" : "") . "
+                )
+                {$subqueryDeletedCondition}
+            ), 0) as transferred_amount,
+            (re.total_weight - COALESCE((
+                SELECT SUM(rt2.amount_kg) 
+                FROM roll_transfer rt2 
+                WHERE (
+                    -- Match exact reference
+                    rt2.reference_number COLLATE {$collation} = re.reference_number COLLATE {$collation}
+                    -- Match if transfer contains this reference (for bundle transfers stored with one ref)
+                    OR rt2.reference_number COLLATE {$collation} LIKE CONCAT('%', re.reference_number COLLATE {$collation}, '%')
+                    -- Match if this reference contains the transfer reference (for partial matches)
+                    OR re.reference_number COLLATE {$collation} LIKE CONCAT('%', rt2.reference_number COLLATE {$collation}, '%')
+                    -- Match if transfer reference is prefix of roll_entry reference (for bundles)
+                    OR re.reference_number COLLATE {$collation} LIKE CONCAT(rt2.reference_number COLLATE {$collation}, '-%')
+                    -- Match if roll_entry reference is prefix of transfer reference (for bundles)
+                    OR rt2.reference_number COLLATE {$collation} LIKE CONCAT(re.reference_number COLLATE {$collation}, '-%')
+                    -- Match parent_reference if exists
+                    " . ($hasParentReference ? "OR rt2.parent_reference COLLATE {$collation} = re.reference_number COLLATE {$collation} OR rt2.parent_reference COLLATE {$collation} LIKE CONCAT('%', re.reference_number COLLATE {$collation}, '%')" : "") . "
+                )
+                {$subqueryDeletedCondition}
+            ), 0)) as available_amount,
+            MAX(r.roll_destination) as roll_destination,
+            COALESCE(MAX(r.bundle_reference), '') as bundle_reference
+        FROM roll_entry re
+        INNER JOIN routed r ON (
+            r.reference_number COLLATE {$collation} = re.reference_number COLLATE {$collation}
+            OR r.reference_number COLLATE {$collation} LIKE CONCAT(re.reference_number COLLATE {$collation}, '-%')
+            OR re.reference_number COLLATE {$collation} LIKE CONCAT(r.reference_number COLLATE {$collation}, '-%')
+        )
+        WHERE re.reference_number IS NOT NULL 
+        AND re.reference_number != ''
+        AND re.reference_number != '0'
+        AND r.roll_destination IN ('fg_production', 'bag_production')
+        GROUP BY re.reference_number, re.total_weight
+        HAVING available_amount > 0
+        AND (MAX(r.roll_destination) = 'fg_production' OR MAX(r.roll_destination) = 'bag_production')
+        ORDER BY re.reference_number ASC
+    ");
+} else {
+    // Fallback to old method if routed table doesn't exist
+    $hasRollDest = $conn->query("SHOW COLUMNS FROM qc_test_orders LIKE 'roll_destination'");
+    $rollDestFilter = ($hasRollDest && $hasRollDest->num_rows > 0) 
+        ? "AND qto.roll_destination IN ('fg_production', 'bag_production')" 
+        : "";
+    
+    $res = $conn->query("
+        SELECT 
+            re.reference_number,
+            re.total_weight,
+            COALESCE((
+                SELECT SUM(rt2.amount_kg) 
+                FROM roll_transfer rt2 
+                WHERE {$referenceMatchCondition}
+                {$subqueryDeletedCondition}
+            ), 0) as transferred_amount,
+            (re.total_weight - COALESCE((
+                SELECT SUM(rt2.amount_kg) 
+                FROM roll_transfer rt2 
+                WHERE {$referenceMatchCondition}
+                {$subqueryDeletedCondition}
+            ), 0)) as available_amount,
+            MAX(qto.roll_destination) as roll_destination,
+            '' as bundle_reference
+        FROM roll_entry re
+        INNER JOIN qc_test_orders qto ON (
+            qto.sample_reference_id = re.reference_number 
+            OR qto.sample_reference_id LIKE CONCAT(re.reference_number, '-%')
+            OR re.reference_number LIKE CONCAT(qto.sample_reference_id, '-%')
+        )
+        WHERE re.reference_number IS NOT NULL 
+        AND re.reference_number != ''
+        AND re.reference_number != '0'
+        AND qto.status = 'approved'
+        {$rollDestFilter}
+        GROUP BY re.reference_number, re.total_weight
+        HAVING available_amount > 0.01
+        AND (MAX(qto.roll_destination) = 'fg_production' OR MAX(qto.roll_destination) = 'bag_production')
+        ORDER BY re.reference_number ASC
+    ");
+}
 
 // Check if query returned results
 $queryResultCount = 0;
@@ -128,26 +198,24 @@ if ($res) {
 
 // Diagnostic queries to help debug missing references
 // Always check for bag_production references to help debug
-if ($hasRollDest && $hasRollDest->num_rows > 0) {
-    // Direct check for bag_production references
+if ($routedTableExists) {
+    // Direct check for bag_production references from routed table
     $bagCheckDeletedCondition = $hasIsDeleted ? "AND (rt2.is_deleted = 0 OR rt2.is_deleted IS NULL)" : "";
     $bagCheck = $conn->query("
         SELECT 
-            qto.sample_reference_id,
-            qto.status,
-            qto.roll_destination,
+            r.reference_number,
+            r.roll_destination,
             CASE WHEN re.reference_number IS NOT NULL THEN 'YES' ELSE 'NO' END as in_roll_entry,
             re.total_weight,
-            COALESCE((SELECT SUM(rt2.amount_kg) FROM roll_transfer rt2 WHERE rt2.reference_number = qto.sample_reference_id {$bagCheckDeletedCondition}), 0) as transferred
-        FROM qc_test_orders qto
+            COALESCE((SELECT SUM(rt2.amount_kg) FROM roll_transfer rt2 WHERE rt2.reference_number COLLATE utf8mb4_unicode_ci = r.reference_number COLLATE utf8mb4_unicode_ci {$bagCheckDeletedCondition}), 0) as transferred
+        FROM routed r
         LEFT JOIN roll_entry re ON (
-            qto.sample_reference_id = re.reference_number 
-            OR qto.sample_reference_id LIKE CONCAT(re.reference_number, '-%')
-            OR re.reference_number LIKE CONCAT(qto.sample_reference_id, '-%')
+            r.reference_number COLLATE utf8mb4_unicode_ci = re.reference_number COLLATE utf8mb4_unicode_ci
+            OR r.reference_number COLLATE utf8mb4_unicode_ci LIKE CONCAT(re.reference_number COLLATE utf8mb4_unicode_ci, '-%')
+            OR re.reference_number COLLATE utf8mb4_unicode_ci LIKE CONCAT(r.reference_number COLLATE utf8mb4_unicode_ci, '-%')
         )
-        WHERE qto.roll_destination = 'bag_production'
-        AND qto.status = 'approved'
-        ORDER BY qto.sample_reference_id DESC
+        WHERE r.roll_destination = 'bag_production'
+        ORDER BY r.reference_number DESC
         LIMIT 20
     ");
     if ($bagCheck) {
@@ -155,7 +223,33 @@ if ($hasRollDest && $hasRollDest->num_rows > 0) {
         while ($row = $bagCheck->fetch_assoc()) {
             $bagRefs[] = $row;
         }
-        error_log("Roll Transfer Entry: Found " . count($bagRefs) . " bag_production references. Sample: " . json_encode(array_slice($bagRefs, 0, 3)));
+        error_log("Roll Transfer Entry: Found " . count($bagRefs) . " bag_production references from routed table. Sample: " . json_encode(array_slice($bagRefs, 0, 3)));
+    }
+    
+    // Also check FG references
+    $fgCheck = $conn->query("
+        SELECT 
+            r.reference_number,
+            r.roll_destination,
+            CASE WHEN re.reference_number IS NOT NULL THEN 'YES' ELSE 'NO' END as in_roll_entry,
+            re.total_weight,
+            COALESCE((SELECT SUM(rt2.amount_kg) FROM roll_transfer rt2 WHERE rt2.reference_number COLLATE {$collation} = r.reference_number COLLATE {$collation} {$bagCheckDeletedCondition}), 0) as transferred
+        FROM routed r
+        LEFT JOIN roll_entry re ON (
+            r.reference_number COLLATE {$collation} = re.reference_number COLLATE {$collation}
+            OR r.reference_number COLLATE {$collation} LIKE CONCAT(re.reference_number COLLATE {$collation}, '-%')
+            OR re.reference_number COLLATE {$collation} LIKE CONCAT(r.reference_number COLLATE {$collation}, '-%')
+        )
+        WHERE r.roll_destination = 'fg_production'
+        ORDER BY r.reference_number DESC
+        LIMIT 20
+    ");
+    if ($fgCheck) {
+        $fgRefs = [];
+        while ($row = $fgCheck->fetch_assoc()) {
+            $fgRefs[] = $row;
+        }
+        error_log("Roll Transfer Entry: Found " . count($fgRefs) . " fg_production references from routed table. Sample: " . json_encode(array_slice($fgRefs, 0, 3)));
     }
     
     // Check specific reference if provided in query string for debugging
@@ -188,14 +282,13 @@ if ($hasRollDest && $hasRollDest->num_rows > 0) {
     }
     
     // General diagnostic
-    if ($queryResultCount == 0) {
+    if ($queryResultCount == 0 && $routedTableExists) {
         $diagRes = $conn->query("
             SELECT COUNT(*) as total_routed, 
                    SUM(CASE WHEN roll_destination = 'fg_production' THEN 1 ELSE 0 END) as fg_count,
                    SUM(CASE WHEN roll_destination = 'bag_production' THEN 1 ELSE 0 END) as bag_count
-            FROM qc_test_orders 
-            WHERE status = 'approved' 
-            AND roll_destination IN ('fg_production', 'bag_production')
+            FROM routed 
+            WHERE roll_destination IN ('fg_production', 'bag_production')
         ");
         if ($diagRes) {
             $diag = $diagRes->fetch_assoc();
@@ -205,11 +298,14 @@ if ($hasRollDest && $hasRollDest->num_rows > 0) {
         
         // Also check if references exist in roll_entry
         $rollEntryCheck = $conn->query("
-            SELECT COUNT(DISTINCT qto.sample_reference_id) as matching_refs
-            FROM qc_test_orders qto
-            INNER JOIN roll_entry re ON qto.sample_reference_id = re.reference_number
-            WHERE qto.status = 'approved' 
-            AND qto.roll_destination IN ('fg_production', 'bag_production')
+            SELECT COUNT(DISTINCT r.reference_number) as matching_refs
+            FROM routed r
+            INNER JOIN roll_entry re ON (
+                r.reference_number COLLATE utf8mb4_unicode_ci = re.reference_number COLLATE utf8mb4_unicode_ci
+                OR r.reference_number COLLATE utf8mb4_unicode_ci LIKE CONCAT(re.reference_number COLLATE utf8mb4_unicode_ci, '-%')
+                OR re.reference_number COLLATE utf8mb4_unicode_ci LIKE CONCAT(r.reference_number COLLATE utf8mb4_unicode_ci, '-%')
+            )
+            WHERE r.roll_destination IN ('fg_production', 'bag_production')
         ");
         if ($rollEntryCheck) {
             $check = $rollEntryCheck->fetch_assoc();
@@ -227,10 +323,19 @@ if ($res) {
             $r['available_amount'] = (float)$r['available_amount'];
             
             // Recalculate available amount to ensure accuracy
+            // Only include references that have remaining quantity (not fully delivered)
             $calculated_available = $r['total_weight'] - $r['transferred_amount'];
-            if ($calculated_available > 0) {
+            
+            // Debug logging for individual references
+            if ($r['transferred_amount'] > 0) {
+                error_log("Individual ref check: " . $r['reference_number'] . " - transferred=" . $r['transferred_amount'] . " kg, total=" . $r['total_weight'] . " kg, available=" . $calculated_available . " kg");
+            }
+            
+            if ($calculated_available > 0.01) { // Use 0.01 threshold to account for floating point precision
                 $r['available_amount'] = $calculated_available;
                 $allReferences[] = $r;
+            } else {
+                error_log("EXCLUDING individual ref " . $r['reference_number'] . " - Fully delivered (transferred=" . $r['transferred_amount'] . " >= total=" . $r['total_weight'] . ")");
             }
         }
     }
@@ -239,6 +344,24 @@ if ($res) {
 // Debug: Log how many references were found after filtering
 error_log("Roll Transfer Entry: Found " . count($allReferences) . " references with available amount > 0");
 error_log("Roll Transfer Entry: Query returned " . $queryResultCount . " rows from database");
+
+// DEBUG: Check what transfers exist for debugging
+if ($routedTableExists) {
+    $debugTransferCheck = $conn->query("
+        SELECT reference_number, amount_kg, date_time, to_location
+        FROM roll_transfer
+        WHERE amount_kg >= 400
+        ORDER BY date_time DESC
+        LIMIT 10
+    ");
+    if ($debugTransferCheck) {
+        $debugTransfers = [];
+        while ($row = $debugTransferCheck->fetch_assoc()) {
+            $debugTransfers[] = $row;
+        }
+        error_log("Recent large transfers (>400kg): " . json_encode($debugTransfers));
+    }
+}
 
 // Group references into bundles (sequential references with same base pattern)
 // Pattern: references like "4.0L226JAN05-R01-H0.1-1", "4.0L226JAN05-R01-H0.1-2", etc.
@@ -279,12 +402,147 @@ foreach ($allReferences as $ref) {
             });
             
             // Create bundle entry
-            // IMPORTANT: For bundles, the total_weight stored in roll_entry is the TOTAL weight for the entire bundle,
-            // not per individual roll. So we use the weight from the first roll (they're all the same) as the bundle total.
+            // Get the base reference to check for bundle transfers
+            $baseRef = preg_replace('/-\d+$/', '', $bundleRefs[0]['reference_number']);
+            
+            // SIMPLE LOGIC FOR BUNDLES: If ANY transfer entry exists for ANY individual roll in the bundle,
+            // exclude the entire bundle from the dropdown
+            // Bundle format: "3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-1 to ...-4"
+            // We need to check if ANY roll (-1, -2, -3, -4) has been transferred
+            $bundleRefNumbers = array_column($bundleRefs, 'reference_number');
+            $hasAnyTransfer = false;
+            
+            // Extract base reference (everything before the trailing number)
+            // e.g., "3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-1" -> "3.1L126JAN28- R04- GT0.9H0.1- H.10% J.10% T.3%-"
+            $firstRef = $bundleRefNumbers[0] ?? '';
+            $basePattern = preg_replace('/-(\d+)$/', '-', $firstRef); // Remove trailing number, keep the dash
+            
+            // Extract roll numbers from bundle (e.g., 1, 2, 3, 4)
+            $rollNumbers = [];
+            foreach ($bundleRefNumbers as $ref) {
+                if (preg_match('/-(\d+)$/', $ref, $matches)) {
+                    $rollNumbers[] = $matches[1];
+                }
+            }
+            
+            // Build comprehensive query to check for ANY transfer matching:
+            // 1. Exact match of any bundle reference
+            // 2. Contains any bundle reference (partial match)
+            // 3. Contains base pattern + any roll number (e.g., "base-1", "base-2", etc.)
+            // 4. Bundle range format ("ref-1 to ref-4")
+            
+            $refPlaceholders = str_repeat('?,', count($bundleRefNumbers) - 1) . '?';
+            
+            // Build LIKE conditions for each bundle reference
+            $refLikeConditions = [];
+            foreach ($bundleRefNumbers as $ref) {
+                $refLikeConditions[] = "reference_number COLLATE {$collation} LIKE CONCAT('%', ?, '%')";
+            }
+            
+            // Build LIKE conditions for each roll number
+            $rollLikeConditions = [];
+            $rollLikeParams = [];
+            foreach ($rollNumbers as $rollNum) {
+                $rollLikeConditions[] = "reference_number COLLATE {$collation} LIKE ?";
+                $rollLikeParams[] = '%' . $basePattern . $rollNum . '%';
+            }
+            
+            // Combine all LIKE conditions
+            $allLikeConditions = array_merge($refLikeConditions, $rollLikeConditions);
+            $likeConditionsStr = !empty($allLikeConditions) ? 'OR ' . implode(' OR ', $allLikeConditions) : '';
+            
+            $checkStmt = $conn->prepare("
+                SELECT COUNT(*) as transfer_exists, reference_number
+                FROM roll_transfer
+                WHERE (
+                    -- Exact match for any bundle reference
+                    reference_number COLLATE {$collation} IN ($refPlaceholders)
+                    -- Contains any bundle reference (bidirectional) and roll number patterns
+                    $likeConditionsStr
+                    -- Contains base pattern (space-insensitive)
+                    OR REPLACE(reference_number COLLATE {$collation}, ' ', '') LIKE CONCAT('%', REPLACE(?, ' ', ''), '%')
+                )
+                " . ($hasIsDeleted ? "AND (is_deleted = 0 OR is_deleted IS NULL)" : "") . "
+                LIMIT 1
+            ");
+            
+            if ($checkStmt) {
+                // Build bind parameters: exact refs + LIKE patterns for each ref + LIKE patterns for roll numbers + base pattern
+                $bindParams = array_merge(
+                    $bundleRefNumbers,                    // Exact matches
+                    $bundleRefNumbers,                    // LIKE '%ref%' for each ref
+                    $rollLikeParams,                      // LIKE '%base-rollNum%' for each roll
+                    [$basePattern]                        // Base pattern for space-insensitive match
+                );
+                $bindTypes = str_repeat('s', count($bindParams));
+                
+                $checkStmt->bind_param($bindTypes, ...$bindParams);
+                $checkStmt->execute();
+                $checkResult = $checkStmt->get_result();
+                if ($checkRow = $checkResult->fetch_assoc()) {
+                    if ((int)($checkRow['transfer_exists'] ?? 0) > 0) {
+                        $hasAnyTransfer = true;
+                        $foundRef = $checkRow['reference_number'] ?? 'unknown';
+                        error_log("EXCLUDING bundle $baseRef - Transfer found! Matching reference: " . substr($foundRef, 0, 100));
+                    }
+                }
+                $checkStmt->close();
+            }
+            
+            // Also check for bundle range format (e.g., "ref-1 to ref-4")
+            if (!$hasAnyTransfer) {
+                $lastRef = $bundleRefs[count($bundleRefs) - 1]['reference_number'];
+                $bundleRangePattern = $firstRef . ' to ' . $lastRef;
+                
+                // Try normalized versions (with normalized spaces)
+                $normalizedFirst = preg_replace('/\s+/', ' ', trim($firstRef));
+                $normalizedLast = preg_replace('/\s+/', ' ', trim($lastRef));
+                $normalizedRange = $normalizedFirst . ' to ' . $normalizedLast;
+                
+                $rangeCheckStmt = $conn->prepare("
+                    SELECT COUNT(*) as transfer_exists, reference_number
+                    FROM roll_transfer
+                    WHERE (
+                        reference_number COLLATE {$collation} LIKE ?
+                        OR reference_number COLLATE {$collation} LIKE ?
+                        OR REPLACE(reference_number COLLATE {$collation}, ' ', '') LIKE CONCAT('%', REPLACE(?, ' ', ''), '%')
+                    )
+                    " . ($hasIsDeleted ? "AND (is_deleted = 0 OR is_deleted IS NULL)" : "") . "
+                    LIMIT 1
+                ");
+                if ($rangeCheckStmt) {
+                    $rangePattern1 = '%' . $bundleRangePattern . '%';
+                    $rangePattern2 = '%' . $normalizedRange . '%';
+                    $rangeCheckStmt->bind_param("sss", $rangePattern1, $rangePattern2, $normalizedRange);
+                    $rangeCheckStmt->execute();
+                    $rangeResult = $rangeCheckStmt->get_result();
+                    if ($rangeRow = $rangeResult->fetch_assoc()) {
+                        if ((int)($rangeRow['transfer_exists'] ?? 0) > 0) {
+                            $hasAnyTransfer = true;
+                            $foundRef = $rangeRow['reference_number'] ?? 'unknown';
+                            error_log("EXCLUDING bundle $baseRef - Transfer found for bundle range! Matching: " . substr($foundRef, 0, 100));
+                        }
+                    }
+                    $rangeCheckStmt->close();
+                }
+            }
+            
+            // Debug: If still not found, log what we're looking for
+            if (!$hasAnyTransfer) {
+                $debugFirstRef = $bundleRefNumbers[0] ?? 'N/A';
+                error_log("Bundle $baseRef NOT excluded - No transfers found. Checked rolls: " . implode(', ', $rollNumbers) . " | Base: " . substr($basePattern, 0, 50));
+            }
+            
+            // If ANY transfer exists, exclude the entire bundle
+            if ($hasAnyTransfer) {
+                error_log("EXCLUDING bundle $baseRef - Transfer entry exists for this bundle");
+                continue;
+            }
+            
+            // No transfers found, include the bundle
             $totalWeight = $bundleRefs[0]['total_weight'] ?? 0;
-            // Sum up all transferred amounts from all rolls in the bundle
-            $totalTransferred = array_sum(array_column($bundleRefs, 'transferred_amount'));
-            $totalAvailable = $totalWeight - $totalTransferred;
+            $totalTransferred = 0;
+            $totalAvailable = $totalWeight;
             
             // Use the first reference's destination (they should all be the same)
             $bundleDestination = $bundleRefs[0]['roll_destination'] ?? '';
@@ -308,11 +566,23 @@ foreach ($allReferences as $ref) {
             ];
         } else {
             // Single reference, not part of a bundle
-            $individualRefs[] = $ref;
+            // Double-check it's not fully delivered before adding
+            $refAvailable = $ref['total_weight'] - $ref['transferred_amount'];
+            if ($refAvailable > 0.01) {
+                $individualRefs[] = $ref;
+            } else {
+                error_log("EXCLUDING single ref " . $ref['reference_number'] . " - Fully delivered (transferred=" . $ref['transferred_amount'] . " >= total=" . $ref['total_weight'] . ")");
+            }
         }
     } else {
         // Reference doesn't match bundle pattern
-        $individualRefs[] = $ref;
+        // Double-check it's not fully delivered before adding
+        $refAvailable = $ref['total_weight'] - $ref['transferred_amount'];
+        if ($refAvailable > 0.01) {
+            $individualRefs[] = $ref;
+        } else {
+            error_log("EXCLUDING non-bundle ref " . $ref['reference_number'] . " - Fully delivered (transferred=" . $ref['transferred_amount'] . " >= total=" . $ref['total_weight'] . ")");
+        }
     }
 }
 
@@ -332,16 +602,34 @@ if ($chk && $chk->num_rows > 0) {
     $cols = [];
     $dbRow = $conn->query("SELECT DATABASE() AS d")->fetch_assoc();
     $dbName = $dbRow ? $dbRow['d'] : 'geobagg';
-    $colRes = $conn->query("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='" . $conn->real_escape_string($dbName) . "' AND TABLE_NAME='drivers'");
-    if ($colRes) { while ($cr = $colRes->fetch_assoc()) { $cols[] = $cr['COLUMN_NAME']; } }
+    
+    // Use prepared statement for INFORMATION_SCHEMA query
+    $colResStmt = $conn->prepare("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'drivers'");
+    if ($colResStmt) {
+        $colResStmt->bind_param("s", $dbName);
+        $colResStmt->execute();
+        $colRes = $colResStmt->get_result();
+        if ($colRes) { 
+            while ($cr = $colRes->fetch_assoc()) { 
+                $cols[] = $cr['COLUMN_NAME']; 
+            } 
+        }
+        $colResStmt->close();
+    }
+    
     if (!in_array('driver_name', $cols)) {
         foreach (['name','full_name','driver','driver_full_name'] as $cand) {
             if (in_array($cand, $cols)) { $nameCol = $cand; break; }
         }
     }
-    $dres = $conn->query("SELECT id, `" . $conn->real_escape_string($nameCol) . "` AS driver_name FROM drivers ORDER BY `" . $conn->real_escape_string($nameCol) . "` ASC");
-    if ($dres) {
-        while ($d = $dres->fetch_assoc()) $drivers[] = $d;
+    
+    // Validate column name before using in query (column names can't be parameterized)
+    if (isset($nameCol) && preg_match('/^[A-Za-z0-9_]+$/', $nameCol)) {
+        // Column name is validated, safe to use directly
+        $dres = $conn->query("SELECT id, `{$nameCol}` AS driver_name FROM drivers ORDER BY `{$nameCol}` ASC");
+        if ($dres) {
+            while ($d = $dres->fetch_assoc()) $drivers[] = $d;
+        }
     }
 }
 
@@ -622,9 +910,12 @@ $operator_name = $_SESSION['username'];
   <?php endif; ?>
 
   <?php if (isset($_GET['error'])): ?>
-    <div class="alert alert-danger" style="background: #f8d7da; color: #721c24; padding: 10px; border: 1px solid #f5c6cb; border-radius: 4px; margin: 10px 0;">
-      <?php echo htmlspecialchars($_GET['error']); ?>
-    </div>
+    <script>
+      // Show toast notification for errors from URL parameters (no need for alert box)
+      document.addEventListener('DOMContentLoaded', function() {
+        showToast('<?php echo addslashes(htmlspecialchars($_GET['error'])); ?>', 'error');
+      });
+    </script>
   <?php endif; ?>
 
   <div id="dateTimeDisplay" class="summary-info"></div>

@@ -50,9 +50,13 @@ if (!empty($shiftFilter)) {
 }
 
 if (!empty($categoryFilter)) {
-    $whereConditions[] = "s.scrap_category = ?";
-    $params[] = $categoryFilter;
-    $types .= 's';
+    if ($categoryFilter === 'Sewing Scrap') {
+        $whereConditions[] = "s.scrap_category IN ('Sewing Scrap', 'Swing Scrap')";
+    } else {
+        $whereConditions[] = "s.scrap_category = ?";
+        $params[] = $categoryFilter;
+        $types .= 's';
+    }
 }
 
 $whereClause = implode(' AND ', $whereConditions);
@@ -291,7 +295,7 @@ $conn->close();
                     <select name="category">
                         <option value="">All Categories</option>
                         <option value="Sheet Production Scrap" <?php echo $categoryFilter == 'Sheet Production Scrap' ? 'selected' : ''; ?>>Sheet Production Scrap</option>
-                        <option value="Swing Scrap" <?php echo $categoryFilter == 'Swing Scrap' ? 'selected' : ''; ?>>Swing Scrap</option>
+                        <option value="Sewing Scrap" <?php echo $categoryFilter == 'Sewing Scrap' ? 'selected' : ''; ?>>Sewing Scrap</option>
                     </select>
                 </div>
                 <div class="filter-group">

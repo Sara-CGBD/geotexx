@@ -199,6 +199,7 @@ $menuItems = [
             ]],
             ['type' => 'group', 'text' => 'Finished Goods(FG)', 'icon' => 'fas fa-box', 'children' => [
                 ['text' => 'FG Entry', 'link' => 'forms/fg_entry.php', 'icon' => 'fas fa-plus-square'],
+                ['text' => 'FG Entry (Roll) Report', 'link' => 'reports/fg_entry_roll_report.php', 'icon' => 'fas fa-scroll'],
             ]],
         ],
 
@@ -370,6 +371,10 @@ $menuItems = [
         // ========== PROD_USER - Limited Access (No Dashboard) ==========
         'prod_user' => [
             ['type' => 'link', 'text' => 'Welcome', 'link' => 'welcome.php', 'icon' => 'fas fa-home'],
+            ['type' => 'group', 'text' => 'Finished Goods (FG)', 'icon' => 'fas fa-box', 'children' => [
+                ['text' => 'FG Entry', 'link' => 'forms/fg_entry.php', 'icon' => 'fas fa-plus-square'],
+                ['text' => 'FG Entry (Roll) Report', 'link' => 'reports/fg_entry_roll_report.php', 'icon' => 'fas fa-scroll'],
+            ]],
         ],
 
         // ========== DEFAULT USER - Basic Access ==========
@@ -1124,15 +1129,24 @@ if ($userRole === 'prod_user') {
       box-shadow: none !important;
       display: block;
       background-color: #fff;
+      overflow: auto !important;
     }
 
     /* Eliminate ALL body margin & padding */
     body,
-    html,
+    html {
+      margin: 0 !important;
+      padding: 0 !important;
+      background-color: #fff !important;
+    }
+    
+    /* Allow iframe body to scroll */
     iframe body {
       margin: 0 !important;
       padding: 0 !important;
       background-color: #fff !important;
+      overflow-y: auto !important;
+      overflow-x: hidden !important;
     }
 
     /* Close Sidebar Button */

@@ -161,38 +161,58 @@ $recycledMaterials = [
 ];
 
 // Get total recycled quantities from scrap_recycle
-// Sum all recycled_qty where scrap_category matches
-// Get ALL recycled quantities and their categories
-// Also get scrap_type to help determine category if needed
-$recycledQuery = $conn->query("
-    SELECT 
-        s.id as scrap_entry_id,
-        s.scrap_category,
-        s.scrap_type,
-        s.scrap_product,
-        sr.recycled_qty,
-        s.is_deleted,
-        sr.id as recycle_entry_id
-    FROM scrap_recycle sr
-    INNER JOIN scrap s ON sr.scrap_id = s.id
-    ORDER BY s.id, sr.id
-");
-
-// Calculate recycled totals
+// Use production_category column if available, otherwise fallback to side_cut_scrap.category
 $recycledTotals = [];
 
-if ($recycledQuery) {
-    while ($row = $recycledQuery->fetch_assoc()) {
-        $category = trim($row['scrap_category'] ?? '');
-        $qty = (float)$row['recycled_qty'];
-        $isDeleted = (int)$row['is_deleted'];
-        
-        // Only count if not deleted
-        if ($isDeleted == 0 && !empty($category)) {
-            // Case-insensitive matching for scrap categories
+// Check if production_category column exists in scrap_recycle
+$colCheck = $conn->query("SHOW COLUMNS FROM scrap_recycle LIKE 'production_category'");
+$hasProductionCategory = $colCheck && $colCheck->num_rows > 0;
+
+if ($hasProductionCategory) {
+    // Use production_category column directly
+    $recycledQuery = $conn->query("
+        SELECT 
+            production_category,
+            COALESCE(SUM(recycled_qty), 0) as total_qty
+        FROM scrap_recycle
+        WHERE scrap_type = 'side_cut'
+          AND production_category IS NOT NULL
+          AND production_category != ''
+        GROUP BY production_category
+    ");
+    
+    if ($recycledQuery) {
+        while ($row = $recycledQuery->fetch_assoc()) {
+            $category = trim($row['production_category'] ?? '');
+            $qty = (float)$row['total_qty'];
+            
             if (stripos($category, 'Sheet Production') !== false) {
                 $recycledTotals['sheet_production'] = ($recycledTotals['sheet_production'] ?? 0) + $qty;
-            } elseif (stripos($category, 'Swing') !== false && stripos($category, 'Sheet Production') === false) {
+            } elseif (stripos($category, 'Swing') !== false || stripos($category, 'Sewing Production') !== false) {
+                $recycledTotals['swing'] = ($recycledTotals['swing'] ?? 0) + $qty;
+            }
+        }
+    }
+} else {
+    // Fallback: query from scrap_recycle joined with side_cut_scrap
+    $recycledQuery = $conn->query("
+        SELECT 
+            scs.category,
+            COALESCE(SUM(sr.recycled_qty), 0) as total_qty
+        FROM scrap_recycle sr
+        INNER JOIN side_cut_scrap scs ON sr.scrap_id = scs.id AND sr.scrap_type = 'side_cut'
+        WHERE sr.scrap_type = 'side_cut'
+        GROUP BY scs.category
+    ");
+    
+    if ($recycledQuery) {
+        while ($row = $recycledQuery->fetch_assoc()) {
+            $category = trim($row['category'] ?? '');
+            $qty = (float)$row['total_qty'];
+            
+            if (stripos($category, 'Sheet Production') !== false) {
+                $recycledTotals['sheet_production'] = ($recycledTotals['sheet_production'] ?? 0) + $qty;
+            } elseif (stripos($category, 'Swing') !== false || stripos($category, 'Sewing Production') !== false) {
                 $recycledTotals['swing'] = ($recycledTotals['swing'] ?? 0) + $qty;
             }
         }
@@ -425,9 +445,201 @@ $recycledMaterials['swing'] = max(0, ($recycledTotals['swing'] ?? 0) - ($usedAmo
   .qty-limit-popup-close:active {
     transform: scale(0.95);
   }
+  
+  /* Toast Notification Styles */
+  #toastContainer {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    z-index: 10000;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    pointer-events: none;
+  }
+  
+  .toast {
+    background: white;
+    border-radius: 12px;
+    padding: 18px 22px;
+    min-width: 320px;
+    max-width: 500px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    pointer-events: auto;
+    animation: slideInRight 0.4s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+    border-left: 5px solid;
+    position: relative;
+    overflow: hidden;
+  }
+  
+  .toast::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.5), transparent);
+    animation: shimmer 2s infinite;
+  }
+  
+  .toast.success {
+    background: linear-gradient(135deg, #ffffff 0%, #f0fdf4 100%);
+    border-left-color: #10b981;
+    box-shadow: 0 8px 24px rgba(16, 185, 129, 0.3);
+  }
+  
+  .toast.success::before {
+    background: linear-gradient(90deg, transparent, rgba(16, 185, 129, 0.3), transparent);
+  }
+  
+  .toast.error {
+    background: linear-gradient(135deg, #ffffff 0%, #fef2f2 100%);
+    border-left-color: #ef4444;
+    box-shadow: 0 8px 24px rgba(239, 68, 68, 0.3);
+  }
+  
+  .toast.error::before {
+    background: linear-gradient(90deg, transparent, rgba(239, 68, 68, 0.3), transparent);
+  }
+  
+  .toast.warning {
+    background: linear-gradient(135deg, #ffffff 0%, #fffbeb 100%);
+    border-left-color: #f59e0b;
+    box-shadow: 0 8px 24px rgba(245, 158, 11, 0.3);
+  }
+  
+  .toast.warning::before {
+    background: linear-gradient(90deg, transparent, rgba(245, 158, 11, 0.3), transparent);
+  }
+  
+  .toast-icon {
+    font-size: 24px;
+    flex-shrink: 0;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: bold;
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+  }
+  
+  .toast.success .toast-icon {
+    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    color: white;
+  }
+  
+  .toast.error .toast-icon {
+    background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+    color: white;
+  }
+  
+  .toast.warning .toast-icon {
+    background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+    color: white;
+  }
+  
+  .toast-message {
+    flex: 1;
+    font-size: 15px;
+    font-weight: 500;
+    line-height: 1.5;
+  }
+  
+  .toast.success .toast-message {
+    color: #065f46;
+  }
+  
+  .toast.error .toast-message {
+    color: #991b1b;
+  }
+  
+  .toast.warning .toast-message {
+    color: #92400e;
+  }
+  
+  .toast-close {
+    background: rgba(0, 0, 0, 0.05);
+    border: none;
+    font-size: 20px;
+    font-weight: bold;
+    color: #6b7280;
+    cursor: pointer;
+    padding: 4px;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: all 0.2s ease;
+  }
+  
+  .toast-close:hover {
+    background: rgba(0, 0, 0, 0.1);
+    color: #374151;
+    transform: scale(1.1);
+  }
+  
+  .toast.success .toast-close:hover {
+    background: rgba(16, 185, 129, 0.1);
+    color: #10b981;
+  }
+  
+  .toast.error .toast-close:hover {
+    background: rgba(239, 68, 68, 0.1);
+    color: #ef4444;
+  }
+  
+  .toast.warning .toast-close:hover {
+    background: rgba(245, 158, 11, 0.1);
+    color: #f59e0b;
+  }
+  
+  @keyframes shimmer {
+    0% {
+      transform: translateX(-100%);
+    }
+    100% {
+      transform: translateX(100%);
+    }
+  }
+  
+  @keyframes slideInRight {
+    from {
+      transform: translateX(100%);
+      opacity: 0;
+    }
+    to {
+      transform: translateX(0);
+      opacity: 1;
+    }
+  }
+  
+  @keyframes slideOutRight {
+    from {
+      transform: translateX(0);
+      opacity: 1;
+    }
+    to {
+      transform: translateX(100%);
+      opacity: 0;
+    }
+  }
+  
+  .toast.hiding {
+    animation: slideOutRight 0.3s ease-in forwards;
+  }
 </style>
 </head>
 <body>
+<div id="toastContainer" aria-live="polite" aria-atomic="true"></div>
 <div class="container">
   <h1>Fiber Received Entry</h1>
 
@@ -510,7 +722,7 @@ $recycledMaterials['swing'] = max(0, ($recycledTotals['swing'] ?? 0) - ($usedAmo
       <div class="btn-group" id="recycledTypeGroup">
         <button type="button" class="btn" data-value="none" onclick="selectRecycledType(this, 'none')">No Recycled</button>
         <button type="button" class="btn" data-value="sheet_production" onclick="selectRecycledType(this, 'sheet_production')">Sheet Production</button>
-        <button type="button" class="btn" data-value="swing" onclick="selectRecycledType(this, 'swing')">Swing</button>
+        <button type="button" class="btn" data-value="swing" onclick="selectRecycledType(this, 'swing')">Sewing</button>
       </div>
       <input type="hidden" id="recycledType" name="recycledType" value="none">
     </div>
@@ -853,8 +1065,80 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 });
 
+// Toast Notification Function
+function showToast(message, type = 'success', duration = 5000) {
+    const container = document.getElementById('toastContainer');
+    if (!container) return;
+    
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    
+    const icon = document.createElement('span');
+    icon.className = 'toast-icon';
+    if (type === 'success') {
+        icon.textContent = '✓';
+    } else if (type === 'error') {
+        icon.textContent = '✕';
+    } else if (type === 'warning') {
+        icon.textContent = '⚠';
+    }
+    
+    const messageEl = document.createElement('div');
+    messageEl.className = 'toast-message';
+    messageEl.textContent = message;
+    
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'toast-close';
+    closeBtn.textContent = '×';
+    closeBtn.setAttribute('aria-label', 'Close notification');
+    closeBtn.onclick = () => removeToast(toast);
+    
+    toast.appendChild(icon);
+    toast.appendChild(messageEl);
+    toast.appendChild(closeBtn);
+    container.appendChild(toast);
+    
+    // Auto-remove after duration
+    let autoHide;
+    if (duration > 0) {
+        autoHide = setTimeout(() => {
+            removeToast(toast);
+        }, duration);
+    }
+    
+    function removeToast(toastElement) {
+        if (autoHide) {
+            clearTimeout(autoHide);
+        }
+        toastElement.classList.add('hiding');
+        setTimeout(() => {
+            if (toastElement.parentNode) {
+                toastElement.parentNode.removeChild(toastElement);
+            }
+        }, 300);
+    }
+}
+
+// Fetch latest recycled availability per type
+async function fetchRecycledAvailableAmount(type) {
+    if (!type) return null;
+    try {
+        const response = await fetch(`api/get_recycled_available_material.php?type=${encodeURIComponent(type)}`);
+        if (!response.ok) {
+            return null;
+        }
+        const data = await response.json();
+        if (data.success) {
+            return parseFloat(data.available_amount) || 0;
+        }
+    } catch (error) {
+        console.error('Failed to fetch recycled availability', error);
+    }
+    return null;
+}
+
 // Handle recycled type selection
-function selectRecycledType(button, type) {
+async function selectRecycledType(button, type) {
     const group = document.getElementById('recycledTypeGroup');
     group.querySelectorAll('.btn').forEach(btn => btn.classList.remove('selected'));
     button.classList.add('selected');
@@ -868,15 +1152,18 @@ function selectRecycledType(button, type) {
     if (type === 'sheet_production' || type === 'swing') {
         // Show recycled amount field with available quantity
         recycledAmountField.style.display = 'block';
-        
-        const availableQty = recycledMaterialsData[type] || 0;
+        let availableQty = recycledMaterialsData[type] || 0;
+        const fetchedQty = await fetchRecycledAvailableAmount(type);
+        if (fetchedQty !== null) {
+            availableQty = fetchedQty;
+        }
         availableRecycledInput.value = availableQty.toFixed(2);
         recycledAmountInput.value = '0';
         recycledAmountInput.max = availableQty;
         
         // Show warning if no recycled material available
         if (availableQty === 0 || availableQty === null || availableQty === undefined) {
-            alert('No recycled material available for ' + (type === 'sheet_production' ? 'Sheet Production' : 'Swing') + '.\nPlease check the Recycle Entry module.');
+            showToast('No recycled material available for ' + (type === 'sheet_production' ? 'Sheet Production' : 'Sewing') + '. Please check the Recycle Entry module.', 'warning', 6000);
         }
     } else {
         // Hide recycled amount field and reset to 0
@@ -944,7 +1231,7 @@ function updateSummary() {
     if (project) summary += ` | Project: ${project}`;
     if (amount) summary += ` | Amount: ${amount}kg`;
     if (recycledType !== 'none' && recycledAmount && parseFloat(recycledAmount) > 0) {
-        const typeLabel = recycledType === 'sheet_production' ? 'Sheet Production' : 'Swing';
+        const typeLabel = recycledType === 'sheet_production' ? 'Sheet Production' : 'Sewing';
         summary += ` | Recycled (${typeLabel}): ${recycledAmount}kg`;
     }
     if (totalAmount) summary += ` | Total: ${totalAmount}kg`;
@@ -998,7 +1285,7 @@ function submitFiberEntry() {
     if (!data.beltNumber) missing.push("Bale Number");
     
     if (missing.length > 0) {
-        alert("Please fill all required fields. Missing: " + missing.join(", "));
+        showToast("Please fill all required fields. Missing: " + missing.join(", "), 'error', 6000);
         return;
     }
     
@@ -1007,7 +1294,7 @@ function submitFiberEntry() {
     const availableRecycled = parseFloat(document.getElementById('availableRecycled').value) || 0;
     
     if (data.recycledType !== 'none' && recycledAmount > availableRecycled) {
-        alert("Recycled amount (" + recycledAmount + " kg) cannot exceed available quantity (" + availableRecycled + " kg).\nPlease adjust the quantity.");
+        showToast("Recycled amount (" + recycledAmount + " kg) cannot exceed available quantity (" + availableRecycled + " kg). Please adjust the quantity.", 'error', 6000);
         return;
     }
 
@@ -1020,18 +1307,18 @@ function submitFiberEntry() {
     .then(resp => {
         if (resp.success === true || resp.status === 'success') {
             console.log('Submission successful. Reference:', data.reference, 'Amount:', data.amount);
-            alert("Fiber entry submitted successfully! Entry Code: " + (resp.entry_code || 'N/A'));
+            showToast("Fiber entry submitted successfully! Entry Code: " + (resp.entry_code || 'N/A'), 'success', 5000);
             // Force a hard reload to clear cache and get fresh data with updated available quantities
             setTimeout(function() {
                 window.location.href = window.location.href.split('?')[0] + '?t=' + new Date().getTime();
             }, 500);
         } else {
-            alert("Submission failed: " + (resp.message || "Unknown error"));
+            showToast("Submission failed: " + (resp.message || "Unknown error"), 'error', 6000);
         }
     })
     .catch(err => {
         console.error(err);
-        alert("Error submitting entry.");
+        showToast("Error submitting entry.", 'error', 6000);
     });
 }
 
@@ -1054,7 +1341,7 @@ function clearForm() {
     
     updateTimeAndShift();
     updateSummary();
-    alert("Form cleared successfully!");
+    showToast("Form cleared successfully!", 'success', 3000);
 }
 </script>
 </body>

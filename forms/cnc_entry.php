@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 // Enable error reporting for debugging
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
@@ -75,12 +75,19 @@ if ($table_check && $table_check->num_rows > 0) {
     // Check if cnc_id column exists
     $column_check = $conn->query("SHOW COLUMNS FROM cnc_entries LIKE 'cnc_id'");
     if ($column_check && $column_check->num_rows > 0) {
-        $last_cnc = $conn->query("SELECT MAX(CAST(SUBSTRING(cnc_id, -3) AS UNSIGNED)) as last_num FROM cnc_entries WHERE DATE(date_time) = '$current_date'");
-        if ($last_cnc && $last_cnc->num_rows > 0) {
-            $row = $last_cnc->fetch_assoc();
-            if ($row['last_num']) {
-                $next_cnc_number = $row['last_num'] + 1;
+        // Use prepared statement for date query
+        $lastCncStmt = $conn->prepare("SELECT MAX(CAST(SUBSTRING(cnc_id, -3) AS UNSIGNED)) as last_num FROM cnc_entries WHERE DATE(date_time) = ?");
+        if ($lastCncStmt) {
+            $lastCncStmt->bind_param("s", $current_date);
+            $lastCncStmt->execute();
+            $last_cnc = $lastCncStmt->get_result();
+            if ($last_cnc && $last_cnc->num_rows > 0) {
+                $row = $last_cnc->fetch_assoc();
+                if ($row['last_num']) {
+                    $next_cnc_number = $row['last_num'] + 1;
+                }
             }
+            $lastCncStmt->close();
         }
     }
 }

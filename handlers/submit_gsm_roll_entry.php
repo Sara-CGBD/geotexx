@@ -46,19 +46,27 @@ try {
         $entryIds = [];
         foreach ($fiberInputEntries as $entry) {
             if (isset($entry['entry_id']) && !empty($entry['entry_id'])) {
-                $entryIds[] = $conn->real_escape_string($entry['entry_id']);
+                $entryIds[] = $entry['entry_id']; // Will use in prepared statement, no need to escape
             }
         }
         
         if (!empty($entryIds)) {
-            $entryIdsStr = "'" . implode("','", $entryIds) . "'";
-            $weightQuery = $conn->query("
+            // Use prepared statement with IN clause for security
+            $placeholders = str_repeat('?,', count($entryIds) - 1) . '?';
+            $weightStmt = $conn->prepare("
                 SELECT COALESCE(SUM(total_weight), 0) as total_weight_sum
                 FROM fiber_to_roll_entry
-                WHERE entry_id IN ({$entryIdsStr})
+                WHERE entry_id IN ($placeholders)
             ");
-            if ($weightQuery && $weightRow = $weightQuery->fetch_assoc()) {
-                $totalWeight = (float)$weightRow['total_weight_sum'];
+            if ($weightStmt) {
+                $types = str_repeat('s', count($entryIds));
+                $weightStmt->bind_param($types, ...$entryIds);
+                $weightStmt->execute();
+                $weightQuery = $weightStmt->get_result();
+                if ($weightQuery && $weightRow = $weightQuery->fetch_assoc()) {
+                    $totalWeight = (float)$weightRow['total_weight_sum'];
+                }
+                $weightStmt->close();
             }
         }
     }

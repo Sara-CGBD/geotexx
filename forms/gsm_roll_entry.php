@@ -353,6 +353,9 @@ $manufacturerCodes = [
   </div>
 
 <script>
+  // Manufacturer name mappings for reference generation
+  const manufacturerCodes = <?php echo json_encode($manufacturerCodes); ?>;
+  
   // Store selected fiber input entries
   let selectedFiberEntries = [];
   let manufacturerPercentages = {};
@@ -667,21 +670,29 @@ $manufacturerCodes = [
     // Format roll number (pad to 2 digits)
     const rollFormatted = 'R' + String(parseInt(rollNo)).padStart(2, '0');
     
-    // Build manufacturer percentage string with material name and total percentage
-    // Format: MaterialName.TotalPercentage%
+    // Build manufacturer percentage string with material code and total percentage
+    // Format: Code.TotalPercentage% (e.g., H.10% J.10% T.3%)
+    // Use first letter/word of manufacturer name or mapping from manufacturerCodes
     let manufacturerCodesStr = '';
     Object.keys(manufacturerPercentages).sort().forEach(manufacturer => {
       const percentage = Math.round(manufacturerPercentages[manufacturer]);
       if (manufacturerCodesStr !== '') {
         manufacturerCodesStr += ' ';
       }
-      // Format: MaterialName.TotalPercentage%
-      manufacturerCodesStr += manufacturer + '.' + percentage + '%';
+      // Get manufacturer code: use mapping if available, otherwise use first letter
+      let code = manufacturerCodes[manufacturer];
+      if (!code) {
+        // If no mapping, use first letter of manufacturer name
+        code = manufacturer.trim().charAt(0).toUpperCase();
+      }
+      // Format: Code.TotalPercentage% (e.g., H.10% instead of Hubei Botao.10%)
+      manufacturerCodesStr += code + '.' + percentage + '%';
     });
     
-    // Build reference: 3.0L122JAN26- R04- GT0.9H0.1- Texofib.24%
-    // Format: GSM + L + LineNo + Year + Month + Day - RollNo - BatchInfo - MaterialName.TotalPercentage%
-    // Example: 3.0L122JAN26- R04- GT0.9H0.1- Texofib.24%
+    // Build reference: 3.0L126JAN28- R03- GT0.9H0.1- H.10% J.10% T.3%
+    // Format: GSM + L + LineNo + Year + Month + Day - RollNo - BatchInfo - Code.TotalPercentage%
+    // Example: 3.0L126JAN28- R03- GT0.9H0.1- H.10% J.10% T.3%
+    // Manufacturer codes: H=Hubei Botao, J=Jiangsu Botao, T=Texofib, etc.
     let reference = `${gsmFormatted}${lineCode}${year}${month}${day}- ${rollFormatted}- ${batchInfo}- ${manufacturerCodesStr}`;
     
     referenceField.value = reference;

@@ -34,21 +34,22 @@ try {
     $conn = SecurityConfig::getConnection();
 
     // Ensure scrap_recycle table exists
-    $conn->query("CREATE TABLE IF NOT EXISTS scrap_recycle (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        scrap_id INT NOT NULL,
-        recycled_qty DECIMAL(10,2) NOT NULL,
-        user_id INT NOT NULL,
-        recycled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        remarks TEXT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+        $conn->query("CREATE TABLE IF NOT EXISTS scrap_recycle (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            scrap_id INT NOT NULL,
+            recycled_qty DECIMAL(10,2) NOT NULL,
+            user_id INT NOT NULL,
+            recycled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            remarks TEXT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
     // Ensure all required columns exist
     $required_columns = [
         'recycle_id' => 'VARCHAR(20)',
         'remarks' => 'TEXT',
-        'scrap_type' => 'VARCHAR(20)'
+        'scrap_type' => 'VARCHAR(20)',
+        'production_category' => 'VARCHAR(50)'
     ];
     
     foreach ($required_columns as $column_name => $column_type) {
@@ -67,12 +68,17 @@ try {
         if ($column_check) $column_check->close();
     }
 
+    if ($scrap_type === 'side_cut') {
+        $conn->query("ALTER TABLE side_cut_scrap ADD COLUMN IF NOT EXISTS recycled_amount_kg DECIMAL(10,2) DEFAULT 0");
+    }
+
     // Collect and validate POST data
     $recycle_id = trim($_POST['recycle_id'] ?? '');
     $scrap_id = (int)($_POST['scrap_id'] ?? 0);
     $scrap_type = trim($_POST['scrap_type'] ?? 'scrap'); // 'scrap' or 'side_cut'
     $recycled_qty = (float)($_POST['recycled_qty'] ?? 0);
     $remarks = trim($_POST['remarks'] ?? '');
+    $production_category = trim($_POST['category'] ?? '');
     $user_id = $_SESSION['user_id'];
 
     // Debug logging
@@ -148,11 +154,11 @@ try {
 
     // Insert recycling record
     $stmt = $conn->prepare("
-        INSERT INTO scrap_recycle (recycle_id, scrap_id, scrap_type, recycled_qty, user_id, remarks, machine_id, recycled_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+        INSERT INTO scrap_recycle (recycle_id, scrap_id, scrap_type, recycled_qty, user_id, remarks, machine_id, production_category, recycled_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())
     ");
     $machine_id = $_POST['machine_id'] ?? '';
-    $stmt->bind_param("sisdiss", $recycle_id, $scrap_id, $scrap_type, $recycled_qty, $user_id, $remarks, $machine_id);
+    $stmt->bind_param("sisdisss", $recycle_id, $scrap_id, $scrap_type, $recycled_qty, $user_id, $remarks, $machine_id, $production_category);
 
     if ($stmt->execute()) {
         $insert_id = $stmt->insert_id;
@@ -161,6 +167,14 @@ try {
         // Log the activity
         error_log("Scrap recycling successful - Recycle ID: $recycle_id, DB ID: $insert_id, Scrap ID: $scrap_id, Quantity: $recycled_qty, User: " . $_SESSION['username']);
         
+        if ($scrap_type === 'side_cut') {
+            $updateStmt = $conn->prepare("UPDATE side_cut_scrap SET recycled_amount_kg = recycled_amount_kg + ? WHERE id = ?");
+            if ($updateStmt) {
+                $updateStmt->bind_param('di', $recycled_qty, $scrap_id);
+                $updateStmt->execute();
+                $updateStmt->close();
+            }
+        }
         header("Location: ../forms/scrap_recycle_entry.php?success=" . urlencode('Scrap recycling recorded successfully! Recycle ID: ' . $recycle_id));
     } else {
         $stmt->close();

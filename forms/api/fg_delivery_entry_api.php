@@ -36,21 +36,29 @@ try {
         $dbName = $dbNameRow ? $dbNameRow['d'] : '';
         if ($dbNameRes) { $dbNameRes->close(); }
         
-        $colCheckSql = "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='" . $conn->real_escape_string($dbName) . "' AND TABLE_NAME='fg_delivery' AND COLUMN_NAME='delivery_id'";
+        // Check for delivery_id column - using prepared statement
+        $colCheckStmt = $conn->prepare("SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'fg_delivery' AND COLUMN_NAME = 'delivery_id'");
         $hasDeliveryId = false;
-        if ($cc = $conn->query($colCheckSql)) {
-            $hasDeliveryId = $cc->num_rows > 0;
-            $cc->close();
+        if ($colCheckStmt) {
+            $colCheckStmt->bind_param("s", $dbName);
+            $colCheckStmt->execute();
+            $cc = $colCheckStmt->get_result();
+            $hasDeliveryId = $cc && $cc->num_rows > 0;
+            $colCheckStmt->close();
         }
         
         if ($hasDeliveryId) {
-            $maxSql = "SELECT MAX(CAST(SUBSTRING_INDEX(delivery_id, '-', -1) AS UNSIGNED)) AS last_num FROM fg_delivery WHERE delivery_id LIKE '" . $conn->real_escape_string($delivery_prefix) . "%'";
-            if ($r = $conn->query($maxSql)) {
-                if ($row = $r->fetch_assoc()) {
+            $maxStmt = $conn->prepare("SELECT MAX(CAST(SUBSTRING_INDEX(delivery_id, '-', -1) AS UNSIGNED)) AS last_num FROM fg_delivery WHERE delivery_id LIKE ?");
+            if ($maxStmt) {
+                $deliveryPrefixPattern = $delivery_prefix . '%';
+                $maxStmt->bind_param("s", $deliveryPrefixPattern);
+                $maxStmt->execute();
+                $r = $maxStmt->get_result();
+                if ($r && $row = $r->fetch_assoc()) {
                     $last_num = (int)($row['last_num'] ?? 0);
                     $next_delivery_number = $last_num + 1;
                 }
-                $r->close();
+                $maxStmt->close();
             }
         }
         
@@ -60,21 +68,29 @@ try {
         $challan_prefix = 'CN-' . $date_part . '-';
         $next_challan_number = 1;
         
-        $colCheckChallan = "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='" . $conn->real_escape_string($dbName) . "' AND TABLE_NAME='fg_delivery' AND COLUMN_NAME='challan_no'";
+        // Check for challan_no column - using prepared statement
+        $colCheckChallanStmt = $conn->prepare("SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'fg_delivery' AND COLUMN_NAME = 'challan_no'");
         $hasChallanNo = false;
-        if ($cc = $conn->query($colCheckChallan)) {
-            $hasChallanNo = $cc->num_rows > 0;
-            $cc->close();
+        if ($colCheckChallanStmt) {
+            $colCheckChallanStmt->bind_param("s", $dbName);
+            $colCheckChallanStmt->execute();
+            $cc = $colCheckChallanStmt->get_result();
+            $hasChallanNo = $cc && $cc->num_rows > 0;
+            $colCheckChallanStmt->close();
         }
         
         if ($hasChallanNo) {
-            $maxChallanSql = "SELECT MAX(CAST(SUBSTRING_INDEX(challan_no, '-', -1) AS UNSIGNED)) AS last_num FROM fg_delivery WHERE challan_no LIKE '" . $conn->real_escape_string($challan_prefix) . "%'";
-            if ($r = $conn->query($maxChallanSql)) {
-                if ($row = $r->fetch_assoc()) {
+            $maxChallanStmt = $conn->prepare("SELECT MAX(CAST(SUBSTRING_INDEX(challan_no, '-', -1) AS UNSIGNED)) AS last_num FROM fg_delivery WHERE challan_no LIKE ?");
+            if ($maxChallanStmt) {
+                $challanPrefixPattern = $challan_prefix . '%';
+                $maxChallanStmt->bind_param("s", $challanPrefixPattern);
+                $maxChallanStmt->execute();
+                $r = $maxChallanStmt->get_result();
+                if ($r && $row = $r->fetch_assoc()) {
                     $last_num = (int)($row['last_num'] ?? 0);
                     $next_challan_number = $last_num + 1;
                 }
-                $r->close();
+                $maxChallanStmt->close();
             }
         }
         

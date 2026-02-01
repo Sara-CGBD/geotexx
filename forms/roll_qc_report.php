@@ -137,75 +137,108 @@ if ($tableExists) {
             // If total_weight is 0 or null, calculate from fiber_input_entries JSON
             // This ensures we get the exact amount that was selected and passed through GSM and Roll Entry
             if ($originalWeight <= 0) {
-                // Fetch the fiber_input_entries JSON to get entry IDs
-                $fiberEntriesQuery = $conn->query("
+                // Fetch the fiber_input_entries JSON to get entry IDs - using prepared statement
+                $fiberStmt = $conn->prepare("
                     SELECT fiber_input_entries 
                     FROM gsm_roll_entry 
-                    WHERE reference = '{$conn->real_escape_string($referenceNumber)}' 
-                    AND roll_no = " . (int)$rollNo . "
+                    WHERE reference = ? 
+                    AND roll_no = ?
                     LIMIT 1
                 ");
-                if ($fiberEntriesQuery && $fiberRow = $fiberEntriesQuery->fetch_assoc()) {
-                    $fiberEntries = json_decode($fiberRow['fiber_input_entries'] ?? '[]', true);
-                    if (is_array($fiberEntries) && !empty($fiberEntries)) {
-                        // Build list of entry IDs
-                        $entryIds = [];
-                        foreach ($fiberEntries as $entry) {
-                            if (isset($entry['entry_id']) && !empty($entry['entry_id'])) {
-                                $entryIds[] = "'" . $conn->real_escape_string($entry['entry_id']) . "'";
+                if ($fiberStmt) {
+                    $fiberStmt->bind_param("si", $referenceNumber, $rollNo);
+                    $fiberStmt->execute();
+                    $fiberResult = $fiberStmt->get_result();
+                    if ($fiberResult && $fiberRow = $fiberResult->fetch_assoc()) {
+                        $fiberEntries = json_decode($fiberRow['fiber_input_entries'] ?? '[]', true);
+                        if (is_array($fiberEntries) && !empty($fiberEntries)) {
+                            // Build list of entry IDs for prepared statement
+                            $entryIds = [];
+                            foreach ($fiberEntries as $entry) {
+                                if (isset($entry['entry_id']) && !empty($entry['entry_id'])) {
+                                    $entryIds[] = $entry['entry_id'];
+                                }
                             }
-                        }
-                        
-                        // Fetch total weights from fiber_to_roll_entry table
-                        if (!empty($entryIds)) {
-                            $entryIdsStr = implode(',', $entryIds);
-                            $weightQuery = $conn->query("
-                                SELECT COALESCE(SUM(total_weight), 0) as total_weight_sum
-                                FROM fiber_to_roll_entry
-                                WHERE entry_id IN ({$entryIdsStr})
-                            ");
-                            if ($weightQuery && $weightRow = $weightQuery->fetch_assoc()) {
-                                $originalWeight = (float)$weightRow['total_weight_sum'];
-                                
-                                // Update the gsm_roll_entry record with calculated weight
-                                if ($originalWeight > 0) {
-                                    $conn->query("
-                                        UPDATE gsm_roll_entry 
-                                        SET total_weight = {$originalWeight}
-                                        WHERE reference = '{$conn->real_escape_string($referenceNumber)}' 
-                                        AND roll_no = " . (int)$rollNo . "
-                                    ");
+                            
+                            // Fetch total weights from fiber_to_roll_entry table using prepared statement
+                            if (!empty($entryIds)) {
+                                $placeholders = str_repeat('?,', count($entryIds) - 1) . '?';
+                                $weightStmt = $conn->prepare("
+                                    SELECT COALESCE(SUM(total_weight), 0) as total_weight_sum
+                                    FROM fiber_to_roll_entry
+                                    WHERE entry_id IN ($placeholders)
+                                ");
+                                if ($weightStmt) {
+                                    $types = str_repeat('s', count($entryIds));
+                                    $weightStmt->bind_param($types, ...$entryIds);
+                                    $weightStmt->execute();
+                                    $weightResult = $weightStmt->get_result();
+                                    if ($weightResult && $weightRow = $weightResult->fetch_assoc()) {
+                                        $originalWeight = (float)$weightRow['total_weight_sum'];
+                                        
+                                        // Update the gsm_roll_entry record with calculated weight using prepared statement
+                                        if ($originalWeight > 0) {
+                                            $updateStmt = $conn->prepare("
+                                                UPDATE gsm_roll_entry 
+                                                SET total_weight = ?
+                                                WHERE reference = ? 
+                                                AND roll_no = ?
+                                            ");
+                                            if ($updateStmt) {
+                                                $updateStmt->bind_param("dsi", $originalWeight, $referenceNumber, $rollNo);
+                                                $updateStmt->execute();
+                                                $updateStmt->close();
+                                            }
+                                        }
+                                    }
+                                    $weightStmt->close();
                                 }
                             }
                         }
                     }
+                    $fiberStmt->close();
                 }
             }
             
-            // Calculate used amount from roll_qc_reports
-            $referenceEscaped = $conn->real_escape_string($referenceNumber);
-            
+            // Calculate used amount from roll_qc_reports - using prepared statement
             if ($rollNo === null || $rollNo === '') {
-                $usedQueryStr = "
+                $usedStmt = $conn->prepare("
                     SELECT COALESCE(SUM(product_amount), 0) as used_amount
                     FROM roll_qc_reports 
-                    WHERE reference_number = '{$referenceEscaped}'
+                    WHERE reference_number = ?
                     AND (roll_no IS NULL OR roll_no = '')
-                ";
+                ");
+                if ($usedStmt) {
+                    $usedStmt->bind_param("s", $referenceNumber);
+                    $usedStmt->execute();
+                    $usedResult = $usedStmt->get_result();
+                    $usedAmount = 0;
+                    if ($usedResult && $usedRow = $usedResult->fetch_assoc()) {
+                        $usedAmount = (float)$usedRow['used_amount'];
+                    }
+                    $usedStmt->close();
+                } else {
+                    $usedAmount = 0;
+                }
             } else {
-                $rollNoEscaped = $conn->real_escape_string($rollNo);
-                $usedQueryStr = "
+                $usedStmt = $conn->prepare("
                     SELECT COALESCE(SUM(product_amount), 0) as used_amount
                     FROM roll_qc_reports 
-                    WHERE reference_number = '{$referenceEscaped}'
-                    AND roll_no = '{$rollNoEscaped}'
-                ";
-            }
-            
-            $usedResult = $conn->query($usedQueryStr);
-            $usedAmount = 0;
-            if ($usedResult && $usedRow = $usedResult->fetch_assoc()) {
-                $usedAmount = (float)$usedRow['used_amount'];
+                    WHERE reference_number = ?
+                    AND roll_no = ?
+                ");
+                if ($usedStmt) {
+                    $usedStmt->bind_param("ss", $referenceNumber, $rollNo);
+                    $usedStmt->execute();
+                    $usedResult = $usedStmt->get_result();
+                    $usedAmount = 0;
+                    if ($usedResult && $usedRow = $usedResult->fetch_assoc()) {
+                        $usedAmount = (float)$usedRow['used_amount'];
+                    }
+                    $usedStmt->close();
+                } else {
+                    $usedAmount = 0;
+                }
             }
             
             // Calculate available amount
